@@ -10,12 +10,17 @@ use encore::{
 };
 use std::{path::PathBuf, sync::mpsc, time::Duration as StdDuration};
 
+mod chords;
 mod clipboard;
 mod entry;
 mod expressions;
+mod grace;
 mod layout;
+mod lines;
+mod navigation;
 mod notation;
 mod parts;
+mod playback;
 mod regions;
 mod style;
 
@@ -151,6 +156,11 @@ pub struct EncoreApp {
     show_region_tools: bool,
     show_layout: bool,
     show_entry_style: bool,
+    navigation: navigation::Editor,
+    playback_editor: playback::Editor,
+    chord_editor: chords::Editor,
+    grace_editor: grace::Editor,
+    lines_editor: lines::Editor,
     master: f32,
     theme: Theme,
     needs_native_save: bool,
@@ -255,6 +265,11 @@ impl EncoreApp {
             show_region_tools: false,
             show_layout: false,
             show_entry_style: false,
+            navigation: Default::default(),
+            playback_editor: Default::default(),
+            chord_editor: Default::default(),
+            grace_editor: Default::default(),
+            lines_editor: Default::default(),
             master: 0.8,
             theme: Theme::Dark,
             needs_native_save: false,
@@ -297,6 +312,11 @@ impl EncoreApp {
     fn set_theme(&mut self, ctx: &egui::Context, theme: Theme) {
         self.theme = theme;
         apply_theme(ctx, theme);
+    }
+
+    fn exit_chord_entry(&mut self) {
+        self.chord_editor.active = false;
+        self.chord_editor.open = false;
     }
 
     fn dirty(&self) -> bool {
@@ -384,6 +404,11 @@ impl EncoreApp {
         self.show_region_tools = false;
         self.show_layout = false;
         self.show_entry_style = false;
+        self.navigation = Default::default();
+        self.playback_editor = Default::default();
+        self.chord_editor = Default::default();
+        self.grace_editor = Default::default();
+        self.lines_editor = Default::default();
         self.cursor_measure = 0;
         self.cursor_tick = 0;
         self.undo.clear();
@@ -597,6 +622,8 @@ impl EncoreApp {
     }
 
     fn stop(&mut self) {
+        self.playback_editor.pending_start = None;
+        self.playback_editor.bounds = None;
         self.stop_audition();
         if self.rendering_audio {
             self.worker = None;
@@ -629,6 +656,10 @@ impl EncoreApp {
                 p.pause();
                 return;
             }
+        }
+        if let Err(error) = self.prepare_playback_start() {
+            self.status = error;
+            return;
         }
         if self.playback.is_none() {
             match synth::Playback::new() {
@@ -701,6 +732,12 @@ impl EncoreApp {
                                 p.set_volume(self.master);
                                 p.play(audio);
                                 self.status = "Playing score • Space to pause".into();
+                                if let Some(seconds) = self.playback_editor.pending_start.take()
+                                    && let Err(error) = p.seek_seconds(seconds)
+                                {
+                                    self.status =
+                                        format!("Cannot start at the requested position: {error}");
+                                }
                             }
                         }
                         JobResult::Audio(Err(error)) => {
@@ -742,6 +779,9 @@ impl EncoreApp {
             self.clamp_cursor();
             self.skip_history = true;
             self.clear_region_selection();
+            if self.chord_editor.active {
+                self.chord_click(self.active_part, self.cursor_measure, self.cursor_tick);
+            }
             self.status = "Undo".into();
         }
     }
@@ -753,6 +793,9 @@ impl EncoreApp {
             self.clamp_cursor();
             self.skip_history = true;
             self.clear_region_selection();
+            if self.chord_editor.active {
+                self.chord_click(self.active_part, self.cursor_measure, self.cursor_tick);
+            }
             self.status = "Redo".into();
         }
     }
@@ -1008,6 +1051,12 @@ impl EncoreApp {
             self.show_region_tools = false;
             self.show_entry_style = false;
             self.expressions_editor.open = false;
+            self.navigation.open = false;
+            self.playback_editor.open = false;
+            self.chord_editor.active = false;
+            self.chord_editor.open = false;
+            self.grace_editor.open = false;
+            self.lines_editor.open = false;
             self.region_selection = None;
             self.notation_editor = Default::default();
             if self.midi_import.take().is_some() {
@@ -1037,6 +1086,11 @@ impl EncoreApp {
             || self.show_region_tools
             || self.show_entry_style
             || self.expressions_editor.open
+            || self.navigation.open
+            || self.playback_editor.open
+            || self.chord_editor.open
+            || self.grace_editor.open
+            || self.lines_editor.open
         {
             return;
         }
@@ -1046,12 +1100,15 @@ impl EncoreApp {
             if let Some(previous) = self.previous_part_view {
                 self.part_view = previous.is_some();
                 if let Some(index) = previous {
-                    self.selected_linked_part = index;
+                    self.activate_linked_part(index);
                 }
             }
             return;
         }
         if self.annotation_keyboard(ctx) {
+            return;
+        }
+        if self.chord_keyboard(ctx) {
             return;
         }
         if ctx.input(|input| {
@@ -1061,13 +1118,12 @@ impl EncoreApp {
         }) {
             let count = encore::parts::definitions(&self.score).len();
             if count > 0 {
-                self.selected_linked_part =
-                    if ctx.input(|input| input.key_pressed(egui::Key::Comma)) {
-                        (self.selected_linked_part + count - 1) % count
-                    } else {
-                        (self.selected_linked_part + 1) % count
-                    };
-                self.part_view = true;
+                let index = if ctx.input(|input| input.key_pressed(egui::Key::Comma)) {
+                    (self.selected_linked_part + count - 1) % count
+                } else {
+                    (self.selected_linked_part + 1) % count
+                };
+                self.activate_linked_part(index);
             }
             return;
         }
@@ -1085,6 +1141,11 @@ impl EncoreApp {
                 || self.show_region_tools
                 || self.show_entry_style
                 || self.expressions_editor.open
+                || self.navigation.open
+                || self.playback_editor.open
+                || self.chord_editor.open
+                || self.grace_editor.open
+                || self.lines_editor.open
             {
                 break;
             }
@@ -1129,6 +1190,7 @@ impl EncoreApp {
             if modifiers.command && !modifiers.alt {
                 let handled = match key {
                     egui::Key::A if modifiers.shift => {
+                        self.exit_chord_entry();
                         self.write_mode = false;
                         self.selected = None;
                         self.clear_region_selection();
@@ -1152,7 +1214,7 @@ impl EncoreApp {
                         true
                     }
                     egui::Key::Minus if !modifiers.shift => {
-                        self.zoom = (self.zoom - 0.1).max(0.4);
+                        self.zoom = (self.zoom - 0.1).max(0.1);
                         true
                     }
                     egui::Key::L if !self.write_mode && !modifiers.shift => {
@@ -1165,6 +1227,18 @@ impl EncoreApp {
                     }
                     egui::Key::M if !self.write_mode && modifiers.shift == mac => {
                         self.show_layout = true;
+                        true
+                    }
+                    egui::Key::G if modifiers.shift => {
+                        self.open_go_to();
+                        true
+                    }
+                    egui::Key::CloseBracket if !mac && !modifiers.shift => {
+                        self.fit_view(false);
+                        true
+                    }
+                    egui::Key::OpenBracket if !mac && !modifiers.shift => {
+                        self.fit_view(true);
                         true
                     }
                     egui::Key::N => {
@@ -1216,6 +1290,16 @@ impl EncoreApp {
                     continue;
                 }
             }
+            if mac && modifiers.mac_cmd && modifiers.alt && !modifiers.shift && !modifiers.ctrl {
+                if key == egui::Key::CloseBracket {
+                    self.fit_view(false);
+                    continue;
+                }
+                if key == egui::Key::OpenBracket {
+                    self.fit_view(true);
+                    continue;
+                }
+            }
             if key == egui::Key::Space && !modifiers.command && !modifiers.alt {
                 self.toggle_play();
                 continue;
@@ -1237,9 +1321,14 @@ impl EncoreApp {
                     ctx.input_mut(|input| {
                         input.consume_key(modifiers, key);
                     });
+                } else if self.view_keyboard(key, modifiers, mac) {
+                    continue;
                 } else if key == egui::Key::Delete {
                     self.delete_selected();
                 }
+                continue;
+            }
+            if self.view_keyboard(key, modifiers, mac) {
                 continue;
             }
             if let Some(command) = shortcuts::entry_command(self.entry_profile, key, modifiers, mac)
@@ -1472,6 +1561,19 @@ impl EncoreApp {
                             }
                         });
                         ui.menu_button("Layout", |ui| {
+                            if ui.button("Go to measure…").clicked() {
+                                self.open_go_to();
+                                ui.close();
+                            }
+                            if ui.button("Fit page width").clicked() {
+                                self.fit_view(false);
+                                ui.close();
+                            }
+                            if ui.button("Fit page in window").clicked() {
+                                self.fit_view(true);
+                                ui.close();
+                            }
+                            ui.separator();
                             if ui.button("Page and system layout…").clicked() {
                                 self.show_layout = true;
                                 ui.close();
@@ -1486,6 +1588,22 @@ impl EncoreApp {
                             }
                         });
                         ui.menu_button("Notation", |ui| {
+                            if ui
+                                .button("Octave, pedal, trill and glissando lines…")
+                                .clicked()
+                            {
+                                self.open_lines();
+                                ui.close();
+                            }
+                            if ui.button("Grace notes…").clicked() {
+                                self.open_grace();
+                                ui.close();
+                            }
+                            if ui.button("Chord symbols and fretboards…").clicked() {
+                                self.open_chords();
+                                ui.close();
+                            }
+                            ui.separator();
                             if ui.button("Entry engraving and articulations…").clicked() {
                                 self.show_entry_style = true;
                                 ui.close();
@@ -1637,7 +1755,7 @@ impl EncoreApp {
                         }
                         ui.label(format!("{:.0}%", self.zoom * 100.0));
                         if ui.button("−").clicked() {
-                            self.zoom = (self.zoom - 0.1).max(0.4);
+                            self.zoom = (self.zoom - 0.1).max(0.1);
                         }
                         ui.separator();
                         if ui.small_button("Parts…").clicked() {
@@ -1658,11 +1776,16 @@ impl EncoreApp {
                                 .width(135.0)
                                 .show_ui(ui, |ui| {
                                     for (index, part) in definitions.iter().enumerate() {
-                                        ui.selectable_value(
-                                            &mut self.selected_linked_part,
-                                            index,
-                                            &part.name,
-                                        );
+                                        if ui
+                                            .selectable_value(
+                                                &mut self.selected_linked_part,
+                                                index,
+                                                &part.name,
+                                            )
+                                            .changed()
+                                        {
+                                            self.activate_linked_part(index);
+                                        }
                                     }
                                 });
                         }
@@ -1681,12 +1804,15 @@ impl EncoreApp {
                 ui.horizontal_wrapped(|ui| {
                     if ui
                         .selectable_label(
-                            !self.write_mode && self.notation_editor.tool == notation::Tool::Select,
+                            !self.write_mode
+                                && !self.chord_editor.active
+                                && self.notation_editor.tool == notation::Tool::Select,
                             "Select",
                         )
                         .clicked()
                     {
                         self.write_mode = false;
+                        self.exit_chord_entry();
                         self.notation_editor.tool = notation::Tool::Select;
                     }
                     let write = ui
@@ -1695,6 +1821,7 @@ impl EncoreApp {
                             "Click a staff to insert; Shift-click an event to add a chord tone",
                         );
                     if write.clicked() {
+                        self.exit_chord_entry();
                         self.notation_editor.tool = notation::Tool::Select;
                         write.surrender_focus();
                     }
@@ -1715,6 +1842,12 @@ impl EncoreApp {
                         .clicked()
                     {
                         self.open_slurs();
+                    }
+                    if ui
+                        .selectable_label(self.chord_editor.active, "Chords")
+                        .clicked()
+                    {
+                        self.open_chords();
                     }
                     if ui.button("Repeats…").clicked() {
                         self.open_repeats();
@@ -2065,8 +2198,8 @@ impl EncoreApp {
                             "{:02}:{:02} / {:02}:{:02}",
                             seconds as u32 / 60,
                             seconds as u32 % 60,
-                            synth::duration_seconds(&self.score) as u32 / 60,
-                            synth::duration_seconds(&self.score) as u32 % 60
+                            self.cached_score_seconds() as u32 / 60,
+                            self.cached_score_seconds() as u32 % 60
                         ))
                         .monospace()
                         .size(13.0),
@@ -2086,6 +2219,15 @@ impl EncoreApp {
                     });
                 });
                 ui.add_space(5.0);
+                ui.horizontal(|ui| {
+                    if ui.small_button("Playback…").clicked() {
+                        self.playback_editor.open = true;
+                    }
+                    self.playback_seek_control(ui);
+                    if self.playback_editor.repeat {
+                        ui.small("Loop enabled");
+                    }
+                });
                 ui.horizontal(|ui| {
                     ui.label(RichText::new(&self.status).size(11.0).color(colors.muted));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -2242,6 +2384,14 @@ impl EncoreApp {
         if self.cached_filter != filter {
             self.previous_part_view = Some(self.cached_filter);
             if let Some(projection) = &projection
+                && self.grace_editor.selected.is_some_and(|selection| {
+                    !projection.source_staves.contains(&selection.anchor.part)
+                })
+            {
+                self.grace_editor.open = false;
+                self.grace_editor.selected = None;
+            }
+            if let Some(projection) = &projection
                 && !projection.source_staves.contains(&self.active_part)
             {
                 self.active_part = projection.source_staves[0];
@@ -2251,9 +2401,13 @@ impl EncoreApp {
                 .entry_written_pitch(self.entry_pitch)
                 .map_or(self.entry_pitch.octave, |written| written.octave);
         }
-        if self.cached_score.as_ref() != Some(&self.score)
-            || self.cached_selection != self.selected
-            || self.cached_filter != filter
+        let timing_changed = self.cached_score.as_ref() != Some(&self.score);
+        if timing_changed {
+            self.playback_editor.clock = encore::expressions::TempoMap::new(&self.score)
+                .ok()
+                .map(std::sync::Arc::new);
+        }
+        if timing_changed || self.cached_selection != self.selected || self.cached_filter != filter
         {
             let display_score = projection
                 .as_ref()
@@ -2284,6 +2438,13 @@ impl EncoreApp {
                             hit.selection = source;
                         }
                     }
+                    for hit in &mut page.grace_hits {
+                        hit.selection.anchor.part =
+                            projection.source_staves[hit.selection.anchor.part];
+                    }
+                    for hit in &mut page.chord_hits {
+                        hit.anchor.part = projection.source_staves[hit.anchor.part];
+                    }
                 }
             }
             self.cached_score = Some(self.score.clone());
@@ -2294,174 +2455,248 @@ impl EncoreApp {
         let tempo_map = if self.score.notation.tempo.is_empty() {
             None
         } else {
-            encore::expressions::TempoMap::new(&self.score).ok()
+            self.playback_editor.clock.clone()
         };
         let mut click = None;
         let mut slur_drag_start = None;
         let slur_tool = self.notation_editor.tool == notation::Tool::Slurs;
+        let mut page_rects = Vec::new();
+        let mut reveal = self.navigation.reveal.take();
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(colors.workspace))
             .show(ctx, |ui| {
-                egui::ScrollArea::both()
-                    .id_salt("score-scroll")
-                    .show(ui, |ui| {
-                        ui.add_space(25.0);
-                        for (page_index, page) in self.cached_pages.iter().enumerate() {
-                            let size = Vec2::new(page.width * self.zoom, page.height * self.zoom);
-                            let margin = ((ui.available_width() - size.x) / 2.0).max(24.0);
-                            ui.horizontal(|ui| {
-                                ui.add_space(margin);
-                                let (rect, response) = ui.allocate_exact_size(
-                                    size,
-                                    if slur_tool {
-                                        Sense::click_and_drag()
-                                    } else {
-                                        Sense::click()
-                                    },
+                let mut area = egui::ScrollArea::both().id_salt("score-scroll");
+                if let Some(offset) = self.navigation.offset.take() {
+                    area = area.scroll_offset(offset);
+                }
+                let scroll = area.show(ui, |ui| {
+                    ui.add_space(25.0);
+                    for (page_index, page) in self.cached_pages.iter().enumerate() {
+                        let size = Vec2::new(page.width * self.zoom, page.height * self.zoom);
+                        let margin = ((ui.available_width() - size.x) / 2.0).max(24.0);
+                        ui.horizontal(|ui| {
+                            ui.add_space(margin);
+                            let (rect, response) = ui.allocate_exact_size(
+                                size,
+                                if slur_tool {
+                                    Sense::click_and_drag()
+                                } else {
+                                    Sense::click()
+                                },
+                            );
+                            page_rects.push(rect);
+                            if let Some((part, bar, tick)) = reveal
+                                && let Some(staff) = page
+                                    .staves
+                                    .iter()
+                                    .find(|staff| staff.part == part && staff.measure == bar)
+                            {
+                                let target = rect.min
+                                    + Vec2::new(
+                                        staff.x_at_tick(tick as f32),
+                                        staff.y + staff.spacing * 2.0,
+                                    ) * self.zoom;
+                                ui.scroll_to_rect(
+                                    Rect::from_center_size(target, Vec2::new(40.0, 100.0)),
+                                    Some(egui::Align::Center),
                                 );
-                                let shadow = rect.translate(Vec2::new(3.0, 5.0));
-                                ui.painter().rect_filled(
-                                    shadow,
-                                    1.0,
-                                    Color32::from_black_alpha(100),
-                                );
-                                ui.painter().rect_filled(rect, 0.0, Color32::WHITE);
-                                if ui.is_rect_visible(rect) {
-                                    if let Some(region) = &self.region_selection {
-                                        for staff in page.staves.iter().filter(|staff| {
-                                            region.staves.contains(&staff.part)
-                                                && (region.start..=region.end)
-                                                    .contains(&staff.measure)
-                                        }) {
-                                            let area = Rect::from_min_max(
-                                                rect.min
-                                                    + Vec2::new(staff.x, staff.y - 9.0) * self.zoom,
-                                                rect.min
-                                                    + Vec2::new(
-                                                        staff.x + staff.width,
-                                                        staff.y + staff.spacing * 4.0 + 9.0,
-                                                    ) * self.zoom,
-                                            );
-                                            ui.painter().rect_filled(
-                                                area,
-                                                0.0,
-                                                Color32::from_gray(220),
-                                            );
-                                            ui.painter().rect_stroke(
-                                                area,
-                                                0.0,
-                                                Stroke::new(0.8_f32, Color32::from_gray(100)),
-                                                egui::StrokeKind::Inside,
-                                            );
-                                        }
-                                    }
-                                    paint_page(ui.painter(), page, rect.min, self.zoom);
-                                }
-                                if let Some(p) = self
-                                    .playback
-                                    .as_ref()
-                                    .filter(|p| p.is_playing() || p.is_paused())
-                                {
-                                    let tick = tempo_map.as_ref().map_or_else(
-                                        || {
-                                            p.position_seconds() * self.score.tempo as f32 / 60.0
-                                                * PPQ as f32
-                                        },
-                                        |map| {
-                                            map.tick_at_seconds(f64::from(p.position_seconds()))
-                                                as f32
-                                        },
-                                    );
-                                    let performed_measure =
-                                        (tick / self.score.measure_ticks() as f32) as usize;
-                                    let measure = playback_order
-                                        .get(performed_measure)
-                                        .copied()
-                                        .unwrap_or(usize::MAX);
-                                    for staff in page.staves.iter().filter(|s| s.measure == measure)
-                                    {
-                                        let x = rect.left()
-                                            + staff.x_at_tick(
-                                                tick % self.score.measure_ticks() as f32,
-                                            ) * self.zoom;
-                                        ui.painter().line_segment(
-                                            [
-                                                Pos2::new(
-                                                    x,
-                                                    rect.top() + (staff.y - 14.0) * self.zoom,
-                                                ),
-                                                Pos2::new(
-                                                    x,
-                                                    rect.top()
-                                                        + (staff.y + staff.spacing * 4.0 + 14.0)
-                                                            * self.zoom,
-                                                ),
-                                            ],
-                                            Stroke::new(2.0_f32, colors.playhead),
+                                reveal = None;
+                            }
+                            let shadow = rect.translate(Vec2::new(3.0, 5.0));
+                            ui.painter()
+                                .rect_filled(shadow, 1.0, Color32::from_black_alpha(100));
+                            ui.painter().rect_filled(rect, 0.0, Color32::WHITE);
+                            if ui.is_rect_visible(rect) {
+                                if let Some(region) = &self.region_selection {
+                                    for staff in page.staves.iter().filter(|staff| {
+                                        region.staves.contains(&staff.part)
+                                            && (region.start..=region.end).contains(&staff.measure)
+                                    }) {
+                                        let area = Rect::from_min_max(
+                                            rect.min
+                                                + Vec2::new(staff.x, staff.y - 9.0) * self.zoom,
+                                            rect.min
+                                                + Vec2::new(
+                                                    staff.x + staff.width,
+                                                    staff.y + staff.spacing * 4.0 + 9.0,
+                                                ) * self.zoom,
+                                        );
+                                        ui.painter().rect_filled(
+                                            area,
+                                            0.0,
+                                            Color32::from_gray(220),
+                                        );
+                                        ui.painter().rect_stroke(
+                                            area,
+                                            0.0,
+                                            Stroke::new(0.8_f32, Color32::from_gray(100)),
+                                            egui::StrokeKind::Inside,
                                         );
                                     }
                                 }
-                                if slur_tool
-                                    && response.drag_started()
-                                    && let Some(origin) =
-                                        ctx.input(|input| input.pointer.press_origin())
-                                {
-                                    let point = (origin - rect.min) / self.zoom;
-                                    slur_drag_start = page
-                                        .hits
-                                        .iter()
-                                        .min_by(|a, b| {
-                                            Vec2::new(a.x - point.x, a.y - point.y)
-                                                .length_sq()
-                                                .total_cmp(
-                                                    &Vec2::new(b.x - point.x, b.y - point.y)
-                                                        .length_sq(),
-                                                )
-                                        })
-                                        .filter(|hit| {
-                                            Vec2::new(hit.x - point.x, hit.y - point.y).length()
-                                                < 18.0
-                                        })
-                                        .map(|hit| hit.selection);
-                                }
-                                if (response.clicked() || slur_tool && response.drag_stopped())
-                                    && let Some(pos) = response
-                                        .interact_pointer_pos()
-                                        .or_else(|| ctx.input(|input| input.pointer.latest_pos()))
-                                {
-                                    response.surrender_focus();
-                                    click = Some((
-                                        page_index,
-                                        (pos - rect.min) / self.zoom,
-                                        ctx.input(|i| i.modifiers.shift),
-                                    ));
-                                }
-                                if self.write_mode {
-                                    response.on_hover_cursor(egui::CursorIcon::Crosshair);
-                                }
-                            });
-                            ui.add_space(8.0);
-                            ui.horizontal(|ui| {
-                                ui.add_space(margin);
-                                ui.label(
-                                    RichText::new(format!(
-                                        "PAGE {} / {}",
-                                        page_index + 1,
-                                        self.cached_pages.len()
-                                    ))
-                                    .size(10.0)
-                                    .color(colors.muted),
+                                paint_page(ui.painter(), page, rect.min, self.zoom);
+                            }
+                            if let Some(p) = self
+                                .playback
+                                .as_ref()
+                                .filter(|p| p.is_playing() || p.is_paused())
+                            {
+                                let tick = tempo_map.as_ref().map_or_else(
+                                    || {
+                                        p.position_seconds() * self.score.tempo as f32 / 60.0
+                                            * PPQ as f32
+                                    },
+                                    |map| {
+                                        map.tick_at_seconds(f64::from(p.position_seconds())) as f32
+                                    },
                                 );
-                            });
-                            ui.add_space(22.0);
-                        }
-                    });
+                                let performed_measure =
+                                    (tick / self.score.measure_ticks() as f32) as usize;
+                                let measure = playback_order
+                                    .get(performed_measure)
+                                    .copied()
+                                    .unwrap_or(usize::MAX);
+                                for staff in page.staves.iter().filter(|s| s.measure == measure) {
+                                    let x = rect.left()
+                                        + staff.x_at_tick(tick % self.score.measure_ticks() as f32)
+                                            * self.zoom;
+                                    ui.painter().line_segment(
+                                        [
+                                            Pos2::new(x, rect.top() + (staff.y - 14.0) * self.zoom),
+                                            Pos2::new(
+                                                x,
+                                                rect.top()
+                                                    + (staff.y + staff.spacing * 4.0 + 14.0)
+                                                        * self.zoom,
+                                            ),
+                                        ],
+                                        Stroke::new(2.0_f32, colors.playhead),
+                                    );
+                                }
+                            }
+                            if slur_tool
+                                && response.drag_started()
+                                && let Some(origin) =
+                                    ctx.input(|input| input.pointer.press_origin())
+                            {
+                                let point = (origin - rect.min) / self.zoom;
+                                slur_drag_start = page
+                                    .hits
+                                    .iter()
+                                    .min_by(|a, b| {
+                                        Vec2::new(a.x - point.x, a.y - point.y)
+                                            .length_sq()
+                                            .total_cmp(
+                                                &Vec2::new(b.x - point.x, b.y - point.y)
+                                                    .length_sq(),
+                                            )
+                                    })
+                                    .filter(|hit| {
+                                        Vec2::new(hit.x - point.x, hit.y - point.y).length() < 18.0
+                                    })
+                                    .map(|hit| hit.selection);
+                            }
+                            if (response.clicked() || slur_tool && response.drag_stopped())
+                                && let Some(pos) = response
+                                    .interact_pointer_pos()
+                                    .or_else(|| ctx.input(|input| input.pointer.latest_pos()))
+                            {
+                                response.surrender_focus();
+                                click = Some((
+                                    page_index,
+                                    (pos - rect.min) / self.zoom,
+                                    ctx.input(|i| i.modifiers.shift),
+                                ));
+                            }
+                            if self.write_mode {
+                                response.on_hover_cursor(egui::CursorIcon::Crosshair);
+                            }
+                        });
+                        ui.add_space(8.0);
+                        ui.horizontal(|ui| {
+                            ui.add_space(margin);
+                            ui.label(
+                                RichText::new(format!(
+                                    "PAGE {} / {}",
+                                    page_index + 1,
+                                    self.cached_pages.len()
+                                ))
+                                .size(10.0)
+                                .color(colors.muted),
+                            );
+                        });
+                        ui.add_space(22.0);
+                    }
+                });
+                self.navigation.scroll = scroll.state.offset;
+                self.navigation.viewport = scroll.inner_rect.size();
+                self.navigation.content = scroll.content_size;
+                self.navigation.pages = page_rects
+                    .into_iter()
+                    .map(|rect| {
+                        rect.translate(scroll.state.offset - scroll.inner_rect.min.to_vec2())
+                    })
+                    .collect();
             });
+        self.navigation.reveal = reveal;
         if let Some(selection) = slur_drag_start {
             self.begin_slur_at(selection);
         }
         if let Some((page_index, pos, chord)) = click {
             let page = &self.cached_pages[page_index];
+            if !self.write_mode
+                && let Some(hit) = page.chord_hits.iter().rev().find(|hit| {
+                    pos.x >= hit.x
+                        && pos.x <= hit.x + hit.width
+                        && pos.y >= hit.y
+                        && pos.y <= hit.y + hit.height
+                })
+            {
+                let anchor = hit.anchor;
+                let slot = hit.slot;
+                self.chord_editor.active = true;
+                self.chord_editor.slot = slot;
+                self.chord_click(anchor.part, anchor.measure, anchor.tick);
+                self.chord_editor.open = true;
+                return;
+            }
+            if !self.write_mode
+                && !self.chord_editor.active
+                && let Some(hit) = page
+                    .grace_hits
+                    .iter()
+                    .min_by(|a, b| {
+                        Vec2::new(a.x - pos.x, a.y - pos.y)
+                            .length_sq()
+                            .total_cmp(&Vec2::new(b.x - pos.x, b.y - pos.y).length_sq())
+                    })
+                    .filter(|hit| Vec2::new(hit.x - pos.x, hit.y - pos.y).length() < 10.0)
+            {
+                let selection = hit.selection;
+                self.select_grace(selection);
+                return;
+            }
+            if self.chord_editor.active {
+                if let Some(staff) = page
+                    .staves
+                    .iter()
+                    .filter(|staff| {
+                        pos.x >= staff.content_x - 10.0 && pos.x <= staff.x + staff.width
+                    })
+                    .min_by(|a, b| {
+                        (pos.y - a.y - a.spacing * 2.0)
+                            .abs()
+                            .total_cmp(&(pos.y - b.y - b.spacing * 2.0).abs())
+                    })
+                {
+                    let part = staff.part;
+                    let bar = staff.measure;
+                    let beat = self.score.beat_ticks();
+                    let tick = (staff.tick_at_x(pos.x) / beat as f32).round() as u32 * beat;
+                    self.chord_click(part, bar, tick);
+                }
+                return;
+            }
             let nearest = page
                 .hits
                 .iter()
@@ -2554,15 +2789,6 @@ impl EncoreApp {
                     if let Some(alter) = self.accidental {
                         pitch.alter = alter;
                     }
-                    if let Some(projection) = &projection {
-                        match projection.transposition.concert_pitch(pitch) {
-                            Ok(source) => pitch = source,
-                            Err(error) => {
-                                self.status = error;
-                                return;
-                            }
-                        }
-                    }
                     let start =
                         if let Some(s) = hit.filter(|s| s.part == part && s.measure == measure) {
                             self.score.parts[part].measures[measure].notes[s.note].start
@@ -2575,6 +2801,19 @@ impl EncoreApp {
                                     .saturating_sub(self.entry_ticks()),
                             )
                         };
+                    let anchor = encore::document::Anchor {
+                        part,
+                        measure,
+                        tick: start,
+                        layer: self.active_layer,
+                    };
+                    let pitch = match self.concert_pitch_at(pitch, anchor) {
+                        Ok(pitch) => pitch,
+                        Err(error) => {
+                            self.status = error;
+                            return;
+                        }
+                    };
                     let accidental = self.accidental.take();
                     self.enter_note(part, measure, start, pitch, chord);
                     self.accidental = accidental;
@@ -2949,6 +3188,7 @@ impl EncoreApp {
 
     pub fn ui(&mut self, ctx: &egui::Context) {
         self.poll_worker();
+        self.poll_playback_range();
         self.skip_history = false;
         let before = self.score.clone();
         self.active_part = self
@@ -2999,9 +3239,14 @@ impl EncoreApp {
         self.notation_dialog(ctx);
         self.linked_parts_dialog(ctx);
         self.expressions_window(ctx);
+        self.go_to_dialog(ctx);
+        self.playback_dialog(ctx);
         self.layout_dialog(ctx);
         self.region_tools_dialog(ctx);
         self.entry_style_window(ctx);
+        self.grace_dialog(ctx);
+        self.lines_window(ctx);
+        self.chord_dialog(ctx);
         self.instrument_lab(ctx);
         if self.score != before && !self.skip_history {
             if self.rendering_audio

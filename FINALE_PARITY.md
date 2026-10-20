@@ -7,7 +7,7 @@ This is a functional compatibility checklist, not a claim that Encore has
 already reached parity. The modern Encore interface remains the intended UI.
 
 The starting point is Encore 0.5, commit `55f2cc0`; the tables also incorporate
-the Encore 0.6–0.8 implementation passes recorded below. Source evidence was inspected
+the Encore 0.6–0.9 implementation passes recorded below. Source evidence was inspected
 in `src/model.rs`, `src/app.rs`, `src/engraving.rs`, `src/export.rs`,
 `src/audio.rs`, `src/sampled.rs`, `src/synth.rs`, and the three format readers.
 Changes made after that commit must pass the acceptance checks below before a
@@ -36,7 +36,7 @@ Linux verification.
 | Pitched notes, simultaneous chord tones and explicit rests | Complete | Native events, editor, vector engraving and all exporters. Subject to documented size limits. |
 | Full duration range, augmentation and tied overflow | Partial | Breve through 128th now reaches engraving/interchange/audio. One dot is supported where exact on the tick grid. Repeated dots and automatic splitting/rebar remain open. |
 | Tuplets, nested tuplets and custom ratios | Partial | Exact actual:normal ratios and basic grouping, triplet entry and inspector ratios. Fractional-grid, nested, mixed-value and cross-bar groups remain open. |
-| Grace notes, slashed/unslashed groups and playback | Missing | Foreign grace material is omitted or rejected. |
+| Grace notes, slashed/unslashed groups and playback | Partial | Editable before/after groups retain pitches/chords, values, dots, beam choices, size, slash, principal connector and bounded borrowed-time playback across native, linked parts and MusicXML. MuseScore imports before/after groups and pickups. Ordinary-entry conversion/rebar shortcuts, grace-specific lyric/articulation/tuplet/tie structures and inserted global make-time remain open. |
 | Four independent layers, each with two voices | Partial | Four editable rhythms now share a staff, with independent stems, beams, exports and playback. Two separate voices within each layer remain open. |
 | Per-pitch chord spelling and independent ties | Partial | Active chord tones now have exact tie subsets, enharmonic respelling and editable tie direction, preserved by native/event-region clipboard, linked transposition, MusicXML and performed playback. Arbitrary continuation controls, tie curvature and complete cross-voice ties remain open. |
 | Clefs and clef changes | Partial | Three fixed staff clefs. Needs other C/F/G clefs, percussion, octave variants and mid-measure changes. |
@@ -47,12 +47,12 @@ Linux verification.
 | Cross-staff notation and beaming | Missing | No source/destination staff relationship for notes or beams. |
 | Dynamics and articulations | Partial | Velocity-derived dynamics, legacy staccato, accent, marcato, tenuto and staccatissimo now have editable marks, vector glyphs and playback. Custom marking definitions, fermata timing, ornaments and complete placement/performance rules remain open. |
 | Slurs and phrase curves | Partial | Anchored editable same-layer phrases, direction, height and endpoint offsets; vector continuations across systems/pages; native and MusicXML round trips, MuseScore import and bounded legato playback. Cross-staff/cross-voice slurs, dashed styles and arbitrary control-point shapes remain open. |
-| Hairpins, octave lines, pedal, trills, glissandi and custom lines | Partial | Editable crescendo/diminuendo spans have native persistence, vector system/page continuations, MusicXML import/export and basic MuseScore hairpin import. Playback interpolates note-attack velocities with explicit endpoints. Continuous sustained-note swells, niente engraving, dashed/custom wedges and the other listed spanner families remain open. |
-| Tremolos, measured repeats and ornaments | Missing | No notation/performance representation. |
+| Hairpins, octave lines, pedal, trills, glissandi and custom lines | Partial | Editable native/vector/MusicXML spans now cover crescendo/diminuendo, ±1–3 octave display, damper/sostenuto, explicit-interval trills and consecutive-note chromatic glissandi; supported basic MuseScore spanners import. Held-note CC11 swells, pedal holds and discrete ornaments share audio/MIDI scheduling. Niente/custom line styles, partial/soft pedal, automatic trill neighbors, continuous slides and harp/diatonic glissandi remain open. |
+| Tremolos, measured repeats and ornaments | Partial | Explicit-interval trill spans perform on all three backends; a recognized string tremolo Technique selects GM tremolo strings. Measured tremolo notation/repeats, turns, mordents and full ornament rules remain open. |
 | Repeat barlines, endings, D.C./D.S., coda and Fine | Partial | Inclusive repeat regions support nested noncrossing repeats, 2–16 passes, contiguous numbered endings, vector barlines/voltas and bounded performed audio/MIDI. D.C./D.S., al Fine/al Coda, unique segno/coda targets and optional repeat replay use the same traversal, MusicXML import/export and MuseScore import. Custom labels with multiple targets, per-pass/custom conditional jumps, within-measure navigation, manual bracket placement and direct MUSX repeat import remain open. |
 | Lyrics | Partial | Numbered verses/choruses/sections, atomic syllable typing/assignment, hyphens, melismas and elisions, adjustable baselines, lyric-aware spacing and vector continuations; native and MusicXML preservation and MuseScore import. Rich typography, above-staff underlay, verse-number alignment and Finale’s full Lyrics window/metatools remain open. |
-| Chord symbols and fretboards | Missing | Chord tones are available; chord-name/suffix objects and diagrams are absent. |
-| Guitar tablature, bends, slides and tuning | Missing | No strings/frets, alternate tunings or standard/tab conversion. |
+| Chord symbols and fretboards | Partial | Free-beat letter-name chords support standard triads, sevenths/extensions, altered/add/omit degrees, alternate basses, N.C., eight stack slots and per-symbol printing/playback. Original vector fretboards have bounded guitar suggestions, 4–12 custom strings, open/muted stops, fingering, barres and known/unknown tunings. Native/MusicXML harmony/frame interchange, linked transposition and regional editing retain the supported semantics. Finale suffix/fretboard libraries, MIDI analysis/learned chords, numeric/Roman naming and arbitrary suffix typography remain open. |
+| Guitar tablature, bends, slides and tuning | Partial | Editable chord diagrams retain explicit string tunings and frets; tablature staves, automatic standard/tab conversion, bends and continuous slides remain open. |
 | Unpitched percussion layouts and drum maps | Missing | GM melodic pitched percussion is available, but does not supply percussion notation or drum-kit routing. |
 | Staff styles, cutaway, slash/rhythmic notation and repeats | Missing | Fixed five-line staff presentation; no regional style definitions. |
 | Cue notes, ossia, note sizes and custom noteheads | Partial | Per-entry 40–200% head sizing, six original vector notehead shapes and hidden entries are editable and persistent, with native/MusicXML preservation. These are visual controls; automatic cue extraction, ossia staffs and arbitrary glyph selection remain open. |
@@ -159,11 +159,11 @@ and [audio files](https://usermanuals.finalemusic.com/FinaleWin/Content/Finale/A
 | Capability | Status | Evidence and work remaining |
 | --- | --- | --- |
 | Sampled GM instrument catalog | Complete | 128 melodic bank-0 programs through SF2; auditions and WAV share the engine. A GM catalog is not Garritan library compatibility. |
-| Transport and mixer | Partial | Play/pause/stop, playhead, volume/pan, mute/solo. Needs seek, loop/region playback, scrub, count-in and metronome. |
-| Ties, dynamics and articulation playback | Partial | Independent pitch ties, explicit dynamic velocity events, hairpin attack interpolation, slur overlap, event velocities, staccato and four ordinary articulation effects share audio/MIDI scheduling. Continuous held-note swells, ornaments, technique switches and per-pitch articulation remain open. |
+| Transport and mixer | Partial | Play/pause/stop, rendered-audio seeking, cursor-start playback, performed-bar loop ranges and selection-to-range controls accompany the playhead and mixer. Scrub, count-in, metronome and complete region/cue transport remain open. |
+| Ties, dynamics and articulation playback | Partial | Independent pitch ties, explicit dynamics, sustained CC11 hairpins, slur overlap, grace timing, damper/sostenuto holds, trill/gliss note sequences and a small set of real GM technique changes share audio/MIDI scheduling. Per-pitch articulation, dynamic-layer crossfades and full instrument-specific interpretation remain open. |
 | Tempo map and expressive timing | Partial | Beat-anchored tempo marks and linear-BPM accelerando/ritardando ramps share an analytic performed-tick/seconds map across repeats, audio, duration and playhead. MIDI emits bounded sampled tempo events; MusicXML preserves marks and dashes-delimited ramps, and MuseScore/MIDI tempo steps import. Curved ramps, MuseScore gradual-tempo spanners, swing, fermata timing and independent performance offsets remain open. |
 | Repeat traversal | Partial | Shared bounded traversal performs nested bar repeats, alternate endings and conventional one-shot D.C./D.S./coda/Fine navigation in audio, MIDI, duration and playhead. Custom conditional pass programs, multiple named targets and complete Finale repeat assignments remain open. |
-| Human Playback equivalent | Missing | No style interpreter or score-text/technique dictionary. Reverb and sample variation alone do not supply this. |
+| Human Playback equivalent | Partial | A deterministic shared planner handles supported marks and exact pizzicato/arco/tremolo-string/muted-trumpet labels. Finale style interpretation, its full dictionary, instrument-specific behavior and custom library keyswitch rules remain open. |
 | MIDI performance editor | Missing | No controller lanes, pitch bends, patch/bank changes, fine note timing or captured data. |
 | External MIDI I/O | Missing | No device routing, MIDI Thru, input/output maps or sync. |
 | Percussion playback | Missing | Needs drum-kit bank/channel selection coupled to notation maps. |
@@ -406,3 +406,33 @@ styles, including its partial chord tie. Both modal windows were rendered at
 Carol's 83-second sampled WAV remains byte-identical to the 0.7 regression hash.
 The monochromatic dark default, light option and native-platform limitations
 remain unchanged.
+
+### Encore 0.9 integration qualification
+
+Grace groups, letter-name harmony/fretboards and octave/pedal/trill/glissando
+lines now have native models, editors, vector engraving and documented
+MusicXML/MuseScore interchange. Shared performed notes/controllers drive both
+audio engines and MIDI, including borrowed grace timing, fixed-interval
+ornaments, restricted sostenuto, sustained CC11 envelopes, optional harmony
+and selected GM technique changes. Independent accompaniment-controller and
+sample-bank limitations remain explicit in COMPATIBILITY.md.
+
+Source-linked chord and grace hits, ottava/written-pitch entry, note-attached
+versus free-beat lifecycle repairs, event clipboard v4, whole-region metadata
+and part-switching have controller regressions. Go to Measure, page scrolling,
+page fit, rendered-audio seeking, cursor-start and performed-range loops extend
+listening/navigation without modifying printed source rhythms. Tempo clocks are
+cached across selection changes. Native physical keyboard/audio/platform
+qualification remains separate from display-independent controller checks.
+
+Local Linux qualification: **287 library and 118 editor/CLI tests** pass; format,
+all-target Clippy with warnings denied and optimized release build pass.
+Both new native studies export PDF/SVG/MusicXML/MIDI and sampled WAV. Their
+printed pages and dark editor were inspected. Ornaments retains all eight
+grace groups and supported chord/frame geometry; Performance Lines retains all
+four lines, ten expressions, hairpin and tempo ramp through MusicXML. Standard
+MusicXML frames do not retain tuning, and imported field order can differ.
+Both sampled study renders contain no clipped PCM samples. Carol remains
+byte-identical to the recorded 0.7/0.8 sampled SHA-256. The default remains
+monochromatic dark with a remembered light option. Full Finale parity has not
+been achieved; remaining table gaps and native-host checks remain open.

@@ -279,7 +279,8 @@ pub fn musicxml(score: &Score) -> String {
     out.push_str("  <defaults><scaling><millimeters>7</millimeters><tenths>40</tenths></scaling></defaults>\n  <part-list>\n");
     for (pi, part) in score.parts.iter().enumerate() {
         let id = pi + 1;
-        let volume = if part.muted || (score.parts.iter().any(|p| p.solo) && !part.solo) {
+        let volume = if part.muted || (score.parts.iter().any(|p| p.solo && !p.muted) && !part.solo)
+        {
             0.0
         } else {
             part.volume * 100.0
@@ -298,7 +299,9 @@ pub fn musicxml(score: &Score) -> String {
     }
     out.push_str("  </part-list>\n");
     let style_index = crate::entry_style::Index::new(score);
-    let notation = xml_annotations(score);
+    let grace = crate::grace::MusicXmlIndex::new(score);
+    let lines = crate::lines::MusicXmlIndex::new(score);
+    let notation = xml_annotations(score, &grace, &lines);
     let measure_ticks = score.measure_ticks();
     for (pi, part) in score.parts.iter().enumerate() {
         let _ = writeln!(out, "  <part id=\"P{}\">", pi + 1);
@@ -333,6 +336,8 @@ pub fn musicxml(score: &Score) -> String {
                 );
             }
             out.push_str(&expression_directions(score, pi, mi));
+            out.push_str(lines.directions(pi, mi));
+            out.push_str(&crate::chords::musicxml(score, pi, mi));
             out.push_str(&crate::repeats::musicxml_before_measure(score, mi));
             out.push_str(&crate::repeats::musicxml_navigation_before_measure(
                 score, mi,
@@ -371,6 +376,7 @@ pub fn musicxml(score: &Score) -> String {
                         tick: note.start,
                         layer: note.layer,
                     };
+                    out.push_str(grace.before(&anchor));
                     let marks = notation
                         .get(&anchor)
                         .map(|(s, l)| (s.as_str(), l.as_str()))
@@ -434,6 +440,7 @@ pub fn musicxml(score: &Score) -> String {
                             );
                         }
                     }
+                    out.push_str(grace.after(&anchor));
                     cursor = note.start + note.ticks();
                 }
                 if cursor < measure_ticks {
@@ -460,6 +467,8 @@ pub fn musicxml(score: &Score) -> String {
 /// phrases end; distinct lyric names keep verse/chorus/section lines separate.
 fn xml_annotations(
     score: &Score,
+    grace: &crate::grace::MusicXmlIndex,
+    lines: &crate::lines::MusicXmlIndex,
 ) -> std::collections::BTreeMap<crate::document::Anchor, (String, String)> {
     use crate::lyrics::position;
     use crate::slurs::SlurDirection;
@@ -528,6 +537,22 @@ fn xml_annotations(
                 lyric.verse,
                 lyric.kind.name().to_ascii_lowercase()
             );
+        }
+    }
+    for (part, p) in score.parts.iter().enumerate() {
+        for (measure, m) in p.measures.iter().enumerate() {
+            for note in &m.notes {
+                let anchor = crate::document::Anchor {
+                    part,
+                    measure,
+                    tick: note.start,
+                    layer: note.layer,
+                };
+                let extra = lines.notations(&anchor).to_owned() + grace.main_notations(&anchor);
+                if !extra.is_empty() {
+                    result.entry(anchor).or_default().0.push_str(&extra);
+                }
+            }
         }
     }
     result
@@ -780,6 +805,14 @@ pub fn midi(score: &Score) -> Vec<u8> {
     if score.validate().is_err() {
         return Vec::new();
     }
+    let decorated = if crate::performance::needed(score) {
+        match crate::performance::Timeline::new(score) {
+            Ok(t) => Some(t),
+            Err(_) => return Vec::new(),
+        }
+    } else {
+        None
+    };
     let expression_map = crate::expressions::ExpressionMap::new(score);
     let style_index = crate::entry_style::Index::new(score);
     let measure_ticks = score.measure_ticks();
@@ -829,7 +862,7 @@ pub fn midi(score: &Score) -> Vec<u8> {
         }
     }
     let mut tracks = vec![track(conductor, end)];
-    let has_solo = score.parts.iter().any(|part| part.solo);
+    let has_solo = score.parts.iter().any(|part| part.solo && !part.muted);
     let mut lyric_index: HashMap<crate::document::Anchor, Vec<&crate::lyrics::Lyric>> =
         HashMap::new();
     for lyric in &score.notation.lyrics {
@@ -848,7 +881,18 @@ pub fn midi(score: &Score) -> Vec<u8> {
                     .any(|note| note.layer == *layer)
             })
             .collect::<Vec<_>>();
-        let layers = if layers.is_empty() { vec![0] } else { layers };
+        let mut layers = if layers.is_empty() { vec![0] } else { layers };
+        if let Some(timeline) = &decorated {
+            for lane in 4..12 {
+                if timeline
+                    .notes
+                    .iter()
+                    .any(|n| n.anchor.part == part_index && n.layer == lane)
+                {
+                    layers.push(lane);
+                }
+            }
+        }
         for layer in layers {
             let channel = channel(lane_index);
             let mut events = vec![
@@ -879,98 +923,174 @@ pub fn midi(score: &Score) -> Vec<u8> {
                 },
             ];
             if !part.muted && (!has_solo || part.solo) {
-                let timeline = crate::repeats::events(part, measure_ticks, &order);
-                let starts: HashMap<_, _> = timeline
-                    .iter()
-                    .enumerate()
-                    .map(|(index, event)| ((event.tick, event.note.layer), index))
-                    .collect();
-                let ends: HashMap<_, _> = timeline
-                    .iter()
-                    .enumerate()
-                    .map(|(index, event)| {
-                        (
-                            (event.tick + u64::from(event.note.ticks()), event.note.layer),
-                            index,
-                        )
-                    })
-                    .collect();
-                for event in timeline.iter().filter(|event| event.note.layer == layer) {
-                    let note = event.note;
-                    let start = event.tick as u32;
-                    let anchor = crate::document::Anchor {
-                        part: part_index,
-                        measure: event.measure,
-                        tick: note.start,
-                        layer,
-                    };
-                    if let Some(lyrics) = lyric_index.get(&anchor) {
-                        for lyric in lyrics {
-                            let mut text = lyric.text.clone();
-                            if matches!(
-                                lyric.syllabic,
-                                crate::lyrics::Syllabic::Begin | crate::lyrics::Syllabic::Middle
-                            ) {
-                                text.push('-');
-                            }
+                if let Some(timeline) = &decorated {
+                    let mut program = Some(part.instrument);
+                    for note in timeline
+                        .notes
+                        .iter()
+                        .filter(|n| n.anchor.part == part_index && n.layer == layer)
+                    {
+                        let start = note.start.round() as u32;
+                        if program != Some(note.instrument) {
                             events.push(Event {
                                 tick: start,
-                                priority: 0,
-                                bytes: meta(0x05, text.as_bytes()),
+                                priority: 1,
+                                bytes: vec![0xc0 | channel, note.instrument.gm_program()],
                             });
+                            program = Some(note.instrument);
+                        }
+                        events.push(Event {
+                            tick: start,
+                            priority: 3,
+                            bytes: vec![0x90 | channel, note.midi, note.velocity],
+                        });
+                        events.push(Event {
+                            tick: (note.end.round() as u32).max(start + 1),
+                            priority: 0,
+                            bytes: vec![0x80 | channel, note.midi, 0],
+                        });
+                    }
+                    for c in timeline
+                        .controls
+                        .iter()
+                        .filter(|c| c.part == part_index && c.layer == layer)
+                    {
+                        events.push(Event {
+                            tick: c.tick.round() as u32,
+                            priority: c.priority,
+                            bytes: vec![0xb0 | channel, c.controller, c.value],
+                        });
+                    }
+                    for event in crate::repeats::events(part, measure_ticks, &order)
+                        .into_iter()
+                        .filter(|e| e.note.layer == layer)
+                    {
+                        let anchor = crate::document::Anchor {
+                            part: part_index,
+                            measure: event.measure,
+                            tick: event.note.start,
+                            layer,
+                        };
+                        if let Some(lyrics) = lyric_index.get(&anchor) {
+                            for lyric in lyrics {
+                                let mut text = lyric.text.clone();
+                                if matches!(
+                                    lyric.syllabic,
+                                    crate::lyrics::Syllabic::Begin
+                                        | crate::lyrics::Syllabic::Middle
+                                ) {
+                                    text.push('-');
+                                }
+                                events.push(Event {
+                                    tick: event.tick as u32,
+                                    priority: 0,
+                                    bytes: meta(0x05, text.as_bytes()),
+                                });
+                            }
                         }
                     }
-                    let previous = ends
-                        .get(&(event.tick, layer))
-                        .map(|index| &timeline[*index]);
-                    let following = starts
-                        .get(&(event.tick + u64::from(note.ticks()), layer))
-                        .map(|index| &timeline[*index]);
-                    for pitch in &note.pitches {
-                        let midi = pitch.midi();
-                        let tie_in = previous.is_some_and(|previous| {
-                            style_index.ties_forward(
-                                &crate::document::Anchor {
-                                    part: part_index,
-                                    measure: previous.measure,
-                                    tick: previous.note.start,
-                                    layer,
-                                },
-                                previous.note,
-                                midi,
-                            ) && crate::repeats::written_adjacent(previous, event, measure_ticks)
-                                && previous
+                } else {
+                    let timeline = crate::repeats::events(part, measure_ticks, &order);
+                    let starts: HashMap<_, _> = timeline
+                        .iter()
+                        .enumerate()
+                        .map(|(index, event)| ((event.tick, event.note.layer), index))
+                        .collect();
+                    let ends: HashMap<_, _> = timeline
+                        .iter()
+                        .enumerate()
+                        .map(|(index, event)| {
+                            (
+                                (event.tick + u64::from(event.note.ticks()), event.note.layer),
+                                index,
+                            )
+                        })
+                        .collect();
+                    for event in timeline.iter().filter(|event| event.note.layer == layer) {
+                        let note = event.note;
+                        let start = event.tick as u32;
+                        let anchor = crate::document::Anchor {
+                            part: part_index,
+                            measure: event.measure,
+                            tick: note.start,
+                            layer,
+                        };
+                        if let Some(lyrics) = lyric_index.get(&anchor) {
+                            for lyric in lyrics {
+                                let mut text = lyric.text.clone();
+                                if matches!(
+                                    lyric.syllabic,
+                                    crate::lyrics::Syllabic::Begin
+                                        | crate::lyrics::Syllabic::Middle
+                                ) {
+                                    text.push('-');
+                                }
+                                events.push(Event {
+                                    tick: start,
+                                    priority: 0,
+                                    bytes: meta(0x05, text.as_bytes()),
+                                });
+                            }
+                        }
+                        let previous = ends
+                            .get(&(event.tick, layer))
+                            .map(|index| &timeline[*index]);
+                        let following = starts
+                            .get(&(event.tick + u64::from(note.ticks()), layer))
+                            .map(|index| &timeline[*index]);
+                        for pitch in &note.pitches {
+                            let midi = pitch.midi();
+                            let tie_in = previous.is_some_and(|previous| {
+                                style_index.ties_forward(
+                                    &crate::document::Anchor {
+                                        part: part_index,
+                                        measure: previous.measure,
+                                        tick: previous.note.start,
+                                        layer,
+                                    },
+                                    previous.note,
+                                    midi,
+                                ) && crate::repeats::written_adjacent(
+                                    previous,
+                                    event,
+                                    measure_ticks,
+                                ) && previous
                                     .note
                                     .pitches
                                     .iter()
                                     .any(|pitch| pitch.midi() == midi)
-                        });
-                        let tie_out = style_index.ties_forward(&anchor, note, midi)
-                            && following.is_some_and(|next| {
-                                crate::repeats::written_adjacent(event, next, measure_ticks)
-                                    && next.note.pitches.iter().any(|pitch| pitch.midi() == midi)
                             });
-                        if !tie_in {
-                            events.push(Event {
-                                tick: start,
-                                priority: 3,
-                                bytes: vec![
-                                    0x90 | channel,
-                                    midi,
-                                    expression_map.velocity(anchor, note),
-                                ],
-                            });
-                        }
-                        if !tie_out {
-                            let ticks = note.playback_ticks()
-                                + crate::repeats::legato_extension(
-                                    score, part_index, event, following,
-                                );
-                            events.push(Event {
-                                tick: start + ticks.max(1),
-                                priority: 2,
-                                bytes: vec![0x80 | channel, midi, 0],
-                            });
+                            let tie_out = style_index.ties_forward(&anchor, note, midi)
+                                && following.is_some_and(|next| {
+                                    crate::repeats::written_adjacent(event, next, measure_ticks)
+                                        && next
+                                            .note
+                                            .pitches
+                                            .iter()
+                                            .any(|pitch| pitch.midi() == midi)
+                                });
+                            if !tie_in {
+                                events.push(Event {
+                                    tick: start,
+                                    priority: 3,
+                                    bytes: vec![
+                                        0x90 | channel,
+                                        midi,
+                                        expression_map.velocity(anchor, note),
+                                    ],
+                                });
+                            }
+                            if !tie_out {
+                                let ticks = note.playback_ticks()
+                                    + crate::repeats::legato_extension(
+                                        score, part_index, event, following,
+                                    );
+                                events.push(Event {
+                                    tick: start + ticks.max(1),
+                                    priority: 2,
+                                    bytes: vec![0x80 | channel, midi, 0],
+                                });
+                            }
                         }
                     }
                 }
@@ -1440,5 +1560,38 @@ mod tests {
             ]
         );
         assert_eq!(crate::synth::duration_seconds(&score), 12.0);
+    }
+}
+
+#[cfg(test)]
+mod solo_regression {
+    use super::*;
+    #[test]
+    fn a_muted_solo_does_not_silence_unmuted_midi_staves() {
+        let mut score = Score::blank();
+        score.parts[0].solo = true;
+        score.parts[0].muted = true;
+        if score.parts.len() < 2 {
+            let mut part = score.parts[0].clone();
+            part.solo = false;
+            part.muted = false;
+            score.parts.push(part);
+        }
+        score.parts[1].solo = false;
+        score.parts[1].muted = false;
+        score.parts[1].measures[0].notes = vec![Note {
+            start: 0,
+            duration: Duration::Quarter,
+            dotted: false,
+            tuplet: None,
+            layer: 0,
+            pitches: vec![Pitch::from_midi(60)],
+            velocity: 80,
+            staccato: false,
+            tied: false,
+            articulations: vec![],
+        }];
+        let bytes = midi(&score);
+        assert!(bytes.windows(3).any(|b| b == [0x91, 60, 80]));
     }
 }

@@ -79,18 +79,21 @@ impl EncoreApp {
         self.cursor_tick = anchor.tick;
     }
     pub(super) fn open_lyrics(&mut self) {
+        self.exit_chord_entry();
         self.notation_editor.open = true;
         self.notation_editor.tab = Tab::Lyrics;
         self.notation_editor.tool = Tool::Lyrics;
         self.write_mode = false;
     }
     pub(super) fn open_slurs(&mut self) {
+        self.exit_chord_entry();
         self.notation_editor.open = true;
         self.notation_editor.tab = Tab::Slurs;
         self.notation_editor.tool = Tool::Slurs;
         self.write_mode = false;
     }
     pub(super) fn open_repeats(&mut self) {
+        self.exit_chord_entry();
         self.notation_editor.open = true;
         self.notation_editor.tab = Tab::Repeats;
         self.notation_editor.tool = Tool::Select;

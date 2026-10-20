@@ -2,6 +2,32 @@ use super::*;
 use encore::parts::{self, LinkedPart, PageSize, Transposition};
 
 impl EncoreApp {
+    pub(super) fn activate_linked_part(&mut self, index: usize) {
+        let definitions = parts::definitions(&self.score);
+        let Some(part) = definitions.get(index) else {
+            return;
+        };
+        self.selected_linked_part = index;
+        self.part_view = true;
+        if !part.staves.contains(&self.active_part) {
+            self.active_part = part.staves[0];
+        }
+        self.selected = None;
+        self.clear_region_selection();
+        self.notation_editor = Default::default();
+        if self
+            .grace_editor
+            .selected
+            .is_some_and(|selection| !part.staves.contains(&selection.anchor.part))
+        {
+            self.grace_editor.open = false;
+            self.grace_editor.selected = None;
+        }
+        if self.chord_editor.active {
+            self.chord_click(self.active_part, self.cursor_measure, self.cursor_tick);
+        }
+    }
+
     pub(super) fn selected_part_projection(&self) -> Result<Option<parts::Projection>, String> {
         if !self.part_view {
             return Ok(None);
@@ -128,6 +154,10 @@ impl EncoreApp {
                     if ui.button("View selected part").clicked() {
                         self.part_view = true;
                         if let Some(staff) = part.staves.first() { self.active_part = *staff; }
+                        self.selected=None;
+                        self.clear_region_selection();
+                        self.grace_editor.open=false;
+                        self.exit_chord_entry();
                         self.cached_score = None;
                     }
                     if ui.button("Return to full score").clicked() {

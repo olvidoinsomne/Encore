@@ -40,6 +40,20 @@ sets and a sweep of active phrases, with at most 16 overlaps per staff.
 
 The engraving child modules add outlined lyric text, hyphens, word extensions
 and original flattened vector phrase curves after staff regions are known.
+
+`src/grace.rs` stores bounded `GraceGroup`s keyed by a principal `Anchor` and
+before/after placement. Nested `GraceNote`s carry pitches and visual durations;
+they never enter the written rhythmic event stream. The grace collector resolves
+source staff/voice anchors after import and applies pickup shifts once. Standard
+MusicXML grace fields are combined with valid hidden metadata for exact native
+options; `MusicXmlIndex` caches export fragments and sweeps active phrase-slur
+levels once instead of scanning the score for every exported entry.
+`src/engraving/grace.rs` reserves shared temporal gaps and first-onset prefixes,
+draws small vector heads/stems/beams/accidentals/slashes/connectors and records
+separate `GraceHit`s. `GraceSelection` identifies the principal, side and local
+note index, so ornament editing cannot be confused with principal note indices.
+The performance pipeline decorates unfolded principal events with fractional
+borrowed-time notes before final ties; written PPQ onsets stay unchanged.
 Each system/page receives its own continuation fragment. Lyric widths inform
 shared temporal spacing and system measure counts; lyric baselines and slur
 clearance inform vertical staff spacing. Foreign format `annotations` collectors
@@ -107,7 +121,7 @@ clipboard filters and clip files are future work.
 Insert/delete remaps anchored notation, tempo points, repeat endings and every
 saved full-score/part layout. Missing navigation targets and removed alternate
 endings or ramp endpoints fail without changing the source. Chromatic/spelled
-transposition updates MIDI-keyed engraving overrides alongside notes. A known
+transposition updates MIDI-keyed engraving overrides, chord roots/basses and attached grace pitches alongside notes. A known
 metadata-field guard rejects unsupported future notation rather than silently
 losing it. `src/app/regions.rs` supplies selection/action controls; clipboard
 routing keeps previous single-event formats readable, and all changes enter the
@@ -140,3 +154,9 @@ Automated tests cover native compatibility and validation, all program identitie
 The default dark theme uses neutral monochromatic colors. `src/shortcuts.rs` maps separate Finale Simple Laptop and Speedy profiles; `src/app/entry.rs` applies validated edits, and `src/app/clipboard.rs` handles bounded single-event clipboard transfers. The entry profile is persisted separately from score data.
 
 The app's `Theme` selects a shared palette for all chrome and configures egui visuals independently of font setup. The preference is stored through eframe persistence under `encore.theme`; changing it does not edit the score. macOS bank discovery includes `Contents/Resources/assets`, and native packaging/CI is documented in BUILDING.md.
+
+## Harmonic notation
+
+`src/chords.rs` separates spelled `PitchClass` roots/basses and semantic kinds/degrees from display suffixes. `ChordSymbol` uses a free staff-beat anchor normalized to layer zero and a bounded stack slot. It remains attached when a note is deleted. `src/chords/parser.rs` parses common letter-name suffixes; `frame.rs` validates original string geometry and performs a bounded standard-guitar search. Known tuning and unknown imported geometry are distinct states.
+
+Linked projections transpose harmonic spelling and diagram stops alongside nested grace pitches. Regional copying/remapping treats these as staff-anchored musical content. Event clipboard version 4 carries principal-linked before/after grace groups; free-beat harmony/performance lines travel with whole regions. `src/chords/musicxml.rs` writes standard harmony/frame elements and reads semantic degrees rather than inferring sound from suffix text. Import collectors resolve staff/voice mappings, pickup shifts and cursor offsets before committing a validated score. `src/engraving/chords.rs` supplies vector diagrams, spacing/clearance and semantic hit rectangles. The shared performance pipeline realizes concert harmony in independent stack lanes.

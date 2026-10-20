@@ -1206,6 +1206,37 @@ fn headless_full_editor_renders_notation_and_font_textures() {
             note: 0,
         });
     }
+    if std::env::var_os("ENCORE_HEADLESS_GRACE").is_some() {
+        app.selected = app
+            .score
+            .parts
+            .iter()
+            .enumerate()
+            .find_map(|(part, staff)| {
+                staff
+                    .measures
+                    .iter()
+                    .enumerate()
+                    .find_map(|(measure, bar)| {
+                        bar.notes
+                            .iter()
+                            .position(|note| !note.pitches.is_empty())
+                            .map(|note| Selection {
+                                part,
+                                measure,
+                                note,
+                            })
+                    })
+            });
+        app.open_grace();
+    }
+    if std::env::var_os("ENCORE_HEADLESS_CHORDS").is_some() {
+        app.open_chords();
+    }
+    if std::env::var_os("ENCORE_HEADLESS_LINES").is_some() {
+        app.open_lines();
+    }
+    app.playback_editor.open = std::env::var_os("ENCORE_HEADLESS_PLAYBACK").is_some();
     let (width, height) = std::env::var("ENCORE_HEADLESS_SIZE")
         .ok()
         .and_then(|s| {
@@ -1258,7 +1289,13 @@ fn headless_full_editor_renders_notation_and_font_textures() {
         "Expected visible staff lines, notes, labels, and fonts; found {dark_pixels} dark pixels"
     );
     assert!(
-        app.show_layout || app.show_entry_style || paper_pixels > width * height / 25,
+        app.show_layout
+            || app.show_entry_style
+            || app.grace_editor.open
+            || app.chord_editor.open
+            || app.lines_editor.open
+            || app.playback_editor.open
+            || paper_pixels > width * height / 25,
         "Expected a visible white score page or an open editing dialog"
     );
     if let Some(path) = std::env::var_os("ENCORE_HEADLESS_SCREENSHOT") {
@@ -1962,4 +1999,303 @@ fn expression_editor_prevents_note_commands_until_escape() {
     }
     assert_eq!(app.score, before);
     assert!(!app.expressions_editor.open);
+}
+
+#[test]
+fn page_navigation_and_fit_view_scroll_the_score_without_dirtying_it() {
+    let ctx = egui::Context::default();
+    configure_context(&ctx);
+    let mut app = controller(Score::demo());
+    let before = app.score.clone();
+    let plain = egui::Modifiers::NONE;
+    for frame in 0..3 {
+        let _ = ctx.run(raw_input(frame, vec![], plain), |ctx| app.ui(ctx));
+    }
+    assert!(app.navigation.content.y > app.navigation.viewport.y);
+    let _ = ctx.run(
+        raw_input(3, vec![key(egui::Key::PageDown, true, plain)], plain),
+        |ctx| app.ui(ctx),
+    );
+    assert!(app.navigation.scroll.y > 0.0);
+    app.fit_view(true);
+    let _ = ctx.run(
+        raw_input(4, vec![key(egui::Key::PageDown, false, plain)], plain),
+        |ctx| app.ui(ctx),
+    );
+    assert!(app.cached_pages[0].width * app.zoom <= app.navigation.viewport.x);
+    assert!(app.cached_pages[0].height * app.zoom <= app.navigation.viewport.y);
+    assert_eq!(app.score, before);
+    assert!(!app.dirty());
+    assert!(app.undo.is_empty());
+}
+
+#[test]
+fn ottava_mouse_entry_inverts_the_printed_pitch() {
+    let ctx = egui::Context::default();
+    configure_context(&ctx);
+    let mut score = Score::blank();
+    let a = encore::document::Anchor {
+        part: 0,
+        measure: 0,
+        tick: 0,
+        layer: 0,
+    };
+    score
+        .notation
+        .lines
+        .push(encore::lines::PerformanceLine::new(
+            a,
+            encore::document::Anchor { tick: 960, ..a },
+            encore::lines::LineKind::Ottava { semitones: 12 },
+        ));
+    let mut app = controller(score);
+    app.write_mode = true;
+    let plain = egui::Modifiers::NONE;
+    let mut paper = None;
+    for frame in 0..3 {
+        let output = ctx.run(raw_input(frame, vec![], plain), |ctx| app.ui(ctx));
+        paper = output.shapes.iter().find_map(|shape| match &shape.shape {
+            egui::Shape::Rect(rect)
+                if rect.fill == Color32::WHITE
+                    && rect.rect.width() > 700.0
+                    && rect.rect.height() > 900.0 =>
+            {
+                Some(rect.rect)
+            }
+            _ => None,
+        });
+    }
+    let staff = &app.cached_pages[0].staves[0];
+    let point = paper.unwrap().min
+        + Vec2::new(staff.x_at_tick(0.0), staff.y + staff.spacing * 5.0) * app.zoom;
+    for (frame, pressed) in [(3, true), (4, false)] {
+        let _ = ctx.run(
+            raw_input(
+                frame,
+                vec![
+                    egui::Event::PointerMoved(point),
+                    egui::Event::PointerButton {
+                        pos: point,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: plain,
+                    },
+                ],
+                plain,
+            ),
+            |ctx| app.ui(ctx),
+        );
+    }
+    assert_eq!(
+        app.score.parts[0].measures[0].notes[0].pitches[0].midi(),
+        72
+    );
+    app.score.validate().unwrap();
+}
+
+#[test]
+fn tempo_clock_is_reused_for_navigation_and_refreshed_for_music_changes() {
+    let ctx = egui::Context::default();
+    configure_context(&ctx);
+    let mut app = controller(Score::demo());
+    let plain = egui::Modifiers::NONE;
+    let _ = ctx.run(raw_input(0, vec![], plain), |ctx| app.ui(ctx));
+    let clock = app.playback_editor.clock.clone().unwrap();
+    let seconds = clock.duration_seconds();
+    app.selected = Some(Selection {
+        part: 0,
+        measure: 0,
+        note: 0,
+    });
+    let _ = ctx.run(raw_input(1, vec![], plain), |ctx| app.ui(ctx));
+    assert!(std::sync::Arc::ptr_eq(
+        &clock,
+        app.playback_editor.clock.as_ref().unwrap()
+    ));
+    app.score.tempo = app.score.tempo.saturating_add(20);
+    let _ = ctx.run(raw_input(2, vec![], plain), |ctx| app.ui(ctx));
+    assert!(!std::sync::Arc::ptr_eq(
+        &clock,
+        app.playback_editor.clock.as_ref().unwrap()
+    ));
+    assert!(app.cached_score_seconds() < seconds as f32);
+}
+
+#[test]
+fn chord_typing_preserves_global_undo_and_never_enters_notes() {
+    let ctx = egui::Context::default();
+    configure_context(&ctx);
+    let mut app = controller(Score::blank());
+    let before = app.score.clone();
+    let plain = egui::Modifiers::NONE;
+    app.open_chords();
+    app.chord_editor.open = false;
+    let _ = ctx.run(
+        raw_input(
+            0,
+            vec![
+                egui::Event::Text("Cmaj7".into()),
+                key(egui::Key::Enter, true, plain),
+            ],
+            plain,
+        ),
+        |ctx| app.ui(ctx),
+    );
+    assert_eq!(app.score.notation.chords.len(), 1);
+    assert_eq!(app.score.parts, before.parts);
+    assert_eq!(app.undo.len(), 1);
+    let command = egui::Modifiers {
+        ctrl: true,
+        command: true,
+        ..plain
+    };
+    let _ = ctx.run(
+        raw_input(
+            1,
+            vec![
+                key(egui::Key::Enter, false, plain),
+                key(egui::Key::Z, true, command),
+            ],
+            command,
+        ),
+        |ctx| app.ui(ctx),
+    );
+    assert_eq!(app.score, before);
+    assert!(!app.dirty());
+    assert!(app.chord_editor.active);
+}
+
+#[test]
+fn linked_part_chord_and_grace_clicks_resolve_their_source_staff() {
+    let ctx = egui::Context::default();
+    configure_context(&ctx);
+    let mut score = Score::blank();
+    score.parts[1].measures[0].notes = vec![event(0, Duration::Quarter, &[48])];
+    let anchor = encore::document::Anchor {
+        part: 1,
+        measure: 0,
+        tick: 0,
+        layer: 0,
+    };
+    score.notation.grace.push(encore::grace::GraceGroup::new(
+        anchor,
+        vec![encore::grace::GraceNote::new(
+            Pitch::from_midi(50),
+            Duration::Eighth,
+        )],
+    ));
+    score.notation.chords.push(encore::chords::ChordSymbol::new(
+        anchor,
+        encore::chords::parse("Dm7").unwrap(),
+    ));
+    let mut part = encore::parts::default_definitions(&score)[0].clone();
+    part.staves = vec![1];
+    score.notation.parts = vec![part];
+    let before = score.clone();
+    let mut app = controller(score);
+    app.part_view = true;
+    let plain = egui::Modifiers::NONE;
+    let mut paper = None;
+    for frame in 0..3 {
+        let output = ctx.run(raw_input(frame, vec![], plain), |ctx| app.ui(ctx));
+        paper = output.shapes.iter().find_map(|shape| match &shape.shape {
+            egui::Shape::Rect(rect)
+                if rect.fill == Color32::WHITE
+                    && rect.rect.width() > 700.0
+                    && rect.rect.height() > 900.0 =>
+            {
+                Some(rect.rect)
+            }
+            _ => None,
+        });
+    }
+    let hit = app.cached_pages[0].chord_hits.first().unwrap();
+    assert_eq!(hit.anchor.part, 1);
+    let chord_point = paper.unwrap().min
+        + Vec2::new(hit.x + hit.width * 0.5, hit.y + hit.height * 0.5) * app.zoom;
+    for (frame, pressed) in [(3, true), (4, false)] {
+        let _ = ctx.run(
+            raw_input(
+                frame,
+                vec![
+                    egui::Event::PointerMoved(chord_point),
+                    egui::Event::PointerButton {
+                        pos: chord_point,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: plain,
+                    },
+                ],
+                plain,
+            ),
+            |ctx| app.ui(ctx),
+        );
+    }
+    assert!(app.chord_editor.open);
+    assert_eq!(app.active_part, 1);
+    assert_eq!(app.score, before);
+    app.exit_chord_entry();
+    ctx.memory_mut(|memory| memory.move_focus(egui::FocusDirection::None));
+    for frame in 5..17 {
+        let _ = ctx.run(raw_input(frame, vec![], plain), |ctx| app.ui(ctx));
+    }
+    let hit = app.cached_pages[0].grace_hits.first().unwrap();
+    assert_eq!(hit.selection.anchor.part, 1);
+    let point = paper.unwrap().min + Vec2::new(hit.x, hit.y) * app.zoom;
+    for (frame, pressed) in [(17, true), (18, false)] {
+        let _ = ctx.run(
+            raw_input(
+                frame,
+                vec![
+                    egui::Event::PointerMoved(point),
+                    egui::Event::PointerButton {
+                        pos: point,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: plain,
+                    },
+                ],
+                plain,
+            ),
+            |ctx| app.ui(ctx),
+        );
+    }
+    assert!(app.grace_editor.open);
+    assert_eq!(app.grace_editor.selected.unwrap().anchor.part, 1);
+    assert_eq!(app.score, before);
+}
+
+#[test]
+fn next_part_shortcut_activates_the_new_staff_before_reconciliation() {
+    let ctx = egui::Context::default();
+    configure_context(&ctx);
+    let mut score = Score::blank();
+    score.parts[1].instrument = Instrument::Flute;
+    score.parts[1].name = "Flute".into();
+    let mut app = controller(score.clone());
+    app.activate_linked_part(0);
+    let plain = egui::Modifiers::NONE;
+    for frame in 0..2 {
+        let _ = ctx.run(raw_input(frame, vec![], plain), |ctx| app.ui(ctx));
+    }
+    let modifiers = egui::Modifiers {
+        ctrl: true,
+        command: true,
+        alt: true,
+        ..plain
+    };
+    let _ = ctx.run(
+        raw_input(2, vec![key(egui::Key::Period, true, modifiers)], modifiers),
+        |ctx| app.ui(ctx),
+    );
+    assert_eq!(app.selected_linked_part, 1);
+    assert_eq!(app.active_part, 1);
+    assert!(
+        app.cached_pages
+            .iter()
+            .flat_map(|page| &page.staves)
+            .all(|staff| staff.part == 1)
+    );
+    assert_eq!(app.score, score);
+    assert!(!app.dirty());
 }

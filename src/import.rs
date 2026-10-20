@@ -11,9 +11,12 @@ use std::io::{Cursor, Read};
 use std::path::Path;
 
 mod annotations;
+mod chords;
 mod entry_style;
 mod expressions;
 mod finale;
+mod grace;
+mod lines;
 mod midi;
 mod musescore;
 mod musicxml;

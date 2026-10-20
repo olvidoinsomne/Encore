@@ -14,6 +14,8 @@ struct ClipboardEvent {
     lyrics: Vec<encore::lyrics::Lyric>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     style: Option<encore::entry_style::EntryStyle>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    grace: Vec<encore::grace::GraceGroup>,
 }
 
 #[cfg(test)]
@@ -26,16 +28,19 @@ fn encode_annotated_event(
     note: Note,
     lyrics: Vec<encore::lyrics::Lyric>,
 ) -> Result<String, String> {
-    encode_document_event(note, lyrics, None)
+    encode_document_event(note, lyrics, None, Vec::new())
 }
 
 fn encode_document_event(
     note: Note,
     lyrics: Vec<encore::lyrics::Lyric>,
     style: Option<encore::entry_style::EntryStyle>,
+    grace: Vec<encore::grace::GraceGroup>,
 ) -> Result<String, String> {
     let data = serde_json::to_string(&ClipboardEvent {
-        version: if style.is_some() {
+        version: if !grace.is_empty() {
+            4
+        } else if style.is_some() {
             3
         } else if lyrics.is_empty() {
             1
@@ -45,6 +50,7 @@ fn encode_document_event(
         note,
         lyrics,
         style,
+        grace,
     })
     .map_err(|error| format!("Could not copy event: {error}"))?;
     if data.len() + CLIPBOARD_MARKER.len() > MAX_CLIPBOARD_BYTES {
@@ -62,7 +68,7 @@ fn decode_event(text: &str) -> Result<ClipboardEvent, String> {
         .ok_or("Copy a single note, chord, or rest in Encore before pasting.")?;
     let event: ClipboardEvent = serde_json::from_str(data)
         .map_err(|error| format!("Invalid Encore clipboard event: {error}"))?;
-    if ![1, 2, 3].contains(&event.version) {
+    if ![1, 2, 3, 4].contains(&event.version) {
         return Err("This clipboard event requires a different Encore version.".into());
     }
     Ok(event)
@@ -105,7 +111,15 @@ impl EncoreApp {
         let style = anchor
             .and_then(|anchor| encore::entry_style::at(&self.score, &anchor))
             .cloned();
-        let text = match encode_document_event(note.clone(), lyrics, style) {
+        let grace = self
+            .score
+            .notation
+            .grace
+            .iter()
+            .filter(|group| Some(group.anchor) == anchor)
+            .cloned()
+            .collect();
+        let text = match encode_document_event(note.clone(), lyrics, style, grace) {
             Ok(text) => text,
             Err(error) => {
                 self.status = error;
@@ -247,6 +261,7 @@ impl EncoreApp {
             mut note,
             lyrics,
             style,
+            grace,
             ..
         } = decode_event(text)?;
         note.start = self.cursor_tick;
@@ -295,6 +310,16 @@ impl EncoreApp {
         if let Some(mut style) = style {
             style.anchor = anchor;
             encore::entry_style::assign(&mut candidate, style)?;
+        }
+        if grace.len() > 2 {
+            return Err(
+                "A clipboard event may contain only one before and one after grace group.".into(),
+            );
+        }
+        for mut group in grace {
+            group.anchor = anchor;
+            group.validate()?;
+            candidate.notation.grace.push(group);
         }
         candidate.validate()?;
         // Commit only after the complete score validates. A failed paste keeps
@@ -481,6 +506,7 @@ mod tests {
                 note: original.clone(),
                 lyrics: Vec::new(),
                 style: None,
+                grace: Vec::new(),
             })
             .unwrap()
         );
@@ -741,5 +767,91 @@ mod tests {
             projection.score.parts[0].measures[1].notes[0].pitches[0].midi(),
             62
         );
+    }
+}
+
+#[cfg(test)]
+mod grace_clipboard_tests {
+    use super::*;
+    use encore::{
+        document::Anchor,
+        grace::{GraceGroup, GraceNote, GracePlacement, GraceTiming},
+    };
+    #[test]
+    fn event_v4_cut_and_paste_rebind_both_grace_groups_with_source_pitches() {
+        let ctx = egui::Context::default();
+        let mut app = EncoreApp::from_score(Score::demo(), None, "Ready".into());
+        let at = Anchor {
+            part: 2,
+            measure: 0,
+            tick: 0,
+            layer: 0,
+        };
+        let before = GraceGroup::new(
+            at,
+            vec![GraceNote::new(Pitch::from_midi(60), Duration::Sixteenth)],
+        );
+        let mut after = before.clone();
+        after.placement = GracePlacement::After;
+        after.timing = GraceTiming::StealMain;
+        after.notes[0].pitches[0] = Pitch::from_midi(62);
+        app.score.notation.grace = vec![before, after];
+        app.selected = at.selection(&app.score);
+        app.copy_selection(&ctx, true);
+        let copied = ctx
+            .output(|output| {
+                output.commands.iter().find_map(|command| {
+                    if let egui::OutputCommand::CopyText(text) = command {
+                        Some(text.clone())
+                    } else {
+                        None
+                    }
+                })
+            })
+            .unwrap();
+        assert_eq!(decode_event(&copied).unwrap().version, 4);
+        assert!(app.score.notation.grace.is_empty());
+        app.active_part = 1;
+        app.active_layer = 2;
+        app.cursor_measure = 3;
+        app.cursor_tick = 240;
+        app.score.parts[1].measures[3].notes.clear();
+        app.paste_selection(&copied);
+        app.score.validate().unwrap();
+        assert_eq!(app.score.notation.grace.len(), 2);
+        for group in &app.score.notation.grace {
+            assert_eq!(
+                group.anchor,
+                Anchor {
+                    part: 1,
+                    measure: 3,
+                    tick: 240,
+                    layer: 2
+                }
+            );
+        }
+        assert_eq!(app.score.notation.grace[0].notes[0].pitches[0].midi(), 60);
+        assert_eq!(app.score.notation.grace[1].notes[0].pitches[0].midi(), 62);
+    }
+    #[test]
+    fn invalid_grace_clipboard_preserves_the_entire_destination() {
+        let mut app = EncoreApp::from_score(Score::blank(), None, "Ready".into());
+        let at = Anchor {
+            part: 0,
+            measure: 0,
+            tick: 0,
+            layer: 0,
+        };
+        let note = Score::demo().parts[0].measures[0].notes[0].clone();
+        let mut group = GraceGroup::new(
+            at,
+            vec![GraceNote::new(Pitch::from_midi(60), Duration::Eighth)],
+        );
+        group.percent = 100.;
+        let text = encode_document_event(note, vec![], None, vec![group]).unwrap();
+        let before = app.score.clone();
+        app.paste_selection(&text);
+        assert_eq!(app.score, before);
+        assert!(app.status.starts_with("Cannot paste:"));
     }
 }

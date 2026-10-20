@@ -134,6 +134,9 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
     let mut parts = Vec::new();
     let mut annotation_sets = Vec::new();
     let mut expression_sets = Vec::new();
+    let mut chord_sets = Vec::new();
+    let mut grace_sets = Vec::new();
+    let mut line_sets = Vec::new();
     let mut initial_meter = None;
     let mut initial_key = None;
     let mut initial_tempo = None;
@@ -167,6 +170,9 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
         }
         let mut annotations = Annotations::default();
         let mut expressions = super::expressions::Expressions::default();
+        let mut chords = super::chords::Chords::default();
+        let mut grace = super::grace::GraceCollector::default();
+        let mut lines = super::lines::Lines::default();
         let mut annotation_mapping = BTreeMap::new();
         let repeat_map = crate::repeats::parse_musicxml(source, measures.len())?;
         if !repeat_map.is_empty() {
@@ -188,6 +194,8 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
         let mut declared_staves = 1_u32;
         let mut transpose = BTreeMap::new();
         let mut default_transpose = 0_i16;
+        let mut transpose_diatonic = BTreeMap::new();
+        let mut default_diatonic = None;
         let mut divisions = None;
         let mut velocities = BTreeMap::new();
         let mut part_meter = (4_u8, 4_u8);
@@ -251,7 +259,27 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
                             if !(-127..=127).contains(&semitones) {
                                 return Err("MusicXML transposition exceeds MIDI range.".into());
                             }
+                            let diatonic = number::<i16>(transposition, "diatonic")?
+                                .map(|value| {
+                                    value
+                                        .checked_add(
+                                            number::<i16>(transposition, "octave-change")
+                                                .ok()
+                                                .flatten()
+                                                .unwrap_or(0)
+                                                .checked_mul(7)
+                                                .unwrap_or(i16::MAX),
+                                        )
+                                        .ok_or("Invalid diatonic transposition.")
+                                })
+                                .transpose()?;
                             if let Some(staff) = transposition.attribute("number") {
+                                transpose_diatonic.insert(
+                                    staff
+                                        .parse::<u32>()
+                                        .map_err(|_| "Invalid transpose staff number.")?,
+                                    diatonic,
+                                );
                                 transpose.insert(
                                     staff
                                         .parse::<u32>()
@@ -260,6 +288,7 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
                                 );
                             } else {
                                 default_transpose = semitones;
+                                default_diatonic = diatonic;
                             }
                             if semitones != 0 {
                                 warnings.add(
@@ -369,16 +398,44 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
                         {
                             velocities.insert(staff, dynamic_velocity(mark.tag_name().name()));
                         }
-                        if item
-                            .descendants()
-                            .any(|n| n.has_tag_name("pedal") || n.has_tag_name("octave-shift"))
-                        {
-                            warnings.add("Pedal marks and octave lines are not retained; pitches, dynamics and supported hairpins are imported.");
-                        }
+                        lines.xml(
+                            item,
+                            SourceAnchor {
+                                staff,
+                                voice: value(item, "voice").unwrap_or("1").to_owned(),
+                                measure: measure_index,
+                                tick: direction_tick as u32,
+                            },
+                            &mut warnings,
+                        )?;
                     }
                     "note" => {
                         if child(item, "grace").is_some() {
-                            warnings.add("Grace notes are omitted; main-note timing is preserved.");
+                            let staff = number::<u32>(item, "staff")?.unwrap_or(1);
+                            if staff == 0 || staff > 64 {
+                                return Err("MusicXML grace staff number must be 1–64.".into());
+                            }
+                            let voice = value(item, "voice").unwrap_or("1").to_owned();
+                            if voice.len() > 64 {
+                                return Err("MusicXML grace voice identifier is too long.".into());
+                            }
+                            let shift = transpose.get(&staff).copied().unwrap_or(default_transpose);
+                            let pitch = read_pitch(
+                                child(item, "pitch")
+                                    .ok_or("A grace note must have a pitched note.")?,
+                                shift,
+                            )?;
+                            grace.xml(
+                                item,
+                                SourceAnchor {
+                                    staff,
+                                    voice,
+                                    measure: measure_index,
+                                    tick: cursor,
+                                },
+                                pitch,
+                                &mut warnings,
+                            )?;
                             continue;
                         }
                         if child(item, "unpitched").is_some() {
@@ -436,16 +493,24 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
                             || item.descendants().any(|n| {
                                 n.has_tag_name("tied") && n.attribute("type") == Some("start")
                             });
-                        annotations.xml(
+                        let at = SourceAnchor {
+                            staff,
+                            voice: voice.clone(),
+                            measure: measure_index,
+                            tick: start,
+                        };
+                        let excluded = if !chord && !pitches.is_empty() {
+                            grace.main(item, at.clone(), &mut warnings)?
+                        } else {
+                            Default::default()
+                        };
+                        annotations.xml_excluding_slurs(
                             item,
-                            SourceAnchor {
-                                staff,
-                                voice: voice.clone(),
-                                measure: measure_index,
-                                tick: start,
-                            },
+                            at.clone(),
                             &mut warnings,
+                            &excluded,
                         )?;
+                        lines.xml_note(item, at, divisions.unwrap_or(480.0), &mut warnings)?;
                         let key = (staff, voice);
                         if !events.contains_key(&key)
                             && events
@@ -501,17 +566,58 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
                                 rhythm,
                             });
                         }
-                        if item
-                            .descendants()
-                            .any(|n| n.has_tag_name("ornaments") || n.has_tag_name("technical"))
-                        {
+                        if item.descendants().any(|n| {
+                            n.has_tag_name("technical")
+                                || (n.has_tag_name("ornaments")
+                                    && n.children().filter(|child| child.is_element()).any(
+                                        |child| {
+                                            !matches!(
+                                                child.tag_name().name(),
+                                                "trill-mark" | "wavy-line"
+                                            )
+                                        },
+                                    ))
+                        }) {
                             warnings.add("Ornaments and playing instructions are not retained in the editable score.");
                         }
                     }
                     "barline" => (),
-                    "harmony" | "figured-bass" => warnings.add(
-                        "Chord symbols and figured bass are not retained in the editable score.",
-                    ),
+                    "harmony" => {
+                        let offset = number::<f64>(item, "offset")?.unwrap_or(0.0) * 480.0
+                            / divisions.unwrap_or(480.0);
+                        let position = f64::from(cursor) + offset;
+                        if !position.is_finite()
+                            || position < 0.0
+                            || position > f64::from(u32::MAX)
+                            || (position - position.round()).abs() > 0.000001
+                        {
+                            return Err(
+                                "Chord harmony offset is outside the measure timing grid.".into()
+                            );
+                        }
+                        let staff = number::<u32>(item, "staff")?.unwrap_or(1);
+                        if staff == 0 || staff > 64 {
+                            return Err("MusicXML harmony staff number must be 1–64.".into());
+                        }
+                        let interval = super::chords::concert_interval(
+                            transpose.get(&staff).copied().unwrap_or(default_transpose),
+                            transpose_diatonic
+                                .get(&staff)
+                                .copied()
+                                .unwrap_or(default_diatonic),
+                        )?;
+                        chords.xml(
+                            item,
+                            staff,
+                            measure_index,
+                            position as u32,
+                            interval,
+                            &mut warnings,
+                        )?;
+                    }
+                    "figured-bass" => {
+                        warnings.add("Figured bass is not retained in the editable score.")
+                    }
                     "print" | "bookmark" | "link" => (),
                     _ => (),
                 }
@@ -537,6 +643,9 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
             };
             annotations.shift(measure_index, pickup_shift);
             expressions.shift(measure_index, pickup_shift);
+            chords.shift(measure_index, pickup_shift);
+            grace.shift(measure_index, pickup_shift);
+            lines.shift(measure_index, pickup_shift);
             if extent > measure_ticks {
                 return Err(format!(
                     "{context}: music extends beyond the fixed time signature."
@@ -684,6 +793,9 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
             });
         }
         expression_sets.push((expressions, annotation_mapping.clone()));
+        chord_sets.push((chords, annotation_mapping.clone()));
+        grace_sets.push((grace, annotation_mapping.clone()));
+        line_sets.push((lines, annotation_mapping.clone()));
         annotation_sets.push((annotations, annotation_mapping));
     }
     if initial_tempo.is_none() {
@@ -695,6 +807,15 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
     }
     for (expressions, mapping) in expression_sets {
         expressions.resolve(&mut score, &mapping, &mut warnings)?;
+    }
+    for (chords, mapping) in chord_sets {
+        chords.finish(&mut score, &mapping, &mut warnings)?;
+    }
+    for (grace, mapping) in grace_sets {
+        grace.finish(&mut score, &mapping, &mut warnings)?;
+    }
+    for (lines, mapping) in line_sets {
+        lines.resolve(&mut score, &mapping, &mut warnings)?;
     }
     let parts = std::mem::take(&mut score.parts);
     finish_parts(score, parts, warnings)
@@ -916,6 +1037,111 @@ fn tempo(node: Node<'_, '_>) -> Result<Option<f64>, String> {
         return Ok(Some(bpm * factor * if dots == 1 { 1.5 } else { 1.0 }));
     }
     Ok(None)
+}
+
+#[cfg(test)]
+mod harmony_tests {
+    use super::*;
+    use crate::model::Score;
+    use crate::{
+        chords::{self, ChordSymbol},
+        document::Anchor,
+        grace::{GraceGroup, GraceNote},
+        lines::{LineKind, PerformanceLine},
+    };
+    fn read(body: &str) -> ImportResult {
+        let xml = format!(
+            "<score-partwise><part-list><score-part id='p'><part-name>Clarinet</part-name></score-part></part-list><part id='p'><measure><attributes><divisions>4</divisions><time><beats>4</beats><beat-type>4</beat-type></time><transpose><diatonic>-1</diatonic><chromatic>-2</chromatic></transpose></attributes>{body}</measure></part></score-partwise>"
+        );
+        parse(&Document::parse(&xml).unwrap()).unwrap()
+    }
+    #[test]
+    fn harmony_cursor_offsets_and_written_spelling_convert_to_concert() {
+        let imported = read(
+            "<forward><duration>2</duration></forward><harmony><root><root-step>D</root-step></root><kind text='7'>dominant</kind><bass><bass-step>F</bass-step><bass-alter>1</bass-alter></bass><offset>2</offset></harmony><note><pitch><step>D</step><octave>4</octave></pitch><duration>4</duration><type>quarter</type></note>",
+        );
+        let symbol = &imported.score.notation.chords[0];
+        assert_eq!(symbol.anchor.tick, 480);
+        assert_eq!(symbol.anchor.layer, 0);
+        assert_eq!(symbol.chord.label(), "C7/E");
+    }
+    #[test]
+    fn standard_xml_export_import_retains_chords_frames_grace_and_lines() {
+        let mut score = Score::demo();
+        let at = Anchor {
+            part: 2,
+            measure: 0,
+            tick: 0,
+            layer: 0,
+        };
+        let mut chord = ChordSymbol::new(
+            Anchor { tick: 240, ..at },
+            chords::parse("C7(b9)/E").unwrap(),
+        );
+        chord.fretboard = Some(chords::Fretboard::guitar(vec![
+            None,
+            Some(3),
+            Some(2),
+            Some(3),
+            Some(2),
+            Some(0),
+        ]));
+        score.notation.chords.push(chord.clone());
+        score.notation.grace.push(GraceGroup::new(
+            at,
+            vec![GraceNote::new(Pitch::from_midi(64), Duration::Sixteenth)],
+        ));
+        score.notation.lines.push(PerformanceLine::new(
+            at,
+            Anchor { measure: 1, ..at },
+            LineKind::Ottava { semitones: 12 },
+        ));
+        score.validate().unwrap();
+        let xml = crate::export::musicxml(&score);
+        let imported = parse(
+            &Document::parse_with_options(
+                &xml,
+                roxmltree::ParsingOptions {
+                    allow_dtd: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(imported.score.notation.chords[0].chord, chord.chord);
+        assert_eq!(imported.score.notation.chords[0].anchor, chord.anchor);
+        assert_eq!(
+            imported.score.notation.chords[0]
+                .fretboard
+                .as_ref()
+                .unwrap()
+                .frets,
+            chord.fretboard.unwrap().frets
+        );
+        assert_eq!(
+            imported.score.notation.grace[0].notes[0].pitches[0].midi(),
+            64
+        );
+        assert_eq!(
+            imported.score.notation.lines[0].kind,
+            LineKind::Ottava { semitones: 12 }
+        );
+        assert_eq!(imported.score.notation.lines[0].start, at);
+    }
+    #[test]
+    fn malformed_harmony_is_reported_without_inventing_a_major_triad() {
+        let imported = read(
+            "<harmony><root><root-step>D</root-step></root></harmony><note><rest/><duration>16</duration><type>whole</type></note>",
+        );
+        assert!(imported.score.notation.chords.is_empty());
+        assert!(
+            imported
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("required kind"))
+        );
+    }
 }
 
 pub(super) fn dynamic_velocity(name: &str) -> u8 {

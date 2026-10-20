@@ -189,6 +189,9 @@ fn ensure_known_fields(object: &Map<String, Value>) -> Result<(), String> {
             "entries",
             "expressions",
             "spanners",
+            "chords",
+            "grace",
+            "lines",
             "tempo",
             "repeats",
             "navigation",
@@ -323,7 +326,16 @@ pub fn copy_region(score: &Score, region: &Region) -> Result<RegionClip, String>
     };
     let mut omitted = 0;
     let mut omitted_repeats = 0;
-    for key in ["lyrics", "slurs", "entries", "expressions", "spanners"] {
+    for key in [
+        "lyrics",
+        "slurs",
+        "entries",
+        "expressions",
+        "spanners",
+        "chords",
+        "grace",
+        "lines",
+    ] {
         let mut copied = Vec::new();
         for original in records(&source, key) {
             let mut item = original.clone();
@@ -542,7 +554,16 @@ fn clear_in_place(score: &mut Score, region: &Region) -> Result<(), String> {
             measure.notes.clear();
         }
     }
-    for key in ["lyrics", "slurs", "entries", "expressions", "spanners"] {
+    for key in [
+        "lyrics",
+        "slurs",
+        "entries",
+        "expressions",
+        "spanners",
+        "chords",
+        "grace",
+        "lines",
+    ] {
         let mut kept = Vec::new();
         for original in records(&notation, key) {
             let mut item = original.clone();
@@ -668,7 +689,16 @@ pub fn paste_region(
             ..anchor
         })
     };
-    for key in ["lyrics", "slurs", "entries", "expressions", "spanners"] {
+    for key in [
+        "lyrics",
+        "slurs",
+        "entries",
+        "expressions",
+        "spanners",
+        "chords",
+        "grace",
+        "lines",
+    ] {
         let mut merged = records(&notation, key).to_vec();
         for item in records(&source, key) {
             let mut item = item.clone();
@@ -808,6 +838,20 @@ fn transpose_with(
             }
         }
     }
+    for symbol in &mut candidate.notation.chords {
+        if region.contains(&symbol.anchor) {
+            crate::chords::map_symbol_pitches(symbol, &transform)?;
+        }
+    }
+    for group in &mut candidate.notation.grace {
+        if region.contains(&group.anchor) {
+            for note in &mut group.notes {
+                for pitch in &mut note.pitches {
+                    *pitch = transform(*pitch)?;
+                }
+            }
+        }
+    }
     // Preserve per-tone accidental and tie choices by chord position, just as a
     // single-entry pitch edit does, without a quadratic scan over entry styles.
     for style in &mut candidate.notation.entries {
@@ -904,7 +948,16 @@ pub fn delete_measures(score: &mut Score, start: usize, end: usize) -> Result<()
 fn remap_measures(score: &mut Score, mapping: &[Option<usize>]) -> Result<(), String> {
     let mut notation = checked_notation(&score.notation)?;
     let map_measure = |measure: usize| mapping.get(measure).copied().flatten();
-    for key in ["lyrics", "slurs", "entries", "expressions", "spanners"] {
+    for key in [
+        "lyrics",
+        "slurs",
+        "entries",
+        "expressions",
+        "spanners",
+        "chords",
+        "grace",
+        "lines",
+    ] {
         let mut kept = Vec::new();
         for original in records(&notation, key) {
             let mut item = original.clone();
@@ -1588,5 +1641,104 @@ mod tests {
                 .unwrap_err()
                 .contains("future_spanners")
         );
+    }
+}
+
+#[cfg(test)]
+mod new_metadata_tests {
+    use super::*;
+    use crate::{
+        chords::{self, ChordSymbol},
+        grace::{GraceGroup, GraceNote},
+        lines::{LineKind, PerformanceLine},
+        model::{Duration, Pitch},
+    };
+    #[test]
+    fn new_notation_survives_region_copy_paste_transpose_and_structural_edits() {
+        let mut score = Score::demo();
+        let at = Anchor {
+            part: 2,
+            measure: 0,
+            tick: 0,
+            layer: 0,
+        };
+        score.notation.chords.push(ChordSymbol::new(
+            Anchor { tick: 240, ..at },
+            chords::parse("C7/E").unwrap(),
+        ));
+        score.notation.grace.push(GraceGroup::new(
+            at,
+            vec![GraceNote::new(Pitch::from_midi(60), Duration::Sixteenth)],
+        ));
+        score.notation.lines.push(PerformanceLine::new(
+            at,
+            Anchor { measure: 1, ..at },
+            LineKind::Ottava { semitones: 12 },
+        ));
+        score.validate().unwrap();
+        let region = Region {
+            staves: vec![2],
+            start: 0,
+            end: 1,
+        };
+        let clip = copy_region(&score, &region).unwrap();
+        assert_eq!(clip.notation.chords[0].anchor.part, 0);
+        assert_eq!(clip.notation.grace[0].anchor.part, 0);
+        paste_region(&mut score, &clip, &[4], 4, PasteMode::Replace).unwrap();
+        let target = Region {
+            staves: vec![4],
+            start: 4,
+            end: 5,
+        };
+        transpose_region(
+            &mut score,
+            &target,
+            Transposition {
+                semitones: 2,
+                diatonic_steps: 1,
+            },
+        )
+        .unwrap();
+        let chord = score
+            .notation
+            .chords
+            .iter()
+            .find(|s| s.anchor.part == 4)
+            .unwrap();
+        assert_eq!(chord.chord.label(), "D7/F#");
+        let grace = score
+            .notation
+            .grace
+            .iter()
+            .find(|s| s.anchor.part == 4)
+            .unwrap();
+        assert_eq!(grace.notes[0].pitches[0].midi(), 62);
+        insert_measures(&mut score, 3, 1).unwrap();
+        assert!(
+            score.notation.lines.iter().any(|line| line.start.part == 4
+                && line.start.measure == 5
+                && line.end.measure == 6)
+        );
+        delete_measures(&mut score, 3, 3).unwrap();
+        assert!(
+            score
+                .notation
+                .chords
+                .iter()
+                .any(|symbol| symbol.anchor.part == 4 && symbol.anchor.measure == 4)
+        );
+        score.validate().unwrap();
+        let before = score.clone();
+        let region = Region {
+            staves: vec![4],
+            start: 4,
+            end: 5,
+        };
+        assert!(paste_region(&mut score, &clip, &[4], 4, PasteMode::EmptyOnly).is_err());
+        assert_eq!(score, before);
+        clear_region(&mut score, &region).unwrap();
+        assert!(!score.notation.grace.iter().any(|g| g.anchor.part == 4));
+        assert!(!score.notation.chords.iter().any(|g| g.anchor.part == 4));
+        assert!(!score.notation.lines.iter().any(|g| g.start.part == 4));
     }
 }

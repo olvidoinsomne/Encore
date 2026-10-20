@@ -213,6 +213,9 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
     let mut parts = Vec::new();
     let mut annotation_sets = Vec::new();
     let mut expression_sets = Vec::new();
+    let mut chord_sets = Vec::new();
+    let mut grace_sets = Vec::new();
+    let mut line_sets = Vec::new();
     let mut staff_ids = Vec::new();
     for staff in source.children().filter(|n| n.has_tag_name("Staff")) {
         if parts.len() >= MAX_PARTS {
@@ -248,6 +251,9 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
         }
         let mut annotations = Annotations::default();
         let mut expressions = super::expressions::Expressions::default();
+        let mut chords = super::chords::Chords::default();
+        let mut grace = super::grace::GraceCollector::default();
+        let mut lines = super::lines::Lines::default();
         let source_staff = id
             .parse::<u32>()
             .map_err(|_| "MuseScore staff id must be numeric.")?;
@@ -367,6 +373,19 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
                         division,
                         &mut warnings,
                     )?;
+                    lines.muse(
+                        item,
+                        SourceAnchor {
+                            staff: source_staff,
+                            voice: voice_index.to_string(),
+                            measure: measure_index,
+                            tick: cursor
+                                .try_into()
+                                .map_err(|_| "Invalid performance-line position.")?,
+                        },
+                        division,
+                        &mut warnings,
+                    )?;
                     match item.tag_name().name() {
                         "Tuplet" => {
                             if child(item, "Tuplet").is_some() { return Err(format!("{context}: nested MuseScore tuplets are not supported yet.")); }
@@ -411,7 +430,10 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
                             if measure_index == 0 && cursor == 0 { clef = next; } else if next != clef { warnings.add("Clef changes use the initial clef; sounding pitches are preserved."); }
                         }
                         "Chord" | "Rest" => {
-                            if item.children().any(|n| matches!(n.tag_name().name(), "acciaccatura" | "appoggiatura" | "grace4" | "grace16" | "grace32" | "grace8after" | "grace16after" | "grace32after")) { warnings.add("Grace notes are omitted; main-note timing is preserved."); continue; }
+                            if item.children().any(|n| matches!(n.tag_name().name(), "acciaccatura" | "appoggiatura" | "grace4" | "grace16" | "grace32" | "grace8after" | "grace16after" | "grace32after")) {
+                                let pitches=item.children().filter(|n|n.has_tag_name("Note")).map(|note|{let midi=number::<u8>(note,"pitch")?.ok_or("MuseScore grace note has no pitch.")?;if midi>127{return Err("MuseScore grace pitch exceeds MIDI127.".into());}Ok(spelled_pitch(midi,number::<i32>(note,"tpc")?))}).collect::<Result<Vec<_>,String>>()?;
+                                grace.muse(item,SourceAnchor{staff:source_staff,voice:voice_index.to_string(),measure:measure_index,tick:cursor.try_into().map_err(|_|"Invalid grace position.")?},pitches,&mut warnings)?;continue;
+                            }
                             let tuplet = if let Some(id) = value(item, "Tuplet") {
                                 if active_tuplet.is_some() { return Err("Nested MuseScore tuplets are not supported yet.".into()); }
                                 Some(*tuplets.get(id).ok_or("MuseScore note references a missing tuplet.")?)
@@ -447,6 +469,9 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
                                 tied = Some(outgoing);
                                 if child(*note, "Events").is_some() || child(*note, "velocity").is_some() || child(*note, "tuning").is_some() { warnings.add("Custom per-note playback events, tuning, and velocity overrides are not retained; written dynamics are used."); }
                             }
+                            let at=SourceAnchor{staff:source_staff,voice:voice_index.to_string(),measure:measure_index,tick:cursor as u32};
+                            if !pitches.is_empty(){grace.main(item,at.clone(),&mut warnings)?;}
+                            for line in item.descendants().filter(|n|n.has_tag_name("Spanner")&&matches!(n.attribute("type"),Some("Trill"|"Glissando"|"Ottava"|"Pedal"))){lines.muse(line,at.clone(),division,&mut warnings)?;}
                             annotations.muse(item,SourceAnchor{staff:source_staff,voice:voice_index.to_string(),measure:measure_index,tick:cursor as u32},division,&mut warnings)?;
                             let (staccato, articulations) = read_articulations(item, &mut warnings);
                             if let Some(duration) = rhythm {
@@ -463,9 +488,10 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
                         }
                         "Slur" | "endSpanner" => annotations.muse_spanner(item,SourceAnchor{staff:source_staff,voice:voice_index.to_string(),measure:measure_index,tick:cursor.try_into().map_err(|_|"Invalid MuseScore slur location.")?},&mut warnings)?,
                         "Spanner" if item.attribute("type")==Some("Slur") => annotations.muse_spanner(item,SourceAnchor{staff:source_staff,voice:voice_index.to_string(),measure:measure_index,tick:cursor.try_into().map_err(|_|"Invalid MuseScore slur location.")?},&mut warnings)?,
-                        "Spanner" => { if item.attribute("type") != Some("Tie") && item.attribute("type") != Some("Volta") { warnings.add("Hairpins, pedals, and other expression lines are not retained."); } }
+                        "Spanner" => { if !matches!(item.attribute("type"),Some("Tie"|"Volta"|"Pedal"|"Ottava"|"Trill"|"Glissando"|"HairPin"|"Hairpin")) { warnings.add("An unsupported MuseScore spanner is not retained."); } }
                         "InstrumentChange" | "StaffState" => warnings.add("Instrument changes use the staff's initial instrument for playback."),
-                        "Harmony" | "FiguredBass" => warnings.add("Chord symbols and figured bass are not retained in the editable score."),
+                        "Harmony" => {let interval=if concert_pitch{crate::parts::Transposition::CONCERT}else{super::chords::concert_interval(info.transpose,None)?};chords.muse(item,source_staff,measure_index,cursor.try_into().map_err(|_|"Invalid MuseScore harmony position.")?,interval,&mut warnings)?;},
+                        "FiguredBass" => warnings.add("Figured bass is not retained in the editable score."),
                         "RepeatMeasure" | "MeasureRepeat" => return Err("Measure-repeat shorthand is not supported yet. Expand those measures before importing.".into()),
 
                         "SystemText" if child(item, "swing").is_some() => warnings.add("Swing playback settings are not retained; notes use their written durations."),
@@ -492,6 +518,9 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
             if pickup_shift > 0 {
                 annotations.shift(measure_index, pickup_shift);
                 expressions.shift(measure_index, pickup_shift);
+                chords.shift(measure_index, pickup_shift);
+                grace.shift(measure_index, pickup_shift);
+                lines.shift(measure_index, pickup_shift);
             }
             source_start = source_start
                 .checked_add(actual_ticks)
@@ -560,6 +589,9 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
             solo: false,
         });
         expression_sets.push((expressions, annotation_mapping.clone()));
+        chord_sets.push((chords, annotation_mapping.clone()));
+        grace_sets.push((grace, annotation_mapping.clone()));
+        line_sets.push((lines, annotation_mapping.clone()));
         annotation_sets.push((annotations, annotation_mapping));
     }
     if initial_tempo.is_none() {
@@ -573,6 +605,15 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
     }
     for (expressions, mapping) in expression_sets {
         expressions.resolve(&mut score, &mapping, &mut warnings)?;
+    }
+    for (chords, mapping) in chord_sets {
+        chords.finish(&mut score, &mapping, &mut warnings)?;
+    }
+    for (grace, mapping) in grace_sets {
+        grace.finish(&mut score, &mapping, &mut warnings)?;
+    }
+    for (lines, mapping) in line_sets {
+        lines.resolve(&mut score, &mapping, &mut warnings)?;
     }
     let parts = std::mem::take(&mut score.parts);
     finish_parts(score, parts, warnings)
@@ -719,6 +760,34 @@ fn concert_key(fifths: i8, transpose: i16) -> i8 {
         .filter(|n| (i16::from(*n) * 7).rem_euclid(12) == tonic)
         .min_by_key(|n| n.unsigned_abs())
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod harmony_tests {
+    use super::*;
+    #[test]
+    fn native_harmony_and_grace_notes_are_editable_and_unsupported_suffixes_warn() {
+        let xml = "<museScore version='4.30'><Score><Staff id='1'><Measure><voice><TimeSig><sigN>4</sigN><sigD>4</sigD></TimeSig><Harmony><root>13</root><name>m7</name><base>15</base></Harmony><Chord><appoggiatura/><durationType>eighth</durationType><Note><pitch>62</pitch><tpc>16</tpc></Note></Chord><Chord><durationType>quarter</durationType><Note><pitch>60</pitch><tpc>14</tpc></Note></Chord><Harmony><root>14</root><name>bananas</name></Harmony></voice></Measure></Staff></Score></museScore>";
+        let imported = parse(&Document::parse(xml).unwrap()).unwrap();
+        assert_eq!(imported.score.notation.chords[0].chord.label(), "Fm7/G");
+        assert_eq!(imported.score.notation.chords.len(), 1);
+        assert_eq!(imported.score.notation.grace[0].anchor.tick, 0);
+        assert_eq!(
+            imported.score.notation.grace[0].notes[0].pitches[0].midi(),
+            62
+        );
+        assert!(
+            imported
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("bananas"))
+        );
+    }
+    #[test]
+    fn out_of_range_native_tonal_pitch_class_is_a_bounded_error() {
+        let xml = "<museScore version='4.30'><Score><Staff id='1'><Measure><voice><Harmony><root>-2147483648</root><name>7</name></Harmony></voice></Measure></Staff></Score></museScore>";
+        assert!(parse(&Document::parse(xml).unwrap()).is_err());
+    }
 }
 
 #[cfg(test)]

@@ -164,10 +164,11 @@ on the parity audit. Repeat regions, endings and navigation marks are edited in
 
 **Notation → Expressions and tempo** opens the dynamic, text, rehearsal, hairpin and tempo editors. Text fields retain ordinary typing behavior. Finale expression metatools and Smart Shape assignment shortcuts remain pending; no unrelated global shortcut is substituted.
 
+**Notation → Performance lines** opens octave, pedal, trill and chromatic glissando editing. Finale Smart Shape metatools and drag-to-assign shortcuts remain pending. Existing text and modal focus protections apply.
+
 Single-event copy/cut/paste carries attached lyric syllables and entry engraving
-styles, including per-pitch ties. Whole-measure regional clipboard data also
-preserves fully contained lyric/slur/hairpin spans, expressions and engraving
-styles. Cross-boundary spans are omitted or shortened with an explicit warning.
+styles, including per-pitch ties, plus before/after grace groups. Whole-measure regional clipboard data also
+preserves fully contained lyric/slur/hairpin/performance-line spans, chord symbols, fretboards, grace groups, expressions and engraving styles. Cross-boundary spans are omitted or shortened with an explicit warning.
 Score-wide repeats, navigation and tempo travel only with full source staff
 stacks. Every cut/paste validates before committing.
 
@@ -204,3 +205,41 @@ transposition controls.
 visibility, accidental, stem/beam and per-pitch tie controls. Appearance changes
 preserve sounding pitch and timing. Automatic layout is recalculated after
 edits; manual beam slopes, lengths and rest offsets remain pending.
+
+## Chord symbols
+
+Open **Notation → Chord symbols and fretboards**, type a standard letter-name chord and apply it. **Type on score** enables contextual entry at staff beats. These navigation keys follow Finale's chord tool; the properties window retains ordinary text editing.
+
+| Action in chord entry | Key |
+| --- | --- |
+| Accept current chord | Enter |
+| Accept and move to next entry/beat | Space or Shift+Right |
+| Accept and move to previous entry/beat | Shift+Space or Shift+Left |
+| Next / previous measure | Tab / Shift+Tab |
+| Higher / lower stacked chord slot | Up / Down |
+| Edit draft / delete current chord | Backspace / Delete |
+| Exit chord mode | Escape |
+
+Type roots A–G with `b`/`#` accidentals, standard suffixes such as `m7`, `maj7`, `7(b9,#11)`, `sus4`, `add9`, `no3`, and an optional `/bass`. `6/9` is a sixth/ninth suffix; `C6/9/E` also specifies the bass. Linked parts accept written chord names. Finale suffix-selection numbers, MIDI analysis and learned chords remain pending.
+
+## Page view and playback
+
+| Action | Windows / Linux | macOS |
+| --- | --- | --- |
+| Go to measure/beat | Ctrl+Shift+G | Command+Shift+G |
+| Fit page width | Ctrl+] | Command+Option+] |
+| Fit page in window | Ctrl+[ | Command+Option+[ |
+| Scroll one screen vertically | Page Up / Page Down | Same |
+| Previous / next physical page | Ctrl+Page Up / Down | Command+Page Up / Down |
+| Small vertical increment | Alt+Page Up / Down | Option+Page Up / Down |
+| Scroll one screen horizontally | Home / End | Same |
+| Beginning / end of score view | Ctrl+Home / End | Command+Home / End |
+| Small horizontal increment | Alt+Home / End | Option+Home / End |
+
+Selection-range extension retains its own shifted navigation keys. Page view
+navigation and zoom do not change the score or create undo entries.
+
+**Playback…** opens range/cursor-start controls and the audio seek slider. Loop
+bounds are numbered performed bars, including repeat/navigation visits; the
+selected-region shortcut includes its first through last visit. These session
+options affect listening, while exports retain the complete performed score.

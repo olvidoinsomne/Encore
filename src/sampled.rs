@@ -134,20 +134,27 @@ impl SampleBank {
         let any_solo = score.parts.iter().any(|part| part.solo && !part.muted);
         let order = crate::repeats::playback_order(score)?;
         let performance = Performance::new(score);
+        let decorated = crate::performance::needed(score)
+            .then(|| crate::performance::Timeline::new(score))
+            .transpose()?;
         for (part_index, part) in score.parts.iter().enumerate() {
             if part.muted || part.volume <= 0.0 || (any_solo && !part.solo) {
                 continue;
             }
-            for layer in 0..4 {
-                let events = timeline_performance(
-                    part,
-                    score.measure_ticks(),
-                    score.tempo,
-                    layer,
-                    &order,
-                    part_index,
-                    Some(&performance),
-                );
+            for layer in 0..if decorated.is_some() { 12 } else { 4 } {
+                let events = if let Some(timeline) = &decorated {
+                    decorated_commands(timeline, part_index, layer)
+                } else {
+                    timeline_performance(
+                        part,
+                        score.measure_ticks(),
+                        score.tempo,
+                        layer,
+                        &order,
+                        part_index,
+                        Some(&performance),
+                    )
+                };
                 if events.is_empty() {
                     continue;
                 }
@@ -445,6 +452,8 @@ fn validate_riff(bytes: &[u8]) -> Result<(), String> {
 enum Kind {
     Off,
     On(u8),
+    Control(u8),
+    Program(u8),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -625,6 +634,65 @@ fn timeline_performance(
     commands
 }
 
+fn decorated_commands(
+    timeline: &crate::performance::Timeline,
+    part: usize,
+    layer: u8,
+) -> Vec<Command> {
+    let frame = |tick: f64| (timeline.seconds(tick) * f64::from(SAMPLE_RATE)).round() as usize;
+    let mut events = Vec::<(u8, Command)>::new();
+    let mut program = None;
+    for note in timeline
+        .notes
+        .iter()
+        .filter(|n| n.anchor.part == part && n.layer == layer)
+    {
+        if program != Some(note.instrument) {
+            events.push((
+                1,
+                Command {
+                    frame: frame(note.start),
+                    midi: 0,
+                    kind: Kind::Program(note.instrument.gm_program()),
+                },
+            ));
+            program = Some(note.instrument);
+        }
+        events.push((
+            3,
+            Command {
+                frame: frame(note.start),
+                midi: note.midi,
+                kind: Kind::On(note.velocity),
+            },
+        ));
+        events.push((
+            0,
+            Command {
+                frame: frame(note.sampler_end).max(frame(note.start) + 1),
+                midi: note.midi,
+                kind: Kind::Off,
+            },
+        ));
+    }
+    for c in timeline
+        .controls
+        .iter()
+        .filter(|c| c.part == part && c.layer == layer)
+    {
+        events.push((
+            c.priority,
+            Command {
+                frame: frame(c.tick),
+                midi: c.controller,
+                kind: Kind::Control(c.value),
+            },
+        ));
+    }
+    events.sort_by_key(|(priority, event)| (event.frame, *priority, event.midi));
+    events.into_iter().map(|(_, event)| event).collect()
+}
+
 fn mix_part(
     engine: &mut Synth,
     events: &[Command],
@@ -653,6 +721,15 @@ fn mix_part(
                     channel: 0,
                     key: event.midi,
                     vel,
+                }),
+                Kind::Control(value) => engine.send_event(MidiEvent::ControlChange {
+                    channel: 0,
+                    ctrl: event.midi,
+                    value,
+                }),
+                Kind::Program(program_id) => engine.send_event(MidiEvent::ProgramChange {
+                    channel: 0,
+                    program_id,
                 }),
                 Kind::Off => engine.send_event(MidiEvent::NoteOff {
                     channel: 0,
@@ -1270,5 +1347,93 @@ mod tests {
             midi: 62,
             kind: Kind::Off
         }));
+    }
+}
+
+#[cfg(test)]
+mod decorated_tests {
+    use super::*;
+    use crate::{
+        document::Anchor,
+        expressions::Hairpin,
+        grace::{GraceGroup, GraceNote},
+        lines::{LineKind, PedalKind, PerformanceLine},
+        model::{Duration, Note, Pitch},
+    };
+    #[test]
+    fn decorated_sampler_commands_match_grace_pedal_program_and_expression_events() {
+        let mut score = Score::blank();
+        score.tempo = 120;
+        score.parts.truncate(1);
+        score.parts[0].instrument = Instrument::Violin;
+        score.parts[0].measures.truncate(1);
+        score.parts[0].measures[0].notes = vec![Note {
+            start: 0,
+            duration: Duration::Whole,
+            dotted: false,
+            tuplet: None,
+            layer: 0,
+            pitches: vec![Pitch::from_midi(60)],
+            velocity: 80,
+            staccato: false,
+            tied: false,
+            articulations: vec![],
+        }];
+        let a = Anchor {
+            part: 0,
+            measure: 0,
+            tick: 0,
+            layer: 0,
+        };
+        let b = Anchor { tick: 1920, ..a };
+        let mut group = GraceGroup::new(
+            a,
+            vec![GraceNote::new(Pitch::from_midi(72), Duration::Eighth)],
+        );
+        group.percent = 12.5;
+        score.notation.grace.push(group);
+        score.notation.lines.push(PerformanceLine::new(
+            a,
+            b,
+            LineKind::Pedal {
+                kind: PedalKind::Sostenuto,
+            },
+        ));
+        let mut hairpin = Hairpin::new(a, b);
+        hairpin.start_velocity = Some(40);
+        hairpin.end_velocity = Some(120);
+        score.notation.spanners.push(hairpin);
+        let mut technique = crate::expressions::Expression::text(a, "pizz.");
+        technique.kind = crate::expressions::ExpressionKind::Technique;
+        score.notation.expressions.push(technique);
+        score.validate().unwrap();
+        let timeline = crate::performance::Timeline::new(&score).unwrap();
+        let events = decorated_commands(&timeline, 0, 0);
+        assert!(
+            events
+                .iter()
+                .any(|e| e.frame == 0 && e.kind == Kind::Program(45))
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| e.frame == 0 && e.midi == 72 && matches!(e.kind, Kind::On(_)))
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| e.frame == 11025 && e.midi == 60 && matches!(e.kind, Kind::On(_)))
+        );
+        assert!(
+            events.iter().any(
+                |e| e.midi == 11 && matches!(e.kind,Kind::Control(value)if value>80&&value<100)
+            )
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| e.frame == 0 && e.midi == 66 && e.kind == Kind::Control(127))
+        );
+        assert!(events.windows(2).all(|w| w[0].frame <= w[1].frame));
     }
 }

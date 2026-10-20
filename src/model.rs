@@ -1020,6 +1020,11 @@ impl Score {
         score.parts[4].measures[7].notes = vec![demo_note(0, Duration::Whole, &[86], 58)];
         score
     }
+    /// The displayed meter's beat unit, in exact score ticks.
+    pub fn beat_ticks(&self) -> u32 {
+        PPQ * 4 / u32::from(self.time_denominator.max(1))
+    }
+
     pub fn measure_ticks(&self) -> u32 {
         u32::from(self.time_numerator) * PPQ * 4 / u32::from(self.time_denominator.max(1))
     }

@@ -254,7 +254,7 @@ pub fn project(score: &Score, part: &LinkedPart) -> Result<Projection, String> {
             }
         }
     }
-    project_notation(&mut projected, &part.staves, part.transposition);
+    project_notation(&mut projected, &part.staves, part.transposition)?;
     projected.notation.layout = part.layout.clone();
     projected.validate()?;
     Ok(Projection {
@@ -265,7 +265,11 @@ pub fn project(score: &Score, part: &LinkedPart) -> Result<Projection, String> {
     })
 }
 
-fn project_notation(score: &mut Score, source_staves: &[usize], transposition: Transposition) {
+fn project_notation(
+    score: &mut Score,
+    source_staves: &[usize],
+    transposition: Transposition,
+) -> Result<(), String> {
     let map = |anchor: &mut crate::document::Anchor| {
         if let Some(index) = source_staves.iter().position(|staff| *staff == anchor.part) {
             anchor.part = index;
@@ -309,7 +313,30 @@ fn project_notation(score: &mut Score, source_staves: &[usize], transposition: T
         .notation
         .spanners
         .retain_mut(|line| map(&mut line.start) && map(&mut line.end));
+    score
+        .notation
+        .chords
+        .retain_mut(|symbol| map(&mut symbol.anchor));
+    for symbol in &mut score.notation.chords {
+        crate::chords::transpose_symbol(symbol, transposition)?;
+    }
+    score
+        .notation
+        .grace
+        .retain_mut(|group| map(&mut group.anchor));
+    for group in &mut score.notation.grace {
+        for note in &mut group.notes {
+            for pitch in &mut note.pitches {
+                *pitch = transposition.written_pitch(*pitch)?;
+            }
+        }
+    }
+    score
+        .notation
+        .lines
+        .retain_mut(|line| map(&mut line.start) && map(&mut line.end));
     score.notation.parts.clear();
+    Ok(())
 }
 
 /// Write one PDF per linked part. Numbered file prefixes prevent collisions
@@ -695,5 +722,71 @@ mod notation_projection_tests {
         assert_eq!(projected.score.notation.spanners[0].end.part, 0);
         assert_eq!(projected.score.notation.layout.staff_scale, 0.8);
         assert_eq!(score.notation.layout.staff_scale, 1.0);
+    }
+}
+
+#[cfg(test)]
+mod new_metadata_tests {
+    use super::*;
+    use crate::{
+        chords::{self, ChordSymbol},
+        document::Anchor,
+        grace::{GraceGroup, GraceNote},
+        lines::{LineKind, PerformanceLine},
+        model::Duration,
+    };
+    #[test]
+    fn chord_grace_and_line_projection_transposes_only_pitched_metadata() {
+        let mut score = Score::demo();
+        let at = Anchor {
+            part: 2,
+            measure: 0,
+            tick: 0,
+            layer: 0,
+        };
+        let mut chord =
+            ChordSymbol::new(Anchor { tick: 240, ..at }, chords::parse("C7/E").unwrap());
+        chord.fretboard = Some(chords::Fretboard::guitar(vec![
+            None,
+            Some(3),
+            Some(2),
+            Some(3),
+            Some(1),
+            Some(0),
+        ]));
+        score.notation.chords.push(chord);
+        score.notation.grace.push(GraceGroup::new(
+            at,
+            vec![GraceNote::new(Pitch::from_midi(60), Duration::Sixteenth)],
+        ));
+        score.notation.lines.push(PerformanceLine::new(
+            at,
+            Anchor { measure: 1, ..at },
+            LineKind::Ottava { semitones: 12 },
+        ));
+        score.validate().unwrap();
+        let before = score.clone();
+        let part = LinkedPart {
+            id: "solo".into(),
+            name: "Clarinet".into(),
+            staves: vec![2],
+            transposition: Transposition {
+                semitones: 2,
+                diatonic_steps: 1,
+            },
+            layout: Default::default(),
+        };
+        let projection = project(&score, &part).unwrap();
+        let projected = &projection.score.notation;
+        assert_eq!(projected.chords[0].chord.label(), "D7/F#");
+        assert_eq!(projected.chords[0].anchor.part, 0);
+        assert_eq!(
+            projected.chords[0].fretboard.as_ref().unwrap().frets[1],
+            Some(5)
+        );
+        assert_eq!(projected.grace[0].notes[0].pitches[0].midi(), 62);
+        assert_eq!(projected.lines[0].start.part, 0);
+        assert_eq!(projected.lines[0].kind, LineKind::Ottava { semitones: 12 });
+        assert_eq!(score, before);
     }
 }

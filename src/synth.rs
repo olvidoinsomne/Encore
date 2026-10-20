@@ -42,6 +42,9 @@ pub fn render(score: &Score) -> Vec<f32> {
 
 /// Dry procedural rendering before the shared room and output limiter.
 pub(crate) fn render_dry(score: &Score) -> Vec<f32> {
+    if crate::performance::needed(score) {
+        return render_decorated(score);
+    }
     let seconds = duration_seconds(score);
     if !seconds.is_finite() || seconds > MAX_RENDER_SECONDS {
         return Vec::new();
@@ -167,6 +170,86 @@ pub(crate) fn render_dry(score: &Score) -> Vec<f32> {
                     output[target + 1] += sample * right;
                 }
             }
+        }
+    }
+    output
+}
+
+fn render_decorated(score: &Score) -> Vec<f32> {
+    let seconds = duration_seconds(score);
+    if !seconds.is_finite() || seconds > MAX_RENDER_SECONDS {
+        return Vec::new();
+    }
+    let Ok(timeline) = crate::performance::Timeline::new(score) else {
+        return Vec::new();
+    };
+    let mut output = vec![0.0; ((seconds + TAIL_SECONDS) * SAMPLE_RATE as f32).ceil() as usize * 2];
+    let mut envelopes = std::collections::BTreeMap::<(usize, u8), Vec<(usize, f32)>>::new();
+    for c in &timeline.controls {
+        if c.controller == 11 {
+            envelopes.entry((c.part, c.layer)).or_default().push((
+                (timeline.seconds(c.tick) * f64::from(SAMPLE_RATE)).round() as usize,
+                f32::from(c.value) / 127.0,
+            ));
+        }
+    }
+    let solo = score.parts.iter().any(|p| p.solo && !p.muted);
+    for note in &timeline.notes {
+        let part = &score.parts[note.anchor.part];
+        if part.muted || (solo && !part.solo) || part.volume <= 0.0 || note.velocity == 0 {
+            continue;
+        }
+        let start = timeline.seconds(note.start);
+        let duration = (timeline.seconds(note.sounding_end) - start).max(0.0001) as f32;
+        let mut voice = synth_voice_seeded(
+            note.instrument,
+            note.midi,
+            note.velocity,
+            duration,
+            note.start as u64
+                ^ (note.anchor.part as u64 + 1).wrapping_mul(0x517C_C1B7_2722_0A95)
+                ^ u64::from(note.layer).wrapping_mul(0x9e37_79b9_7f4a_7c15),
+        );
+        // These remain explicit DSP approximations; sampled playback selects the
+        // actual GM recordings. Make each recognized technique audible here too.
+        let mut low = 0.0_f32;
+        for (i, sample) in voice.iter_mut().enumerate() {
+            let t = i as f32 / SAMPLE_RATE as f32;
+            match note.instrument.gm_program() {
+                44 => *sample *= 0.65 + 0.35 * (TAU * 8.0 * t).sin(),
+                32 => *sample *= (-4.5 * t).exp(),
+                59 => {
+                    low += 0.06 * (*sample - low);
+                    *sample = (*sample - low) * 1.15;
+                }
+                _ => {}
+            }
+        }
+        let offset = (start * f64::from(SAMPLE_RATE)).round() as usize;
+        let angle = (finite_clamp(part.pan, -1.0, 1.0, 0.0) + 1.0) * FRAC_PI_2 * 0.5;
+        let volume = finite_clamp(part.volume, 0.0, 2.0, 0.8);
+        let left = angle.cos() * volume;
+        let right = angle.sin() * volume;
+        let controls = envelopes.get(&(note.anchor.part, note.layer));
+        let mut index =
+            controls.map_or(0, |values| values.partition_point(|(at, _)| *at <= offset));
+        let mut gain = controls
+            .and_then(|values| index.checked_sub(1).map(|i| values[i].1))
+            .unwrap_or(1.0);
+        for (frame, sample) in voice.iter().enumerate() {
+            let at = offset + frame;
+            if let Some(values) = controls {
+                while index < values.len() && values[index].0 <= at {
+                    gain = values[index].1;
+                    index += 1;
+                }
+            }
+            let target = at * 2;
+            if target + 1 >= output.len() {
+                break;
+            }
+            output[target] += sample * left * gain;
+            output[target + 1] += sample * right * gain;
         }
     }
     output
@@ -986,6 +1069,20 @@ impl Playback {
     }
     pub fn position_seconds(&self) -> f32 {
         self.sink.get_pos().as_secs_f32()
+    }
+    /// Seek within the buffered render, retaining the current paused state.
+    pub fn seek_seconds(&self, seconds: f32) -> Result<(), String> {
+        if !seconds.is_finite() || seconds < 0.0 {
+            return Err("Seek position must be a finite nonnegative number.".into());
+        }
+        if self.sink.empty() {
+            return Err("Render a score before seeking.".into());
+        }
+        let position = std::time::Duration::try_from_secs_f32(seconds)
+            .map_err(|_| "Seek position exceeds the supported duration.".to_string())?;
+        self.sink
+            .try_seek(position)
+            .map_err(|e| format!("Could not seek playback: {e}"))
     }
     pub fn set_volume(&mut self, volume: f32) {
         self.volume = finite_clamp(volume, 0.0, 2.0, 0.8);

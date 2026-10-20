@@ -6,8 +6,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 mod articulations;
+mod chords;
 mod entry_style;
 mod expressions;
+mod grace;
+mod lines;
 mod lyrics;
 mod repeats;
 mod slurs;
@@ -144,6 +147,9 @@ fn temporal_spacing(score: &Score, parts: &[usize], measure: usize) -> Arc<[(f32
         }
     }
     let mut lyric_widths = BTreeMap::<u32, f32>::new();
+    let grace_widths = grace::widths(score, parts, measure);
+    let chord_widths = chords::widths(score, parts, measure);
+    times.extend(chord_widths.keys().copied());
     for lyric in score
         .notation
         .lyrics
@@ -166,7 +172,19 @@ fn temporal_spacing(score: &Score, parts: &[usize], measure: usize) -> Arc<[(f32
                 + lyric_widths.get(&time).copied().unwrap_or(0.0))
                 * 0.5
                 + 8.0;
-            cumulative += (16.0 + 12.0 * quarters.sqrt()).max(lyric_space);
+            let chord_space = chord_widths
+                .get(&previous)
+                .copied()
+                .unwrap_or(0.0)
+                .max(chord_widths.get(&time).copied().unwrap_or(0.0) * 0.5);
+            cumulative += (16.0 + 12.0 * quarters.sqrt())
+                .max(lyric_space)
+                .max(chord_space);
+            let grace_space = grace_widths.get(&previous).map_or(0.0, |w| w.1)
+                + grace_widths.get(&time).map_or(0.0, |w| w.0);
+            if grace_space > 0.0 {
+                cumulative += grace_space;
+            }
         }
         anchors.push((time as f32, cumulative));
         previous = time;
@@ -184,6 +202,21 @@ pub struct NoteHit {
     pub x: f32,
     pub y: f32,
 }
+#[derive(Clone, Debug)]
+pub struct GraceHit {
+    pub selection: crate::grace::GraceSelection,
+    pub x: f32,
+    pub y: f32,
+}
+#[derive(Clone, Debug)]
+pub struct ChordHit {
+    pub anchor: crate::document::Anchor,
+    pub slot: u8,
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+}
 
 #[derive(Clone, Debug)]
 pub struct Page {
@@ -192,6 +225,8 @@ pub struct Page {
     pub items: Vec<Primitive>,
     pub staves: Vec<StaffRegion>,
     pub hits: Vec<NoteHit>,
+    pub grace_hits: Vec<GraceHit>,
+    pub chord_hits: Vec<ChordHit>,
 }
 
 impl Page {
@@ -202,6 +237,8 @@ impl Page {
             items: vec![],
             staves: vec![],
             hits: vec![],
+            grace_hits: vec![],
+            chord_hits: vec![],
         }
     }
     fn line(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, width: f32, color: [u8; 3]) {
@@ -325,6 +362,7 @@ type EntryStyles<'a> = BTreeMap<crate::document::Anchor, &'a crate::entry_style:
 struct RenderContext<'a> {
     spacing: Vec<Arc<[(f32, f32)]>>,
     styles: EntryStyles<'a>,
+    pitches: crate::lines::PitchIndex,
 }
 fn render_ties(note: &Note, style: Option<&&crate::entry_style::EntryStyle>, midi: u8) -> bool {
     style.and_then(|s| s.tie_pitches.as_ref()).map_or_else(
@@ -377,6 +415,7 @@ pub fn engrave(score: &Score, options: &EngravingOptions) -> Vec<Page> {
         .map(|measure| temporal_spacing(score, &parts, measure))
         .collect::<Vec<_>>();
     let context = RenderContext {
+        pitches: crate::lines::PitchIndex::new(score),
         spacing: measure_spacing,
         styles: score
             .notation
@@ -412,8 +451,10 @@ pub fn engrave(score: &Score, options: &EngravingOptions) -> Vec<Page> {
                     .map(|&p| score.parts[p].measures.get(m).map_or(0, |v| v.notes.len()))
                     .max()
                     .unwrap_or(0);
-                let need =
-                    (dense as f32 * 15.0).max(lyrics::horizontal_requirement(score, &parts, m));
+                let need = (dense as f32 * 15.0)
+                    .max(lyrics::horizontal_requirement(score, &parts, m))
+                    .max(chords::widths(score, &parts, m).values().sum())
+                    + grace::horizontal_requirement(score, &parts, m);
                 let content = widths[offset] - if offset == 0 { header } else { 13.0 } - 12.0;
                 need <= content
             });
@@ -570,7 +611,9 @@ pub fn engrave(score: &Score, options: &EngravingOptions) -> Vec<Page> {
                 let mut x = left;
                 for (offset, &width) in widths.iter().enumerate().take(bars) {
                     let m = measure + offset;
-                    let content_x = x + if offset == 0 { header } else { 13.0 };
+                    let content_x = x
+                        + if offset == 0 { header } else { 13.0 }
+                        + grace::prefix(score, &parts, m);
                     let content_width = (width - (content_x - x) - 12.0).max(20.0);
                     let region = StaffRegion {
                         part: part_index,
@@ -593,7 +636,7 @@ pub fn engrave(score: &Score, options: &EngravingOptions) -> Vec<Page> {
                             false,
                         );
                     }
-                    draw_measure(page, score, &region, options, &context.styles);
+                    draw_measure(page, score, &region, options, &context);
                     page.staves.push(region);
                     if m + 1 == count {
                         page.line(x + width - 5.0, y, x + width - 5.0, y + 40.0, 0.8, INK);
@@ -627,6 +670,9 @@ pub fn engrave(score: &Score, options: &EngravingOptions) -> Vec<Page> {
         measure += bars;
     }
     for page in &mut pages {
+        grace::draw(page, score);
+        chords::draw(page, score);
+        lines::draw(page, score);
         slurs::draw(page, score);
         lyrics::draw(page, score);
         repeats::draw(page, score);
@@ -713,6 +759,16 @@ fn scale_page(page: &mut Page, scale: f32) {
     for hit in &mut page.hits {
         hit.x *= scale;
         hit.y *= scale;
+    }
+    for hit in &mut page.grace_hits {
+        hit.x *= scale;
+        hit.y *= scale;
+    }
+    for hit in &mut page.chord_hits {
+        hit.x *= scale;
+        hit.y *= scale;
+        hit.width *= scale;
+        hit.height *= scale;
     }
     page.width *= scale;
     page.height *= scale;
@@ -864,7 +920,9 @@ fn system_layout(
                     let ys: Vec<f32> = note
                         .pitches
                         .iter()
-                        .map(|p| pitch_y(p, part.clef, 0.0))
+                        .map(|p| {
+                            pitch_y(&context.pitches.written_pitch(anchor, *p), part.clef, 0.0)
+                        })
                         .collect();
                     let automatic = if multiple_layers {
                         note.layer.is_multiple_of(2)
@@ -925,6 +983,10 @@ fn system_layout(
             above = above.max(38.0 + 17.0 * (repeat_clearance - 1) as f32);
         }
         let slur_space = slurs::clearance(score, p, measure, bars);
+        let grace_space = grace::clearance(score, p, measure, bars);
+        above = above.max(chords::clearance(score, p, measure, bars));
+        above = above.max(grace_space.0);
+        below = below.max(grace_space.1);
         above += slur_space.0;
         below += slur_space.1 + lyrics::extra_below(score, p, measure, bars);
         if score.notation.slurs.iter().any(|s| {
@@ -938,7 +1000,9 @@ fn system_layout(
                 .map(|m| {
                     let offset = m - measure;
                     let width = widths[offset];
-                    let content_x = x + if offset == 0 { header } else { 13.0 };
+                    let content_x = x
+                        + if offset == 0 { header } else { 13.0 }
+                        + grace::prefix(score, parts, m);
                     let region = StaffRegion {
                         part: p,
                         measure: m,
@@ -969,6 +1033,9 @@ fn system_layout(
             }
         }
         let expressive = expressions::clearance(score, p, measure, bars, p == parts[0]);
+        let line_space = lines::clearance(score, p, measure, bars);
+        above = above.max(line_space.0);
+        below = below.max(40.0 + line_space.1);
         above += expressive.0;
         below += expressive.1;
         extents.push((above, below));
@@ -1033,7 +1100,7 @@ fn draw_measure(
     score: &Score,
     region: &StaffRegion,
     options: &EngravingOptions,
-    styles: &EntryStyles<'_>,
+    context: &RenderContext<'_>,
 ) {
     let Some(measure) = score.parts[region.part].measures.get(region.measure) else {
         return;
@@ -1057,7 +1124,7 @@ fn draw_measure(
             options,
             layer,
             layers.len() > 1,
-            styles,
+            context,
         );
     }
     if score.notation.expressions.iter().any(|mark| {
@@ -1090,8 +1157,9 @@ fn draw_measure_layer(
     options: &EngravingOptions,
     layer: u8,
     multiple_layers: bool,
-    styles: &EntryStyles<'_>,
+    context: &RenderContext<'_>,
 ) {
+    let styles = &context.styles;
     let part = &score.parts[region.part];
     let notes = part
         .measures
@@ -1149,7 +1217,13 @@ fn draw_measure_layer(
         let ys: Vec<f32> = note
             .pitches
             .iter()
-            .map(|p| pitch_y(p, part.clef, region.y))
+            .map(|p| {
+                pitch_y(
+                    &context.pitches.written_pitch(anchor, *p),
+                    part.clef,
+                    region.y,
+                )
+            })
             .collect();
         let mid = if ys.is_empty() {
             region.y + 20.0
@@ -1191,7 +1265,9 @@ fn draw_measure_layer(
             let mut last_step = None;
             let mut displaced = false;
             for &i in &sorted {
-                let pitch = &note.pitches[i];
+                let source_pitch = &note.pitches[i];
+                let written_pitch = context.pitches.written_pitch(anchor, *source_pitch);
+                let pitch = &written_pitch;
                 let py = ys[i];
                 if last_step.is_some_and(|s: i32| (pitch.staff_step() - s).abs() == 1) {
                     displaced = !displaced;
@@ -1207,7 +1283,7 @@ fn draw_measure_layer(
                 let expected = *accidental_state
                     .get(&(pitch.staff_step(), pitch.octave))
                     .unwrap_or(&key_alter(pitch.step, score.key_fifths));
-                let display = style.accidental(pitch.midi());
+                let display = style.accidental(source_pitch.midi());
                 let parenthesis_space = if matches!(
                     display,
                     crate::entry_style::AccidentalDisplay::Courtesy
@@ -1285,7 +1361,11 @@ fn draw_measure_layer(
                         region,
                         note,
                         x,
-                        pitch_y(pitch, part.clef, region.y) + if below { 7.0 } else { -7.0 },
+                        pitch_y(
+                            &context.pitches.written_pitch(anchor, *pitch),
+                            part.clef,
+                            region.y,
+                        ) + if below { 7.0 } else { -7.0 },
                         below,
                     );
                 }
@@ -1329,8 +1409,11 @@ fn draw_measure_layer(
                                 page,
                                 (x - 24.0).max(region.x + 2.0),
                                 x - 8.0,
-                                pitch_y(pitch, part.clef, region.y)
-                                    + if below { 7.0 } else { -7.0 },
+                                pitch_y(
+                                    &context.pitches.written_pitch(anchor, *pitch),
+                                    part.clef,
+                                    region.y,
+                                ) + if below { 7.0 } else { -7.0 },
                                 below,
                             );
                         }

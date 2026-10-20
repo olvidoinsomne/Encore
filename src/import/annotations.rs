@@ -45,11 +45,12 @@ pub(super) struct Annotations {
     extensions: BTreeMap<(u32, String, LyricKind, u16), usize>,
 }
 impl Annotations {
-    pub(super) fn xml(
+    pub(super) fn xml_excluding_slurs(
         &mut self,
         node: Node<'_, '_>,
         at: SourceAnchor,
         warnings: &mut Warnings,
+        excluded: &BTreeSet<String>,
     ) -> Result<(), String> {
         self.styles.xml(node, at.clone(), warnings)?;
         if child(node, "rest").is_some() {
@@ -145,6 +146,9 @@ impl Annotations {
         }
         for element in node.descendants().filter(|n| n.has_tag_name("slur")) {
             let number = element.attribute("number").unwrap_or("1");
+            if excluded.contains(number) {
+                continue;
+            }
             if number.len() > 64 {
                 return Err("MusicXML slur number is too long.".into());
             }

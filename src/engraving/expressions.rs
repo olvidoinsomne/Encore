@@ -1,6 +1,23 @@
 //! Original vector expression text, rehearsal boxes and hairpin fragments.
 use super::*;
 use crate::expressions::{ExpressionKind, HairpinKind, Placement, TimePoint};
+fn exterior(score: &Score, part: usize, measure: usize, bars: usize) -> f32 {
+    chords::clearance(score, part, measure, bars)
+        .max(lines::clearance(score, part, measure, bars).0)
+}
+fn above_baseline(score: &Score, regions: &[&StaffRegion]) -> f32 {
+    let first = regions[0];
+    let bars = regions.iter().map(|r| r.measure).max().unwrap() - first.measure + 1;
+    let mut y = first.y - 34.0;
+    let outside = exterior(score, first.part, first.measure, bars);
+    if outside > 0.0 {
+        y = y.min(first.y - outside - 16.0);
+    }
+    if let Some(envelope) = slurs::above_envelope(score, regions) {
+        y = y.min(envelope - 16.0);
+    }
+    y
+}
 pub(super) fn clearance(
     score: &Score,
     part: usize,
@@ -15,7 +32,12 @@ pub(super) fn clearance(
             && (measure..measure + bars).contains(&mark.anchor.measure)
     }) {
         match mark.placement {
-            Placement::Above => above = above.max(20.0 + mark.offset[1].abs()),
+            Placement::Above => {
+                above = above.max(
+                    20.0_f32.max(exterior(score, part, measure, bars) + 40.0)
+                        + mark.offset[1].abs(),
+                )
+            }
             Placement::Below => below = below.max(22.0 + mark.offset[1].abs()),
         }
     }
@@ -39,7 +61,7 @@ pub(super) fn clearance(
                     >= measure
         })
     {
-        above = above.max(45.0);
+        above = above.max(45.0_f32.max(exterior(score, part, measure, bars) + 65.0));
     }
     (above, below)
 }
@@ -80,9 +102,7 @@ pub(super) fn draw(page: &mut Page, score: &Score) {
                     .iter()
                     .filter(|staff| staff.part == region.part && (staff.y - region.y).abs() < 0.1)
                     .collect::<Vec<_>>();
-                if let Some(envelope) = slurs::above_envelope(score, &system) {
-                    y = y.min(envelope - 16.0 + mark.offset[1]);
-                }
+                y = above_baseline(score, &system) + mark.offset[1];
             }
             if mark.kind == ExpressionKind::Dynamic
                 && [
@@ -214,9 +234,7 @@ pub(super) fn draw(page: &mut Page, score: &Score) {
                 .iter()
                 .filter(|staff| staff.part == region.part && (staff.y - region.y).abs() < 0.1)
                 .collect::<Vec<_>>();
-            let y = slurs::above_envelope(score, &system).map_or(region.y - 58.0, |envelope| {
-                (region.y - 58.0).min(envelope - 38.0)
-            });
+            let y = above_baseline(score, &system) - 24.0;
             let text = if mark.text.is_empty() {
                 format!("BPM {}", mark.bpm)
             } else {

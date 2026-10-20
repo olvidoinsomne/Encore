@@ -20,12 +20,24 @@ pub(super) fn clearance(score: &Score, part: usize, measure: usize, bars: usize)
     }
     (above, below)
 }
-fn endpoint(score: &Score, anchor: &Anchor, region: &StaffRegion, above: bool) -> f32 {
+fn endpoint(
+    score: &Score,
+    index: &crate::lines::PitchIndex,
+    anchor: &Anchor,
+    region: &StaffRegion,
+    above: bool,
+) -> f32 {
     note_at(score, anchor)
         .map(|n| {
             n.pitches
                 .iter()
-                .map(|p| pitch_y(p, score.parts[anchor.part].clef, region.y))
+                .map(|p| {
+                    pitch_y(
+                        &index.written_pitch(*anchor, *p),
+                        score.parts[anchor.part].clef,
+                        region.y,
+                    )
+                })
                 .reduce(|a, b| if above { a.min(b) } else { a.max(b) })
                 .unwrap_or(region.y + 20.0)
         })
@@ -70,6 +82,7 @@ pub(super) fn above_envelope(score: &Score, regions: &[&StaffRegion]) -> Option<
 }
 
 fn draw_internal(page: &mut Page, score: &Score, above_only: bool) {
+    let pitch_index = crate::lines::PitchIndex::new(score);
     let mut systems: BTreeMap<(usize, u32), Vec<StaffRegion>> = BTreeMap::new();
     for r in &page.staves {
         systems
@@ -99,7 +112,7 @@ fn draw_internal(page: &mut Page, score: &Score, above_only: bool) {
             let a = if let Some(r) = start_region {
                 (
                     r.x_at_tick(s.start.tick as f32) + s.start_offset[0],
-                    endpoint(score, &s.start, r, above) + s.start_offset[1],
+                    endpoint(score, &pitch_index, &s.start, r, above) + s.start_offset[1],
                 )
             } else {
                 (
@@ -110,7 +123,7 @@ fn draw_internal(page: &mut Page, score: &Score, above_only: bool) {
             let b = if let Some(r) = end_region {
                 (
                     r.x_at_tick(s.end.tick as f32) + s.end_offset[0],
-                    endpoint(score, &s.end, r, above) + s.end_offset[1],
+                    endpoint(score, &pitch_index, &s.end, r, above) + s.end_offset[1],
                 )
             } else {
                 (
@@ -147,7 +160,11 @@ fn draw_internal(page: &mut Page, score: &Score, above_only: bool) {
                         }
                         let linear = a.1 + (b.1 - a.1) * t;
                         for p in &n.pitches {
-                            let y = pitch_y(p, score.parts[part].clef, r.y);
+                            let y = pitch_y(
+                                &pitch_index.written_pitch(anchor, *p),
+                                score.parts[part].clef,
+                                r.y,
+                            );
                             let needed = if above {
                                 linear - y + 14.0
                             } else {

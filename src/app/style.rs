@@ -176,7 +176,10 @@ impl EncoreApp {
             None
         }
         .unwrap_or(spellings[(current + 1) % spellings.len()]);
-        match self.entry_transposition().concert_pitch(next) {
+        match self.concert_pitch_at(
+            next,
+            Anchor::from_selection(&self.score, self.selected.unwrap()).unwrap(),
+        ) {
             Ok(source) => {
                 if self.edit_entry(|note| note.pitches[index] = source) {
                     self.entry_pitch = source;

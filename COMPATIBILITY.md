@@ -1,6 +1,6 @@
 # Platforms and score compatibility
 
-Encore 0.8 targets Linux, macOS and Windows. Linux builds and packaging are
+Encore 0.9 targets Linux, macOS and Windows. Linux builds and packaging are
 verified on the development machine. Native macOS and Windows validation is
 still required; their build commands, packaging scripts and manual GitLab CI
 jobs are in [BUILDING.md](BUILDING.md). A Rust target alone does not supply the
@@ -58,7 +58,7 @@ remain open.
 MusicXML imports/exports the supported line names/numbers, syllabic values,
 elisions, baseline offsets and melisma endpoints. MuseScore imports numbered
 verses and tick/fraction extensions. Pickup-spanning MuseScore location slurs
-still require migration through MusicXML or simplifying the source; unresolved
+use raw source positions followed by each measure's pickup shift; unresolved
 endpoints are rejected rather than moved silently. Hidden or above-staff lyrics, font markup
 and per-repeat visibility produce loss notes. Non-numeric MusicXML lyric line
 labels currently use line 1 with a warning; rename them numerically in the
@@ -74,16 +74,57 @@ rather than chord tones; ties remain separate notation. Public editing and
 imports validate anchors and enforce at most 16 overlapping phrases per staff
 for reliable MusicXML numbering.
 
+### Grace groups
+
+**Notation → Grace notes** edits groups attached before or after a pitched
+principal entry. Groups have separate pitches/chords, note values and one dot,
+beam breaks/joins/flat beams, 40–100% size, slash and an optional principal-note
+connector. They do not consume or alter written measure time. Click a small
+grace note to reopen its group. Native saves, source-aware regional editing and
+linked written parts retain groups; removing their principal removes them.
+
+MusicXML uses standard [`grace`](https://www.w3.org/2021/06/musicxml40/musicxml-reference/elements/grace/)
+notes without duration fields, chord membership, visual values, slash and
+steal-time percentages. Valid hidden `other-notation` metadata retains Encore's
+exact before/after side, size, beam and velocity choices. Other applications can
+use the standard notes and timing. Principal connector slurs use a free standard
+slur level; if all 16 levels are occupied, the native connector remains in metadata.
+Foreign grace runs normally attach before the next pitched principal; explicit
+Encore after markers remove that otherwise ambiguous association. MuseScore's
+before/after grace tags are associated with their following serialized principal,
+including pickup shifts and the stored reverse order of after groups.
+
+All three playback paths share borrowed-time scheduling: before groups borrow
+the previous contiguous performed note or delay the principal; after groups
+borrow its tail. Borrowing is limited to 0–75% of a donor, with the principal
+used when no eligible previous note exists, including after repeat jumps.
+Displaced tie endpoints rearticulate. The original written notes remain exact.
+MusicXML `make-time`, grace tuplets/ties/lyrics/articulations, arbitrary
+grace-to-grace spanners, full grace-specific accidental policies and ordinary-
+entry-to-grace conversion/rebar commands remain unsupported. MuseScore grace
+spanners produce import notes. Direct Finale MUSX grace import remains pending.
+Bounds are 32 notes/chords per group, 16 pitches per chord, 10,000 groups and
+50,000 grace notes per document. Dense locked systems may still require manual
+layout adjustment.
+
 ### Expressions, hairpins and tempo
 
 **Notation → Expressions and tempo** edits beat-attached dynamic, text,
 technique and rehearsal marks, crescendo/diminuendo spans and global tempo
 marks/linear BPM ramps. Marks may sit on rests; removing a note does not remove
 its beat expression. Staff/system scope and bounded placement offsets persist.
-Explicit velocity expressions and hairpins change note-attack velocities without
-rewriting written rhythms. Technique text is presently descriptive; it does not
-switch sample programs or articulations. Continuous swells during sustained
-notes remain pending.
+Explicit velocity expressions change note attacks without rewriting written
+rhythms. Hairpins now also send continuous MIDI expression (CC11), so held notes
+swell in sampled and procedural audio. A fixed lane attack reference provides
+headroom for this controller envelope; it approximates GM loudness and does not
+crossfade recorded dynamic layers. A few explicit Technique labels select actual
+GM presets: `pizz.`/`pizzicato` selects pizzicato strings (acoustic bass for double
+bass), `trem.`/`tremolo` selects tremolo strings, and `con sord.`/`muted` selects
+muted trumpet. `arco`, `ord.` and `senza sord.` restore the staff's original
+program. Other words and unsupported instrument/technique pairs remain descriptive.
+Sampled playback and MIDI select those actual GM programs; the explicitly chosen
+procedural fallback uses plucked, tremolo and muted-filter approximations.
+These switches are not Garritan keyswitch compatibility.
 
 MusicXML preserves these marks, supported hairpin endpoints and dashes-delimited
 tempo ramps; hidden standard extension elements retain Encore-specific expression
@@ -103,6 +144,56 @@ by under one millisecond. Limits are 20,000 expressions, 10,000 nonoverlapping
 staff/layer hairpins, 4,096 tempo changes and 200,000 performed timing segments.
 Curved/swing timing, fermatas, arbitrary controller lanes and full Finale Human
 Playback interpretation remain open.
+
+### Performance lines and shared scheduling
+
+**Notation → Performance lines** edits octave, damper/sostenuto pedal, trill and
+chromatic glissando spans with vector continuations across systems and pages.
+Native saves and MusicXML retain their options; standard MusicXML directions and
+note ornaments remain usable elsewhere. MuseScore imports the corresponding
+basic spanners with supported relative locations or duration ticks.
+
+Octave lines are **display instructions over concert pitches**: positive 12
+prints 8va notes an octave lower while sound stays unchanged. This follows the
+public [MusicXML octave-shift semantics](https://www.w3.org/2021/06/musicxml40/musicxml-reference/elements/octave-shift/).
+The editor's note entry and written linked parts apply that display relationship.
+Choose a separate transposition to change the sound. One, two and three octave
+lines in either direction are supported.
+
+Damper holds notes released during its span across all four notation layers;
+sostenuto captures notes sounding at its start. MIDI exports CC64/66, and both
+audio engines share the same held-note plan (including an explicit sostenuto
+hold for the sampler). Release state resets at repeat/navigation jumps.
+Overlapping pedal types and reattacking a captured sostenuto pitch in the same
+layer before release are currently rejected: the sampler has no native CC66
+voice capture. Separate layers can sustain independent equal pitches. Partial
+pedaling, soft pedal and arbitrary controller curves remain pending. The public
+[MusicXML pedal format](https://www.w3.org/2021/06/musicxml40/musicxml-reference/elements/pedal/)
+provides the portable notation and sound attributes.
+
+Trills alternate principal/upper pitches at an explicit 1–12 semitone interval
+and 30–480 tick step; imported ordinary trills currently default to two semitones
+and 60 ticks. Automatic key/accidental upper-neighbor inference, turns and
+mordents remain pending. Chromatic glissandi require consecutive single-pitch
+entries in one layer and perform distinct intervening pitches; continuous
+portamento/slide and diatonic/harp-white-key modes remain pending. This distinction
+matches [MusicXML glissando](https://www.w3.org/2021/06/musicxml40/musicxml-reference/elements/glissando/).
+
+The shared performed timeline decorates source-aware repeat traversal with
+borrowed-time grace notes, per-pitch ties, ornaments and pedal holds. All three
+backends use that plan. Sampled/procedural timing preserves fractional ticks;
+MIDI rounds to its 480 PPQ grid. Optional chord accompaniment uses the staff's
+instrument at velocity 80 in independent stack-slot lanes and ends at the next
+chord or current bar end. N.C. stops that slot. Accompaniment lanes currently
+keep independent pedal/expression state from the four notation layers. Source
+notes are unchanged.
+Bounds are 10,000 lines, two million expanded pitch notes/grace events and one
+million controller events; audio remains limited to ten performed minutes.
+
+This is a bounded deterministic interpreter. Finale's broader
+[Human Playback](https://usermanuals.finalemusic.com/FinaleWin/Content/Finale/Human_Playback.htm)
+styles, dictionary, instrument-specific interpretation and user keyswitch rules
+remain open.
 
 ### Repeats and navigation
 
@@ -238,8 +329,8 @@ full-score measure stack first. Matching time signatures and representable
 pitches are required; destination instrument assignments and publication
 formats are preserved.
 
-Regional clipboard data includes lyrics, phrase/hairpin spans, entry engraving
-styles and expressions that fit inside the selected bounds. A copied lyric
+Regional clipboard data includes lyrics, phrase/hairpin/performance-line spans, entry engraving
+styles, chord symbols/fretboards, attached grace groups and expressions that fit inside the selected bounds. A copied lyric
 keeps its syllable when its word extension crosses the boundary; crossing
 slurs/hairpins are omitted with a warning. Repeats, navigation and tempo travel
 only with all source staves selected, and jumps whose targets fall outside the
@@ -248,8 +339,7 @@ document so their implicit target cannot silently change. Insertion/deletion shi
 layouts consistently. Dependency failures leave the complete score unchanged. Region transposition
 supports chromatic, spelled fixed intervals and the current key's diatonic scale
 while preserving chromatic inflections.
-Single-event clipboard versions 1/2 remain readable; version 3 adds per-pitch
-engraving/tie overrides. Partial-measure selections, selective clipboard filters,
+Single-event clipboard versions 1–3 remain readable; version 4 additionally carries both before/after grace groups with their concert pitches and rebound principal anchors. Version 3 adds per-pitch engraving/tie overrides. Partial-measure selections, selective clipboard filters,
 repeated paste and Finale clip files remain unimplemented.
 
 ## Appearance
@@ -258,3 +348,13 @@ Monochromatic dark mode is the default. The header's **Light mode / Dark mode** 
 chrome, dialogs and library. The preference is remembered between launches;
 score paper and printed exports remain white in both modes. Theme changes do
 not alter score contents or undo history.
+
+## Chord symbols and fretboard diagrams
+
+**Notation → Chord symbols and fretboards** edits letter-name harmony at a staff beat independently of note/rest entry. Standard major/minor/augmented/diminished, suspended/power, sixth/seventh/ninth/11th/13th forms, added/omitted/altered degrees, slash bass and N.C. have explicit semantics. Unknown suffixes fail visibly. Eight simultaneous stack slots, alternate bass placement, display offsets, printing and harmony playback are saved natively. The source stores concert roots/basses; linked parts display and accept written names without changing source pitches. Regional transposition also transposes harmonic roots, basses and diagram stops.
+
+Original guitar-shape suggestions use standard six-string tuning. Custom diagrams support 4–12 strings, muted/open/stopped positions, frets 1–36, up to eight displayed frets, fingerings and barres. Their tuning is explicit or unknown; imported MusicXML frame geometry does not establish a tuning and is never guessed. Diagram transposition shifts playable stops, including open strings, while keeping labels consistent; an unrepresentable custom shape rejects the operation atomically.
+
+MusicXML exports/imports standard `harmony`, root/kind/bass/degree, stack positions, rhythmic offsets and `frame` geometry. Cursor-relative offsets and transposing instruments are converted into source positions/pitches. MuseScore imports readable standard Harmony suffixes and tonal pitch classes, reporting unsupported functional harmony and private suffix-library references. Standard MusicXML does not preserve Encore's per-symbol harmony-play switch, bass-layout preference or diagram tuning; native Encore files preserve all fields.
+
+Finale `.lib` chord/fretboard libraries, arbitrary suffix glyph typography, learned/MIDI-derived chord analysis, Roman/Nashville names, fretboard library groups and tablature conversion remain unimplemented.
