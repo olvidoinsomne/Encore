@@ -7,7 +7,7 @@ This is a functional compatibility checklist, not a claim that Encore has
 already reached parity. The modern Encore interface remains the intended UI.
 
 The starting point is Encore 0.5, commit `55f2cc0`; the tables also incorporate
-the Encore 0.6 and 0.7 implementation passes recorded below. Source evidence was inspected
+the Encore 0.6–0.8 implementation passes recorded below. Source evidence was inspected
 in `src/model.rs`, `src/app.rs`, `src/engraving.rs`, `src/export.rs`,
 `src/audio.rs`, `src/sampled.rs`, `src/synth.rs`, and the three format readers.
 Changes made after that commit must pass the acceptance checks below before a
@@ -38,16 +38,16 @@ Linux verification.
 | Tuplets, nested tuplets and custom ratios | Partial | Exact actual:normal ratios and basic grouping, triplet entry and inspector ratios. Fractional-grid, nested, mixed-value and cross-bar groups remain open. |
 | Grace notes, slashed/unslashed groups and playback | Missing | Foreign grace material is omitted or rejected. |
 | Four independent layers, each with two voices | Partial | Four editable rhythms now share a staff, with independent stems, beams, exports and playback. Two separate voices within each layer remain open. |
-| Per-pitch chord spelling and independent ties | Partial | Spelled pitches exist; the tie flag applies to an event. Needs per-note tie editing, tie direction and continuation control. |
+| Per-pitch chord spelling and independent ties | Partial | Active chord tones now have exact tie subsets, enharmonic respelling and editable tie direction, preserved by native/event-region clipboard, linked transposition, MusicXML and performed playback. Arbitrary continuation controls, tie curvature and complete cross-voice ties remain open. |
 | Clefs and clef changes | Partial | Three fixed staff clefs. Needs other C/F/G clefs, percussion, octave variants and mid-measure changes. |
 | Keys and key changes | Partial | One constant circle-of-fifths signature. Needs regional/independent signatures, cancellation and custom/nonlinear keys. |
 | Meter and meter changes | Partial | One constant meter, now with 1–32 beats and power-of-two denominators through 128. Changes, pickup measures, additive/composite, independent and display-only meters remain open. |
-| Accidental display policies | Partial | Explicit pitch alters and ordinary automatic accidentals. Needs courtesy, parentheses, forced/hidden and regional policies. |
-| Stem, beam, flag and rest placement | Partial | Automatic basic engraving. Needs manual direction, angles, joins, hooks, stem lengths and rest offsets. |
+| Accidental display policies | Partial | Per-pitch automatic, forced, hidden, courtesy and parenthesized displays are editable, engraved and retained through native/MusicXML and linked transposition. Regional accidental policies and complete cross-layer/cross-bar rules remain open. |
+| Stem, beam, flag and rest placement | Partial | Anchored stem direction/hiding, beam break/join/flat overrides, head shapes and cue sizing accompany automatic engraving. Manual lengths, arbitrary beam angles/hooks and rest offsets remain open. |
 | Cross-staff notation and beaming | Missing | No source/destination staff relationship for notes or beams. |
 | Dynamics and articulations | Partial | Velocity-derived dynamics, legacy staccato, accent, marcato, tenuto and staccatissimo now have editable marks, vector glyphs and playback. Custom marking definitions, fermata timing, ornaments and complete placement/performance rules remain open. |
 | Slurs and phrase curves | Partial | Anchored editable same-layer phrases, direction, height and endpoint offsets; vector continuations across systems/pages; native and MusicXML round trips, MuseScore import and bounded legato playback. Cross-staff/cross-voice slurs, dashed styles and arbitrary control-point shapes remain open. |
-| Hairpins, octave lines, pedal, trills, glissandi and custom lines | Missing | No anchored spanner model or editor. |
+| Hairpins, octave lines, pedal, trills, glissandi and custom lines | Partial | Editable crescendo/diminuendo spans have native persistence, vector system/page continuations, MusicXML import/export and basic MuseScore hairpin import. Playback interpolates note-attack velocities with explicit endpoints. Continuous sustained-note swells, niente engraving, dashed/custom wedges and the other listed spanner families remain open. |
 | Tremolos, measured repeats and ornaments | Missing | No notation/performance representation. |
 | Repeat barlines, endings, D.C./D.S., coda and Fine | Partial | Inclusive repeat regions support nested noncrossing repeats, 2–16 passes, contiguous numbered endings, vector barlines/voltas and bounded performed audio/MIDI. D.C./D.S., al Fine/al Coda, unique segno/coda targets and optional repeat replay use the same traversal, MusicXML import/export and MuseScore import. Custom labels with multiple targets, per-pass/custom conditional jumps, within-measure navigation, manual bracket placement and direct MUSX repeat import remain open. |
 | Lyrics | Partial | Numbered verses/choruses/sections, atomic syllable typing/assignment, hyphens, melismas and elisions, adjustable baselines, lyric-aware spacing and vector continuations; native and MusicXML preservation and MuseScore import. Rich typography, above-staff underlay, verse-number alignment and Finale’s full Lyrics window/metatools remain open. |
@@ -55,8 +55,8 @@ Linux verification.
 | Guitar tablature, bends, slides and tuning | Missing | No strings/frets, alternate tunings or standard/tab conversion. |
 | Unpitched percussion layouts and drum maps | Missing | GM melodic pitched percussion is available, but does not supply percussion notation or drum-kit routing. |
 | Staff styles, cutaway, slash/rhythmic notation and repeats | Missing | Fixed five-line staff presentation; no regional style definitions. |
-| Cue notes, ossia, note sizes and custom noteheads | Missing | No independent visual note scaling or substitute notehead layer. |
-| Rehearsal marks and expressive/technique text | Missing | Title/composer exist; no anchored text-expression categories. |
+| Cue notes, ossia, note sizes and custom noteheads | Partial | Per-entry 40–200% head sizing, six original vector notehead shapes and hidden entries are editable and persistent, with native/MusicXML preservation. These are visual controls; automatic cue extraction, ossia staffs and arbitrary glyph selection remain open. |
+| Rehearsal marks and expressive/technique text | Partial | Beat-anchored dynamics, expressive text, technique text and boxed rehearsal marks have staff/system scope, offsets, native persistence, MusicXML preservation and basic MuseScore import. Text typography, automatic rehearsal sequencing, category/library editors, marking metatools and automatic instrument-technique switching remain open. |
 | Music fonts and symbol selection | Missing | Original vector symbols; no user-selectable SMuFL music font, metadata or arbitrary symbol browser. |
 | Custom shapes, rich text and embedded graphics | Missing | No general shape designer, page/measure text blocks or graphic placement. |
 
@@ -82,14 +82,14 @@ Linux should use the Windows convention by default.
 | Capability | Status | Evidence and work remaining |
 | --- | --- | --- |
 | Mouse note/rest entry and chord addition | Partial | Click/Shift-click entry exists. Needs complete rhythm tools, insertion, repitch and drag constraints. |
-| Simple Entry standard and laptop profiles | Partial | A–G input exists, but durations, arrows, rests and deletion differ. Numeric keypad and number row need distinct treatment in the standard profile. |
+| Simple Entry standard and laptop profiles | Partial | Laptop duration, pitch/chord, interval, rest, tie, accidental, stem/beam/display and common marking controls follow contextual mappings. Numeric keypad distinctions, standard profile, full tool behavior and metatools remain open. |
 | Speedy Entry | Partial | Separate duration-triggered keyboard profile, pitch position and common editing commands. MIDI, Caps Lock pitch rows, insertion and complete frame behavior remain open. |
 | MIDI keyboard step entry | Missing | No MIDI input device discovery, event stream or held-chord handling. |
 | Real-time transcription | Missing | No recording, metronome/count-in, quantization, split-point or multi-voice transcription. |
-| Selection and navigation | Partial | Single event/staff/cursor only. Needs regions, measure stacks, disjoint objects, selection extension and entry/chord/staff navigation. |
-| Cut, copy, paste and insert | Partial | One event can be copied/cut/pasted with validation. Regions, filters, repeated paste, clip files and shifting insertion remain open. |
-| Measure/staff structural editing | Partial | Add measures/staves and remove a staff. Needs insert/delete/move ranges and consistent remapping of anchors. |
-| Transposition, respelling and repitch | Partial | Semitone/octave edits exist. Needs regional diatonic/chromatic intervals, spelled intervals and repitch-only mode. |
+| Selection and navigation | Partial | Whole-measure rectangles, measure stacks, visible linked-part source mapping, Select All and platform-specific range extension accompany single-event/cursor selection. Partial-measure/disjoint object selection and the full entry/chord navigation set remain open. |
+| Cut, copy, paste and insert | Partial | Atomic event and whole-measure region clipboard workflows preserve supported attached annotations; region Replace, Empty Only and inserted measure stacks are available, with boundary-loss warnings. Filters, repeated paste, clip files and partial-measure/rhythmic shifting remain open. |
+| Measure/staff structural editing | Partial | Insert/delete full-score measure stacks remap rhythmic anchors, repeats/endings, navigation, tempo, full-score layouts and each linked-part layout, with atomic dependency checks. Add/remove staves remain supported; staff reordering and general move/independent rhythmic ranges remain open. |
+| Transposition, respelling and repitch | Partial | Regional chromatic, spelled fixed intervals and key-aware diatonic scale shifts preserve entry-specific tie/accidental mappings and reject range failures atomically. Regional key changes, advanced respelling policies and repitch-only mode remain open. |
 | Undo/redo and change list | Partial | 100 snapshots, history dialog and platform-specific commands. Detailed operation labels and complete Finale history behavior remain open. |
 | Metatools and customizable commands | Missing | No marking assignment/programming or user shortcut editor. |
 | Utilities and arranging | Missing | Explode/implode, voice/layer transforms, rhythmic augmentation/diminution, rebar and SmartFind/Paint. |
@@ -136,15 +136,15 @@ and [graphics](https://usermanuals.finalemusic.com/FinaleWin/Content/Finale/menu
 | Capability | Status | Evidence and work remaining |
 | --- | --- | --- |
 | Vector full score and single-staff view | Complete | Common vector layout feeds screen, multipage PDF and SVG. This narrow capability is not a linked-parts implementation. |
-| Full ensemble system layout | Partial | Automatic grouping over fixed letter-size pages. Needs robust vertical spacing, overflow and collision avoidance for dense scores. |
-| Page size, margins, scaling and orientation | Partial | Linked parts store paper size and orientation. Full-score formats, editable margins and scaling remain pending. |
-| System breaks, locks and measure widths | Missing | No editable systems, manual spacing, beat charts or pagination controls. |
+| Full ensemble system layout | Partial | Automatic grouping follows saved physical page formats, margins, scaled staff size, lyrical/expression clearance and forced boundaries. Comprehensive collision avoidance for dense/custom engraving remains open. |
+| Page size, margins, scaling and orientation | Partial | Full scores and linked parts save Letter/A4/Legal/Tabloid formats, portrait/landscape, editable margins and uniform 50–150% staff scale. Custom paper, mirrored margins, mixed per-staff sizes and complete page-format options remain open. |
+| System breaks, locks and measure widths | Partial | Explicit system/page boundaries, visible/selected-system locks and per-measure width weights are editable and persistent. Locked membership is honored; internal beat-chart adjustments, drag layout tools, proportional absolute widths and complete collision resolution remain open. |
 | Staff groups, brackets, braces and labels | Partial | Basic automatic staff presentation. Needs editable groups, bracket placement, barline spans and independent abbreviations. |
 | Hide empty staves, multimeasure rests and staff spacing | Partial | Linked parts store extra staff spacing. Empty-staff hiding, multimeasure-rest ranges and per-system staff management remain pending. |
 | Linked part definitions and voicing | Partial | Named stable definitions support individual/custom/multi-staff parts, piano grand-staff generation, source-linked editing and spelled written-pitch transpositions. Voiced extraction by layer/chord note and per-part clefs remain pending. |
-| Independent part formatting | Partial | Each part stores Letter/A4/Legal/Tabloid paper, orientation, measures per system and extra staff spacing. Needs per-item unlink/relink, visibility/position overrides, layout copying, margins and scaling. |
+| Independent part formatting | Partial | Each part stores paper, orientation, margins, staff scale/gap, system membership, measure width weights and publication text. Per-item unlink/relink, visibility/position overrides and layout-copy workflows remain open. |
 | Print and batch score/parts | Partial | Current part PDF/SVG and numbered batch linked-part PDFs use each part's written pitches and page format. Needs native print dialog, copies/ranges, print selection and detached editable extraction. |
-| Publication metadata | Partial | Title/composer. Needs page numbers, copyright, part names, headers/footers, text inserts, title pages and rich formatting. |
+| Publication metadata | Partial | Title/composer, linked-part names, copyright, left/center/right headers/footers and page numbering with title/composer/page tokens. Title pages, styled multiline text blocks, graphics and complete rich formatting remain open. |
 | PDF naming and part titles | Partial | Linked-part pages and PDF/SVG names include the part name; batch files receive distinct numbered names. Needs configurable publication filename templates and saved-title conventions from 27.4.1. |
 | Graphics export and placement | Partial | SVG/PDF export. Needs selection export, raster formats and embedded/linked graphic objects. |
 
@@ -160,8 +160,8 @@ and [audio files](https://usermanuals.finalemusic.com/FinaleWin/Content/Finale/A
 | --- | --- | --- |
 | Sampled GM instrument catalog | Complete | 128 melodic bank-0 programs through SF2; auditions and WAV share the engine. A GM catalog is not Garritan library compatibility. |
 | Transport and mixer | Partial | Play/pause/stop, playhead, volume/pan, mute/solo. Needs seek, loop/region playback, scrub, count-in and metronome. |
-| Ties, dynamics and articulation playback | Partial | Ties, event velocities, staccato and four ordinary articulation effects. Explicit dynamic events, ornaments, hairpins, technique switches and per-pitch articulation remain open. |
-| Tempo map and expressive timing | Missing | One BPM; no accelerando/ritardando, swing, fermata timing or independent performance offsets. |
+| Ties, dynamics and articulation playback | Partial | Independent pitch ties, explicit dynamic velocity events, hairpin attack interpolation, slur overlap, event velocities, staccato and four ordinary articulation effects share audio/MIDI scheduling. Continuous held-note swells, ornaments, technique switches and per-pitch articulation remain open. |
+| Tempo map and expressive timing | Partial | Beat-anchored tempo marks and linear-BPM accelerando/ritardando ramps share an analytic performed-tick/seconds map across repeats, audio, duration and playhead. MIDI emits bounded sampled tempo events; MusicXML preserves marks and dashes-delimited ramps, and MuseScore/MIDI tempo steps import. Curved ramps, MuseScore gradual-tempo spanners, swing, fermata timing and independent performance offsets remain open. |
 | Repeat traversal | Partial | Shared bounded traversal performs nested bar repeats, alternate endings and conventional one-shot D.C./D.S./coda/Fine navigation in audio, MIDI, duration and playhead. Custom conditional pass programs, multiple named targets and complete Finale repeat assignments remain open. |
 | Human Playback equivalent | Missing | No style interpreter or score-text/technique dictionary. Reverb and sample variation alone do not supply this. |
 | MIDI performance editor | Missing | No controller lanes, pitch bends, patch/bank changes, fine note timing or captured data. |
@@ -353,3 +353,56 @@ PDFs were inspected; the piano uses an A4 MediaBox. Both UI themes were rendered
 with actual egui meshes. Carol's sampled regression SHA-256 remains
 `fda033e7c61f0f5a0c15cc66e1e9046d852595c45123eb9f5b841262f1e8a82f`.
 Native macOS/Windows qualification and the remaining partial rows stay open.
+
+### Encore 0.8 integration qualification
+
+- **Production layout foundation:** full scores and each linked part now save
+  validated paper formats, margins, staff scale and spacing, explicit system
+  and page breaks, locked system membership, relative measure width weights,
+  publication headers/footers, copyright and starting page number. Staff scale
+  changes printed symbols and editor hit maps without stretching the physical
+  PDF sheet; page text remains legible at its independent text size. The layout
+  dialog edits the current score/part format, with lock/unlock commands over
+  selected visible systems. Structural measure edits remap formatting indices.
+  Tests cover legacy format defaults, conflicts and bounds, native persistence,
+  page/system membership, aligned weighted widths, scaling/hit-map inversion,
+  publication text and independent written-part metadata. Custom paper,
+  mirrored margins, beat-chart editing, drag layout tools, mixed staff sizes,
+  title-page composition and comprehensive dense-score collision handling
+  remain open. This is a production layout foundation, not full Page Layout
+  tool parity.
+
+- **Regional editing:** source-aware whole-measure selection supports atomic
+  event/region cut, copy, replacement, empty-only and inserted-stack paste.
+  Native annotations, pitch-specific entry styles and complete contained spans
+  travel with the music; losses at copy boundaries are reported. Stack edits
+  remap both score and linked-part formatting. Chromatic, spelled and key-aware
+  diatonic regional transposition are available. Partial measures, filtered and
+  repeated paste, arbitrary rhythmic insertion and clip files remain open.
+- **Manual engraving and ties:** anchored appearance overrides support stem
+  direction, break/join/flat beams, visibility, cue head scale, six notehead
+  shapes and per-pitch accidental/tie choices. Native saves, linked written
+  projections and clipboard preserve these fields. MusicXML exports standard
+  visible elements plus valid hidden metadata for exact Encore round trips.
+  Validation and engraving index overrides by source onset; large documents
+  avoid a full override scan for every rendered note. General custom glyphs,
+  rest offsets, arbitrary stem lengths, beam angles and cross-staff groups
+  remain open.
+- **Contextual shortcuts:** added Simple/Speedy engraving commands, global
+  platform layer selection, Speedy layer navigation and selection/layout range
+  commands. Windows Fit Measures uses Ctrl+M; macOS uses Command+Shift+M.
+  Text and modal focus remain protected. Native physical keypad/Clear/asterisk
+  validation, standard profile, programmable metatools and all unsupported
+  workflows remain open.
+
+Local Linux 0.8 qualification: **243 library and 100 editor/CLI tests** pass;
+format, all-target Clippy with warnings denied and optimized release build pass.
+The two new native studies have inspected PDF previews. Production Layout's
+MusicXML round trip preserves 65 lyric records, two slurs, two expressions, a
+hairpin, a tempo ramp and its repeat; Entry Engraving preserves all 13 entry
+styles, including its partial chord tie. Both modal windows were rendered at
+980×680 with actual egui meshes and fonts. The production sampled render lasts
+24.887 seconds plus a three-second release and contains no clipped PCM samples.
+Carol's 83-second sampled WAV remains byte-identical to the 0.7 regression hash.
+The monochromatic dark default, light option and native-platform limitations
+remain unchanged.

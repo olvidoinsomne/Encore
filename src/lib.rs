@@ -1,10 +1,14 @@
 pub mod audio;
 pub mod demos;
 pub mod document;
+pub mod editing;
 pub mod engraving;
+pub mod entry_style;
 pub mod export;
+pub mod expressions;
 pub mod import;
 pub mod instruments;
+pub mod layout;
 pub mod lyrics;
 pub mod model;
 pub mod parts;

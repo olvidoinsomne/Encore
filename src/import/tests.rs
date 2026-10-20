@@ -442,16 +442,20 @@ fn excess_voices_are_rejected_before_allocating_measure_grids() {
 }
 
 #[test]
-fn partially_tied_chords_fail_without_converting_to_wrong_ties() {
+fn partially_tied_musicxml_chords_preserve_exact_pitch_ties() {
     let music = MUSICXML.replace(
         "<note dynamics=\"100\"><chord/>",
         "<note dynamics=\"100\"><tie type='start'/><chord/>",
     );
-    assert!(
-        musicxml(&music)
-            .unwrap_err()
-            .contains("partially tied chords")
-    );
+    let score = musicxml(&music).unwrap().score;
+    let anchor = crate::document::Anchor {
+        part: 0,
+        measure: 0,
+        tick: 0,
+        layer: 0,
+    };
+    assert!(!crate::entry_style::ties_forward(&score, &anchor, 60));
+    assert!(crate::entry_style::ties_forward(&score, &anchor, 64));
     let muse = MUSESCORE.replacen("<pitch>60</pitch><tpc>14</tpc><Spanner type=\"Tie\"><next><location><fractions>1/4</fractions></location></next></Spanner>", "<pitch>60</pitch><tpc>14</tpc>", 1);
     assert!(
         musescore(&muse)
@@ -497,9 +501,17 @@ fn transparent_warnings_cover_expression_losses_while_repeats_are_retained() {
     assert_eq!(imported.score.key_fifths, 2);
     assert!(
         imported
+            .score
+            .notation
+            .tempo
+            .iter()
+            .any(|change| change.at.measure == 1 && change.bpm == 120)
+    );
+    assert!(
+        !imported
             .warnings
             .iter()
-            .any(|w| w.contains("Tempo changes"))
+            .any(|warning| warning.contains("Tempo changes"))
     );
     assert!(
         imported

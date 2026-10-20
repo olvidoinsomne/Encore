@@ -133,18 +133,20 @@ impl SampleBank {
         let mut output = vec![0.0; frames * 2];
         let any_solo = score.parts.iter().any(|part| part.solo && !part.muted);
         let order = crate::repeats::playback_order(score)?;
+        let performance = Performance::new(score);
         for (part_index, part) in score.parts.iter().enumerate() {
             if part.muted || part.volume <= 0.0 || (any_solo && !part.solo) {
                 continue;
             }
             for layer in 0..4 {
-                let events = timeline_order(
+                let events = timeline_performance(
                     part,
                     score.measure_ticks(),
                     score.tempo,
                     layer,
                     &order,
-                    Some((score, part_index)),
+                    part_index,
+                    Some(&performance),
                 );
                 if events.is_empty() {
                     continue;
@@ -458,6 +460,7 @@ fn timeline(part: &Part, measure_ticks: u32, tempo: u16, layer: u8) -> Vec<Comma
     timeline_order(part, measure_ticks, tempo, layer, &order, None)
 }
 
+#[cfg(test)]
 fn timeline_order(
     part: &Part,
     measure_ticks: u32,
@@ -466,11 +469,53 @@ fn timeline_order(
     order: &[usize],
     score: Option<(&Score, usize)>,
 ) -> Vec<Command> {
+    let performance = score.map(|(score, _)| Performance::new(score));
+    timeline_performance(
+        part,
+        measure_ticks,
+        tempo,
+        layer,
+        order,
+        score.map_or(0, |(_, part)| part),
+        performance.as_ref(),
+    )
+}
+
+struct Performance<'a> {
+    score: &'a Score,
+    styles: crate::entry_style::Index<'a>,
+    expressions: crate::expressions::ExpressionMap,
+    tempo: Option<crate::expressions::TempoMap>,
+}
+impl<'a> Performance<'a> {
+    fn new(score: &'a Score) -> Self {
+        Self {
+            score,
+            styles: crate::entry_style::Index::new(score),
+            expressions: crate::expressions::ExpressionMap::new(score),
+            tempo: (!score.notation.tempo.is_empty())
+                .then(|| crate::expressions::TempoMap::new(score).ok())
+                .flatten(),
+        }
+    }
+}
+fn timeline_performance(
+    part: &Part,
+    measure_ticks: u32,
+    tempo: u16,
+    layer: u8,
+    order: &[usize],
+    part_index: usize,
+    performance: Option<&Performance<'_>>,
+) -> Vec<Command> {
+    let score = performance.map(|performance| (performance.score, part_index));
     let notes: Vec<_> = crate::repeats::events(part, measure_ticks, order)
         .into_iter()
         .filter(|event| event.note.layer == layer)
         .collect();
     let frames_per_tick = 60.0_f64 * SAMPLE_RATE as f64 / (tempo.max(1) as f64 * PPQ as f64);
+    let tempo_map = performance.and_then(|performance| performance.tempo.as_ref());
+    let expression_map = performance.map(|performance| &performance.expressions);
     let mut consumed = HashSet::new();
     let mut commands = Vec::new();
     for (index, event) in notes.iter().enumerate() {
@@ -485,7 +530,18 @@ fn timeline_order(
             let mut end = event.tick + event.note.ticks() as u64;
             let mut last = event.note;
             let mut current = index;
-            while last.tied {
+            while performance.map_or(last.tied, |performance| {
+                performance.styles.ties_forward(
+                    &crate::document::Anchor {
+                        part: part_index,
+                        measure: notes[current].measure,
+                        tick: last.start,
+                        layer: last.layer,
+                    },
+                    last,
+                    midi,
+                )
+            }) {
                 let next = notes
                     .iter()
                     .enumerate()
@@ -520,12 +576,37 @@ fn timeline_order(
                 )
             });
             let gate_end = end as f64 - shortening + f64::from(overlap);
-            let start_frame = (event.tick as f64 * frames_per_tick).round() as usize;
-            let end_frame = ((gate_end * frames_per_tick).round() as usize).max(start_frame + 1);
+            let start_frame = tempo_map.as_ref().map_or_else(
+                || (event.tick as f64 * frames_per_tick).round() as usize,
+                |map| {
+                    (map.seconds_at_tick(event.tick as f64) * f64::from(SAMPLE_RATE)).round()
+                        as usize
+                },
+            );
+            let end_frame = tempo_map
+                .as_ref()
+                .map_or_else(
+                    || (gate_end * frames_per_tick).round() as usize,
+                    |map| (map.seconds_at_tick(gate_end) * f64::from(SAMPLE_RATE)).round() as usize,
+                )
+                .max(start_frame + 1);
             commands.push(Command {
                 frame: start_frame,
                 midi,
-                kind: Kind::On(event.note.playback_velocity()),
+                kind: Kind::On(score.map_or_else(
+                    || event.note.playback_velocity(),
+                    |(_score, part)| {
+                        expression_map.as_ref().unwrap().velocity(
+                            crate::document::Anchor {
+                                part,
+                                measure: event.measure,
+                                tick: event.note.start,
+                                layer: event.note.layer,
+                            },
+                            event.note,
+                        )
+                    },
+                )),
             });
             commands.push(Command {
                 frame: end_frame,
@@ -1121,6 +1202,72 @@ mod tests {
         assert!(events.contains(&Command {
             frame: 110939,
             midi: 60,
+            kind: Kind::Off
+        }));
+    }
+    #[test]
+    fn expressive_timeline_uses_dynamic_ramp_attacks_and_tempo_step_frames() {
+        use crate::{
+            document::Anchor,
+            expressions::{Expression, Hairpin, TempoChange, TimePoint},
+        };
+        let mut score = score();
+        score.parts[0].measures[0].notes = (0..4).map(|index| note(index * 480, &[60])).collect();
+        score.parts[0].measures[1].notes = vec![note(0, &[62])];
+        let start = Anchor {
+            part: 0,
+            measure: 0,
+            tick: 0,
+            layer: 0,
+        };
+        let end = Anchor {
+            measure: 1,
+            ..start
+        };
+        score
+            .notation
+            .expressions
+            .push(Expression::dynamic(start, "p", 40));
+        score.notation.spanners.push(Hairpin {
+            start_velocity: Some(40),
+            end_velocity: Some(120),
+            ..Hairpin::new(start, end)
+        });
+        score.notation.tempo.push(TempoChange::new(
+            TimePoint {
+                measure: 1,
+                tick: 0,
+            },
+            60,
+        ));
+        let events = timeline_order(
+            &score.parts[0],
+            score.measure_ticks(),
+            120,
+            0,
+            &[0, 1],
+            Some((&score, 0)),
+        );
+        let on: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event.kind {
+                Kind::On(velocity) => Some((event.frame, velocity)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            on,
+            [
+                (0, 40),
+                (22050, 60),
+                (44100, 80),
+                (66150, 100),
+                (88200, 120)
+            ]
+        );
+        assert!(events.contains(&Command {
+            frame: 132300,
+            midi: 62,
             kind: Kind::Off
         }));
     }

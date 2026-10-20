@@ -48,6 +48,16 @@ impl Anchor {
 #[serde(default)]
 pub struct Notation {
     #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub entries: Vec<crate::entry_style::EntryStyle>,
+    #[serde(skip_serializing_if = "crate::layout::DocumentLayout::is_default")]
+    pub layout: crate::layout::DocumentLayout,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub expressions: Vec<crate::expressions::Expression>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub spanners: Vec<crate::expressions::Hairpin>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tempo: Vec<crate::expressions::TempoChange>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub lyrics: Vec<crate::lyrics::Lyric>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub slurs: Vec<crate::slurs::Slur>,
@@ -61,7 +71,12 @@ pub struct Notation {
 
 impl Notation {
     pub fn is_empty(&self) -> bool {
-        self.lyrics.is_empty()
+        self.entries.is_empty()
+            && self.layout.is_default()
+            && self.expressions.is_empty()
+            && self.spanners.is_empty()
+            && self.tempo.is_empty()
+            && self.lyrics.is_empty()
             && self.slurs.is_empty()
             && self.repeats.is_empty()
             && self.navigation.is_empty()
@@ -81,13 +96,24 @@ pub fn note_at<'a>(score: &'a Score, anchor: &Anchor) -> Option<&'a Note> {
 }
 
 pub fn validate(score: &Score) -> Result<(), String> {
+    crate::entry_style::validate(score)?;
+    score
+        .notation
+        .layout
+        .validate_for_score(score.measure_count())?;
+    crate::expressions::validate(score)?;
     crate::lyrics::validate(score)?;
     crate::slurs::validate(score)?;
     crate::repeats::validate(score)?;
-    crate::parts::validate_definitions(&score.notation.parts, score.parts.len())
+    crate::parts::validate_definitions(&score.notation.parts, score.parts.len())?;
+    for part in &score.notation.parts {
+        part.layout.validate_for_score(score.measure_count())?;
+    }
+    Ok(())
 }
 
 pub fn remove_anchor(score: &mut Score, anchor: &Anchor) {
+    crate::entry_style::remove_anchor(score, anchor);
     crate::lyrics::remove_anchor(score, anchor);
     crate::slurs::remove_anchor(score, anchor);
 }
@@ -99,6 +125,24 @@ pub fn move_anchor(score: &mut Score, from: Anchor, to: Anchor) -> Result<(), St
         return Ok(());
     }
     let old = score.notation.clone();
+    for style in &mut score.notation.entries {
+        if style.anchor == from {
+            style.anchor = to;
+        }
+    }
+    for expression in &mut score.notation.expressions {
+        if expression.anchor == from {
+            expression.anchor = to;
+        }
+    }
+    for span in &mut score.notation.spanners {
+        if span.start == from {
+            span.start = to;
+        }
+        if span.end == from {
+            span.end = to;
+        }
+    }
     for lyric in &mut score.notation.lyrics {
         if lyric.anchor == from {
             lyric.anchor = to;
@@ -124,6 +168,28 @@ pub fn move_anchor(score: &mut Score, from: Anchor, to: Anchor) -> Result<(), St
 
 /// Call before removing the source staff, so every remaining anchor stays valid.
 pub fn remove_staff(score: &mut Score, staff: usize) {
+    crate::entry_style::remove_part(score, staff);
+    score
+        .notation
+        .expressions
+        .retain(|expression| expression.anchor.part != staff);
+    for expression in &mut score.notation.expressions {
+        if expression.anchor.part > staff {
+            expression.anchor.part -= 1;
+        }
+    }
+    score
+        .notation
+        .spanners
+        .retain(|span| span.start.part != staff);
+    for span in &mut score.notation.spanners {
+        if span.start.part > staff {
+            span.start.part -= 1;
+        }
+        if span.end.part > staff {
+            span.end.part -= 1;
+        }
+    }
     crate::lyrics::remove_part(score, staff);
     crate::slurs::remove_part(score, staff);
     crate::lyrics::reindex_parts(score, staff);
@@ -141,6 +207,7 @@ pub fn remove_staff(score: &mut Score, staff: usize) {
 
 /// Discard annotations whose source measures have been explicitly removed.
 pub fn truncate_measures(score: &mut Score) -> Result<(), String> {
+    crate::entry_style::prune(score);
     crate::lyrics::prune(score);
     crate::slurs::prune(score);
     let count = score.measure_count();

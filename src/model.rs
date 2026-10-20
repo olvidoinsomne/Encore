@@ -6,6 +6,7 @@ use std::path::Path;
 pub const PPQ: u32 = 480;
 pub const MAX_PARTS: usize = 64;
 pub const MAX_MEASURES: usize = 1024;
+pub const MAX_EVENTS: usize = 200_000;
 const MAX_FILE_BYTES: u64 = 16 * 1024 * 1024;
 
 pub fn dynamic_name(velocity: u8) -> &'static str {
@@ -1109,7 +1110,7 @@ impl Score {
             }
             for (mi, measure) in part.measures.iter().enumerate() {
                 total_notes += measure.notes.len();
-                if total_notes > 200_000 {
+                if total_notes > MAX_EVENTS {
                     return Err("Score exceeds the 200,000-event limit.".into());
                 }
                 let mut ends = [0; 4];

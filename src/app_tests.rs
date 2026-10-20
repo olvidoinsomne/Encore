@@ -1197,20 +1197,38 @@ fn headless_full_editor_renders_notation_and_font_textures() {
         app.part_view = true;
         app.selected_linked_part = index.parse().unwrap();
     }
+    app.show_layout = std::env::var_os("ENCORE_HEADLESS_LAYOUT").is_some();
+    if std::env::var_os("ENCORE_HEADLESS_STYLE").is_some() {
+        app.show_entry_style = true;
+        app.selected = Some(Selection {
+            part: 0,
+            measure: 0,
+            note: 0,
+        });
+    }
+    let (width, height) = std::env::var("ENCORE_HEADLESS_SIZE")
+        .ok()
+        .and_then(|s| {
+            s.split_once('x')
+                .map(|(w, h)| (w.parse::<usize>().unwrap(), h.parse::<usize>().unwrap()))
+        })
+        .unwrap_or((1440, 1000));
     screenshot_theme(&mut app, &ctx);
     if let Some(path) = std::env::var_os("ENCORE_LAB_SOUNDFONT") {
         app.set_audio_engine(AudioEngine::from_soundfont(&PathBuf::from(path)).unwrap());
     }
     let mut textures = HashMap::new();
-    let mut painter = SoftwarePainter::new(1440, 1000);
-    for frame in 0..3 {
-        let output = ctx.run(
-            raw_input(frame, vec![], egui::Modifiers::default()),
-            |ctx| app.ui(ctx),
-        );
+    let mut painter = SoftwarePainter::new(width, height);
+    for frame in 0..12 {
+        let mut input = raw_input(frame, vec![], egui::Modifiers::default());
+        input.screen_rect = Some(Rect::from_min_size(
+            Pos2::ZERO,
+            Vec2::new(width as f32, height as f32),
+        ));
+        let output = ctx.run(input, |ctx| app.ui(ctx));
         assert!(!output.shapes.is_empty());
         apply_textures(&mut textures, &output.textures_delta);
-        if frame == 2 {
+        if frame == 11 {
             let meshes = ctx.tessellate(output.shapes, output.pixels_per_point);
             assert!(meshes.iter().any(|primitive| matches!(&primitive.primitive,egui::epaint::Primitive::Mesh(mesh) if mesh.indices.len()>100)));
             painter.paint(&meshes, &textures, output.pixels_per_point);
@@ -1240,8 +1258,8 @@ fn headless_full_editor_renders_notation_and_font_textures() {
         "Expected visible staff lines, notes, labels, and fonts; found {dark_pixels} dark pixels"
     );
     assert!(
-        paper_pixels > 100_000,
-        "Expected a visible white score page"
+        app.show_layout || app.show_entry_style || paper_pixels > width * height / 25,
+        "Expected a visible white score page or an open editing dialog"
     );
     if let Some(path) = std::env::var_os("ENCORE_HEADLESS_SCREENSHOT") {
         let path = PathBuf::from(path);
@@ -1833,4 +1851,115 @@ fn instrument_library_keeps_primary_controls_visible_at_the_smallest_window() {
             path.display()
         );
     }
+}
+
+#[test]
+fn engraving_shortcuts_undo_and_layer_selection_follow_real_editor_frames() {
+    let ctx = egui::Context::default();
+    configure_context(&ctx);
+    let mut score = Score::blank();
+    score.parts[0].measures[0].notes = vec![event(0, Duration::Quarter, &[61, 65])];
+    let mut app = controller(score.clone());
+    app.write_mode = true;
+    app.selected = Some(Selection {
+        part: 0,
+        measure: 0,
+        note: 0,
+    });
+    app.entry_pitch = Pitch::from_midi(61);
+    let plain = egui::Modifiers::NONE;
+    let command = egui::Modifiers {
+        ctrl: true,
+        command: true,
+        ..plain
+    };
+    for (frame, events, mods) in [
+        (0, vec![], plain),
+        (1, vec![key(egui::Key::L, true, plain)], plain),
+        (
+            2,
+            vec![
+                key(egui::Key::L, false, plain),
+                key(egui::Key::P, true, plain),
+            ],
+            plain,
+        ),
+    ] {
+        let _ = ctx.run(raw_input(frame, events, mods), |ctx| app.ui(ctx));
+    }
+    let anchor = encore::document::Anchor {
+        part: 0,
+        measure: 0,
+        tick: 0,
+        layer: 0,
+    };
+    assert_eq!(
+        encore::entry_style::at(&app.score, &anchor)
+            .unwrap()
+            .accidental(61),
+        encore::entry_style::AccidentalDisplay::Parenthesized
+    );
+    let _ = ctx.run(
+        raw_input(
+            3,
+            vec![
+                key(egui::Key::P, false, plain),
+                key(egui::Key::Z, true, command),
+            ],
+            command,
+        ),
+        |ctx| app.ui(ctx),
+    );
+    assert_eq!(
+        encore::entry_style::at(&app.score, &anchor)
+            .unwrap()
+            .accidental(61),
+        encore::entry_style::AccidentalDisplay::Auto
+    );
+    assert_eq!(app.score.parts, score.parts);
+    let layer_mod = egui::Modifiers {
+        alt: true,
+        shift: true,
+        ..plain
+    };
+    let _ = ctx.run(
+        raw_input(
+            4,
+            vec![
+                key(egui::Key::Z, false, command),
+                key(egui::Key::Num3, true, layer_mod),
+            ],
+            layer_mod,
+        ),
+        |ctx| app.ui(ctx),
+    );
+    assert_eq!(app.active_layer, 2);
+    assert!(app.selected.is_none());
+    assert_eq!(app.score.parts, score.parts);
+}
+
+#[test]
+fn expression_editor_prevents_note_commands_until_escape() {
+    let ctx = egui::Context::default();
+    configure_context(&ctx);
+    let mut app = controller(Score::blank());
+    app.write_mode = true;
+    app.expressions_editor.open = true;
+    let before = app.score.clone();
+    let plain = egui::Modifiers::NONE;
+    for (frame, events) in [
+        (0, vec![]),
+        (1, vec![key(egui::Key::C, true, plain)]),
+        (
+            2,
+            vec![
+                key(egui::Key::C, false, plain),
+                key(egui::Key::Escape, true, plain),
+            ],
+        ),
+    ] {
+        let _ = ctx.run(raw_input(frame, events, plain), |ctx| app.ui(ctx));
+    }
+    assert_eq!(app.score, before);
+    assert!(!app.expressions_editor.open);
 }

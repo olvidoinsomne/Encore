@@ -212,6 +212,7 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
     let mut initial_tempo = None;
     let mut parts = Vec::new();
     let mut annotation_sets = Vec::new();
+    let mut expression_sets = Vec::new();
     let mut staff_ids = Vec::new();
     for staff in source.children().filter(|n| n.has_tag_name("Staff")) {
         if parts.len() >= MAX_PARTS {
@@ -246,6 +247,7 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
             ));
         }
         let mut annotations = Annotations::default();
+        let mut expressions = super::expressions::Expressions::default();
         let source_staff = id
             .parse::<u32>()
             .map_err(|_| "MuseScore staff id must be numeric.")?;
@@ -352,6 +354,19 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
                 let mut tuplets = BTreeMap::new();
                 let mut active_tuplet = None;
                 for item in voice.children().filter(|n| n.is_element()) {
+                    expressions.muse(
+                        item,
+                        SourceAnchor {
+                            staff: source_staff,
+                            voice: voice_index.to_string(),
+                            measure: measure_index,
+                            tick: cursor
+                                .try_into()
+                                .map_err(|_| "Invalid expression position.")?,
+                        },
+                        division,
+                        &mut warnings,
+                    )?;
                     match item.tag_name().name() {
                         "Tuplet" => {
                             if child(item, "Tuplet").is_some() { return Err(format!("{context}: nested MuseScore tuplets are not supported yet.")); }
@@ -384,8 +399,7 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
                             let bpm = number::<f64>(item, "tempo")?.ok_or("MuseScore tempo is missing a value.")? * 60.0;
                             if !bpm.is_finite() || !(20.0..=400.0).contains(&bpm) { return Err("Imported tempo must be 20–400 BPM.".into()); }
                             let bpm = bpm.round() as u16;
-                            if initial_tempo.is_some_and(|first| first != bpm) { warnings.add("Tempo changes are not retained; playback uses the first tempo."); }
-                            else if initial_tempo.is_none() { initial_tempo = Some(bpm); score.tempo = bpm; }
+                            if initial_tempo.is_none() { initial_tempo = Some(bpm); score.tempo = bpm; }
                         }
                         "Dynamic" => {
                             let explicit = number::<i16>(item, "velocity")?.filter(|v| *v > 0);
@@ -433,7 +447,7 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
                                 tied = Some(outgoing);
                                 if child(*note, "Events").is_some() || child(*note, "velocity").is_some() || child(*note, "tuning").is_some() { warnings.add("Custom per-note playback events, tuning, and velocity overrides are not retained; written dynamics are used."); }
                             }
-                            annotations.muse(item,SourceAnchor{staff:source_staff,voice:voice_index.to_string(),measure:measure_index,tick:cursor as u32+pickup_shift},division,&mut warnings)?;
+                            annotations.muse(item,SourceAnchor{staff:source_staff,voice:voice_index.to_string(),measure:measure_index,tick:cursor as u32},division,&mut warnings)?;
                             let (staccato, articulations) = read_articulations(item, &mut warnings);
                             if let Some(duration) = rhythm {
                                 push_rhythmic_event(&mut notes, Note { start: cursor as u32 + pickup_shift,
@@ -474,6 +488,10 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
                         [measure_index]
                         .notes = notes;
                 }
+            }
+            if pickup_shift > 0 {
+                annotations.shift(measure_index, pickup_shift);
+                expressions.shift(measure_index, pickup_shift);
             }
             source_start = source_start
                 .checked_add(actual_ticks)
@@ -541,6 +559,7 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
             muted: info.muted,
             solo: false,
         });
+        expression_sets.push((expressions, annotation_mapping.clone()));
         annotation_sets.push((annotations, annotation_mapping));
     }
     if initial_tempo.is_none() {
@@ -551,6 +570,9 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
     score.parts = parts;
     for (annotations, mapping) in annotation_sets {
         annotations.finish(&mut score, &mapping, &mut warnings)?;
+    }
+    for (expressions, mapping) in expression_sets {
+        expressions.resolve(&mut score, &mapping, &mut warnings)?;
     }
     let parts = std::mem::take(&mut score.parts);
     finish_parts(score, parts, warnings)

@@ -23,6 +23,156 @@ fn xml(text: &str) -> String {
         })
         .collect()
 }
+fn expression_directions(score: &Score, part: usize, measure: usize) -> String {
+    use crate::expressions::{ExpressionKind, HairpinKind, Placement};
+    let mut out = String::new();
+    let direction = |out: &mut String,
+                     at: u32,
+                     layer: u8,
+                     placement: Placement,
+                     body: String,
+                     sound: String| {
+        let _ = writeln!(
+            out,
+            "      <direction placement=\"{}\"><direction-type>{body}</direction-type><offset>{at}</offset><voice>{}</voice>{sound}</direction>",
+            if placement == Placement::Above {
+                "above"
+            } else {
+                "below"
+            },
+            layer + 1
+        );
+    };
+    for mark in
+        score.notation.expressions.iter().filter(|mark| {
+            mark.anchor.measure == measure && (mark.anchor.part == part || mark.system)
+        })
+    {
+        let body = match mark.kind {
+            ExpressionKind::Dynamic => {
+                let symbol = if [
+                    "pppp", "ppp", "pp", "p", "mp", "mf", "f", "ff", "fff", "ffff", "sfz", "fp",
+                ]
+                .contains(&mark.text.as_str())
+                {
+                    format!("<{}/>", mark.text)
+                } else {
+                    format!("<other-dynamics>{}</other-dynamics>", xml(&mark.text))
+                };
+                format!("<dynamics>{symbol}</dynamics>")
+            }
+            ExpressionKind::Rehearsal => format!("<rehearsal>{}</rehearsal>", xml(&mark.text)),
+            _ => format!("<words>{}</words>", xml(&mark.text)),
+        };
+        let hidden = serde_json::to_string(mark)
+            .ok()
+            .map_or_else(String::new, |json| {
+                format!(
+                    "<other-direction print-object=\"no\">encore-expression:{}</other-direction>",
+                    xml(&json)
+                )
+            });
+        let sound = mark.velocity.map_or_else(String::new, |velocity| {
+            format!(
+                "<sound dynamics=\"{:.5}\"/>",
+                f64::from(velocity) * 100.0 / 90.0
+            )
+        });
+        direction(
+            &mut out,
+            mark.anchor.tick,
+            mark.anchor.layer,
+            mark.placement,
+            body + &hidden,
+            sound,
+        );
+    }
+    for line in score
+        .notation
+        .spanners
+        .iter()
+        .filter(|line| line.start.part == part)
+    {
+        let number = line.start.layer + 1;
+        if line.end.measure == measure {
+            direction(
+                &mut out,
+                line.end.tick,
+                line.end.layer,
+                line.placement,
+                format!("<wedge type=\"stop\" number=\"{number}\"/>"),
+                String::new(),
+            );
+        }
+        if line.start.measure == measure {
+            let metadata = serde_json::to_string(line)
+                .ok()
+                .map_or_else(String::new, |json| {
+                    format!(
+                        "<other-direction print-object=\"no\">encore-hairpin:{}</other-direction>",
+                        xml(&json)
+                    )
+                });
+            direction(
+                &mut out,
+                line.start.tick,
+                line.start.layer,
+                line.placement,
+                format!(
+                    "<wedge type=\"{}\" number=\"{number}\"/>{metadata}",
+                    if line.kind == HairpinKind::Crescendo {
+                        "crescendo"
+                    } else {
+                        "diminuendo"
+                    }
+                ),
+                String::new(),
+            );
+        }
+    }
+    for change in &score.notation.tempo {
+        if let Some(ramp) = &change.ramp
+            && ramp.end.measure == measure
+        {
+            direction(
+                &mut out,
+                ramp.end.tick,
+                0,
+                Placement::Above,
+                "<dashes type=\"stop\" number=\"1\"/>".into(),
+                format!("<sound tempo=\"{}\"/>", ramp.bpm),
+            );
+        }
+    }
+    for change in score
+        .notation
+        .tempo
+        .iter()
+        .filter(|change| change.at.measure == measure)
+    {
+        let mut body = if change.text.is_empty() {
+            String::new()
+        } else {
+            format!("<words>{}</words>", xml(&change.text))
+        };
+        body.push_str(&format!(
+            "<metronome><beat-unit>quarter</beat-unit><per-minute>{}</per-minute></metronome>",
+            change.bpm
+        ));
+        if change.ramp.is_some() {
+            body.push_str("<dashes type=\"start\" number=\"1\"/>");
+        }
+        direction(
+            &mut out,
+            change.at.tick,
+            0,
+            Placement::Above,
+            body,
+            format!("<sound tempo=\"{}\"/>", change.bpm),
+        );
+    }
+    out
+}
 fn channel(index: usize) -> u8 {
     let n = (index % 15) as u8;
     if n >= 9 { n + 1 } else { n }
@@ -63,17 +213,50 @@ impl<'a> Timeline<'a> {
             ends,
         }
     }
-    fn tie_in(&self, start: u32, layer: u8, midi: u8) -> bool {
+    fn tie_in(
+        &self,
+        index: &crate::entry_style::Index<'_>,
+        score: &Score,
+        part: usize,
+        start: u32,
+        layer: u8,
+        midi: u8,
+    ) -> bool {
         self.ends.get(&(start, layer)).is_some_and(|i| {
-            self.notes[*i].1.tied && self.notes[*i].1.pitches.iter().any(|p| p.midi() == midi)
+            index.ties_forward(
+                &crate::document::Anchor {
+                    part,
+                    measure: (self.notes[*i].0 / score.measure_ticks()) as usize,
+                    tick: self.notes[*i].1.start,
+                    layer,
+                },
+                self.notes[*i].1,
+                midi,
+            ) && self.notes[*i].1.pitches.iter().any(|p| p.midi() == midi)
         })
     }
-    fn tie_out(&self, start: u32, note: &Note, midi: u8) -> bool {
-        note.tied
-            && self
-                .starts
-                .get(&(start + note.ticks(), note.layer))
-                .is_some_and(|i| self.notes[*i].1.pitches.iter().any(|p| p.midi() == midi))
+    fn tie_out(
+        &self,
+        index: &crate::entry_style::Index<'_>,
+        score: &Score,
+        part: usize,
+        start: u32,
+        note: &Note,
+        midi: u8,
+    ) -> bool {
+        index.ties_forward(
+            &crate::document::Anchor {
+                part,
+                measure: (start / score.measure_ticks()) as usize,
+                tick: note.start,
+                layer: note.layer,
+            },
+            note,
+            midi,
+        ) && self
+            .starts
+            .get(&(start + note.ticks(), note.layer))
+            .is_some_and(|i| self.notes[*i].1.pitches.iter().any(|p| p.midi() == midi))
     }
 }
 
@@ -114,6 +297,7 @@ pub fn musicxml(score: &Score) -> String {
         );
     }
     out.push_str("  </part-list>\n");
+    let style_index = crate::entry_style::Index::new(score);
     let notation = xml_annotations(score);
     let measure_ticks = score.measure_ticks();
     for (pi, part) in score.parts.iter().enumerate() {
@@ -144,10 +328,11 @@ pub fn musicxml(score: &Score) -> String {
                 );
                 let _ = writeln!(
                     out,
-                    "      <direction placement=\"above\"><direction-type><metronome><beat-unit>quarter</beat-unit><per-minute>{}</per-minute></metronome></direction-type><sound tempo=\"{}\"/></direction>",
+                    "      <direction placement=\"above\"><direction-type><metronome><beat-unit>quarter</beat-unit><per-minute>{}</per-minute></metronome><other-direction print-object=\"no\">encore-initial-tempo</other-direction></direction-type><sound tempo=\"{}\"/></direction>",
                     score.tempo, score.tempo
                 );
             }
+            out.push_str(&expression_directions(score, pi, mi));
             out.push_str(&crate::repeats::musicxml_before_measure(score, mi));
             out.push_str(&crate::repeats::musicxml_navigation_before_measure(
                 score, mi,
@@ -200,15 +385,19 @@ pub fn musicxml(score: &Score) -> String {
                             false,
                             tuplet_bounds,
                             ("", ""),
+                            style_index.get(&anchor),
                         );
                     } else {
                         let dynamic = crate::model::dynamic_name(note.velocity);
-                        if note.velocity > 0
+                        if !score.notation.expressions.iter().any(|mark| {
+                            mark.anchor.part == pi
+                                && mark.kind == crate::expressions::ExpressionKind::Dynamic
+                        }) && note.velocity > 0
                             && previous_dynamic[usize::from(layer)] != Some(dynamic)
                         {
                             let _ = writeln!(
                                 out,
-                                "      <direction placement=\"below\"><direction-type><dynamics><{dynamic}/></dynamics></direction-type><voice>{}</voice></direction>",
+                                "      <direction placement=\"below\"><direction-type><dynamics><{dynamic}/></dynamics><other-direction print-object=\"no\">encore-derived-dynamic</other-direction></direction-type><voice>{}</voice></direction>",
                                 layer + 1
                             );
                             previous_dynamic[usize::from(layer)] = Some(dynamic);
@@ -219,14 +408,29 @@ pub fn musicxml(score: &Score) -> String {
                                 note,
                                 Some(*pitch),
                                 chord_index > 0,
-                                timeline.tie_in(start, note.layer, pitch.midi()),
-                                timeline.tie_out(start, note, pitch.midi()),
+                                timeline.tie_in(
+                                    &style_index,
+                                    score,
+                                    pi,
+                                    start,
+                                    note.layer,
+                                    pitch.midi(),
+                                ),
+                                timeline.tie_out(
+                                    &style_index,
+                                    score,
+                                    pi,
+                                    start,
+                                    note,
+                                    pitch.midi(),
+                                ),
                                 if chord_index == 0 {
                                     tuplet_bounds
                                 } else {
                                     (false, false)
                                 },
                                 if chord_index == 0 { marks } else { ("", "") },
+                                style_index.get(&anchor),
                             );
                         }
                     }
@@ -381,6 +585,7 @@ fn write_gap(out: &mut String, mut ticks: u32, layer: u8) {
                     false,
                     (false, false),
                     ("", ""),
+                    None,
                 );
                 ticks -= size;
             }
@@ -405,16 +610,20 @@ fn write_xml_note(
     tie_out: bool,
     tuplet_bounds: (bool, bool),
     annotations: (&str, &str),
+    style: Option<&crate::entry_style::EntryStyle>,
 ) {
+    let attributes = crate::entry_style::xml_attributes(style);
     if pitch.is_some() {
         let _ = write!(
             out,
-            "      <note dynamics=\"{:.3}\">",
-            f32::from(note.velocity) * 100.0 / 90.0
+            "      <note dynamics=\"{:.3}\"{}>",
+            f32::from(note.velocity) * 100.0 / 90.0,
+            attributes
         );
     } else {
-        out.push_str("      <note>");
+        let _ = write!(out, "      <note{attributes}>");
     }
+
     if chord {
         out.push_str("<chord/>");
     }
@@ -445,6 +654,11 @@ fn write_xml_note(
     if note.dotted {
         out.push_str("<dot/>");
     }
+    out.push_str(&crate::entry_style::xml_accidental(
+        style,
+        Some(note),
+        pitch.map(|pitch| pitch.midi()),
+    ));
     if let Some(tuplet) = note.tuplet {
         let _ = write!(
             out,
@@ -452,6 +666,13 @@ fn write_xml_note(
             tuplet.actual, tuplet.normal
         );
     }
+    out.push_str(&crate::entry_style::xml_elements(
+        style,
+        Some(note),
+        pitch.map(|pitch| pitch.midi()),
+        chord,
+    ));
+    let style_notations = crate::entry_style::xml_notations(style, chord);
     // Pitch alter is authoritative; accidental display is left to the importer.
     let has_articulations =
         pitch.is_some() && (note.staccato || (!chord && !note.articulations.is_empty()));
@@ -461,13 +682,19 @@ fn write_xml_note(
         || tuplet_bounds.0
         || tuplet_bounds.1
         || !annotations.0.is_empty()
+        || !style_notations.is_empty()
     {
         out.push_str("<notations>");
+        let orientation = style.map_or("", |style| match style.tie_direction {
+            crate::slurs::SlurDirection::Above => " orientation=\"over\"",
+            crate::slurs::SlurDirection::Below => " orientation=\"under\"",
+            _ => "",
+        });
         if tie_in {
-            out.push_str("<tied type=\"stop\"/>");
+            let _ = write!(out, "<tied type=\"stop\"{orientation}/>");
         }
         if tie_out {
-            out.push_str("<tied type=\"start\"/>");
+            let _ = write!(out, "<tied type=\"start\"{orientation}/>");
         }
         if has_articulations {
             out.push_str("<articulations>");
@@ -487,6 +714,7 @@ fn write_xml_note(
         if tuplet_bounds.1 {
             out.push_str("<tuplet type=\"stop\"/>");
         }
+        out.push_str(&style_notations);
         out.push_str(annotations.0);
         out.push_str("</notations>");
     }
@@ -552,6 +780,8 @@ pub fn midi(score: &Score) -> Vec<u8> {
     if score.validate().is_err() {
         return Vec::new();
     }
+    let expression_map = crate::expressions::ExpressionMap::new(score);
+    let style_index = crate::entry_style::Index::new(score);
     let measure_ticks = score.measure_ticks();
     let Ok(order) = crate::repeats::playback_order(score) else {
         return Vec::new();
@@ -559,36 +789,46 @@ pub fn midi(score: &Score) -> Vec<u8> {
     let end = measure_ticks * order.len() as u32;
     let tempo = 60_000_000u32 / u32::from(score.tempo);
     let denominator_power = score.time_denominator.trailing_zeros() as u8;
-    let mut tracks = vec![track(
-        vec![
-            Event {
-                tick: 0,
-                priority: 0,
-                bytes: meta(0x03, score.title.as_bytes()),
-            },
-            Event {
-                tick: 0,
-                priority: 0,
-                bytes: meta(0x01, score.composer.as_bytes()),
-            },
-            Event {
-                tick: 0,
-                priority: 0,
-                bytes: meta(0x51, &tempo.to_be_bytes()[1..]),
-            },
-            Event {
-                tick: 0,
-                priority: 0,
-                bytes: meta(0x58, &[score.time_numerator, denominator_power, 24, 8]),
-            },
-            Event {
-                tick: 0,
-                priority: 0,
-                bytes: meta(0x59, &[score.key_fifths as u8, 0]),
-            },
-        ],
-        end,
-    )];
+    let mut conductor = vec![
+        Event {
+            tick: 0,
+            priority: 0,
+            bytes: meta(0x03, score.title.as_bytes()),
+        },
+        Event {
+            tick: 0,
+            priority: 0,
+            bytes: meta(0x01, score.composer.as_bytes()),
+        },
+        Event {
+            tick: 0,
+            priority: 0,
+            bytes: meta(0x51, &tempo.to_be_bytes()[1..]),
+        },
+        Event {
+            tick: 0,
+            priority: 0,
+            bytes: meta(0x58, &[score.time_numerator, denominator_power, 24, 8]),
+        },
+        Event {
+            tick: 0,
+            priority: 0,
+            bytes: meta(0x59, &[score.key_fifths as u8, 0]),
+        },
+    ];
+    if !score.notation.tempo.is_empty() {
+        conductor.retain(|event| !event.bytes.starts_with(&[0xff, 0x51]));
+        if let Ok(map) = crate::expressions::TempoMap::new(score) {
+            for (tick, tempo) in map.midi_tempos() {
+                conductor.push(Event {
+                    tick,
+                    priority: 0,
+                    bytes: meta(0x51, &tempo.to_be_bytes()[1..]),
+                });
+            }
+        }
+    }
+    let mut tracks = vec![track(conductor, end)];
     let has_solo = score.parts.iter().any(|part| part.solo);
     let mut lyric_index: HashMap<crate::document::Anchor, Vec<&crate::lyrics::Lyric>> =
         HashMap::new();
@@ -689,15 +929,23 @@ pub fn midi(score: &Score) -> Vec<u8> {
                     for pitch in &note.pitches {
                         let midi = pitch.midi();
                         let tie_in = previous.is_some_and(|previous| {
-                            previous.note.tied
-                                && crate::repeats::written_adjacent(previous, event, measure_ticks)
+                            style_index.ties_forward(
+                                &crate::document::Anchor {
+                                    part: part_index,
+                                    measure: previous.measure,
+                                    tick: previous.note.start,
+                                    layer,
+                                },
+                                previous.note,
+                                midi,
+                            ) && crate::repeats::written_adjacent(previous, event, measure_ticks)
                                 && previous
                                     .note
                                     .pitches
                                     .iter()
                                     .any(|pitch| pitch.midi() == midi)
                         });
-                        let tie_out = note.tied
+                        let tie_out = style_index.ties_forward(&anchor, note, midi)
                             && following.is_some_and(|next| {
                                 crate::repeats::written_adjacent(event, next, measure_ticks)
                                     && next.note.pitches.iter().any(|pitch| pitch.midi() == midi)
@@ -706,7 +954,11 @@ pub fn midi(score: &Score) -> Vec<u8> {
                             events.push(Event {
                                 tick: start,
                                 priority: 3,
-                                bytes: vec![0x90 | channel, midi, note.playback_velocity()],
+                                bytes: vec![
+                                    0x90 | channel,
+                                    midi,
+                                    expression_map.velocity(anchor, note),
+                                ],
                             });
                         }
                         if !tie_out {
@@ -1153,6 +1405,7 @@ mod tests {
     fn midi_da_capo_al_fine_uses_the_shared_performed_route() {
         use crate::repeats::{NavigationKind, NavigationMark};
         let mut score = Score::blank();
+        score.tempo = 120;
         score.tempo = 120;
         score.parts.truncate(1);
         for (bar, measure) in score.parts[0].measures.iter_mut().enumerate() {

@@ -46,7 +46,7 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
         .unwrap_or_default();
     let mut score = initial_score(title, composer);
     let mut warnings = Warnings::default();
-    warnings.add("Encore re-engraves imported music; original page layout, fonts, beams, and custom engraving are not retained.");
+    warnings.add("Encore re-engraves imported music; original page layout, fonts, and unsupported engraving are not retained.");
     let mut infos = BTreeMap::new();
     if let Some(list) = child(root, "part-list") {
         for definition in list.children().filter(|n| n.has_tag_name("score-part")) {
@@ -133,6 +133,7 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
     }
     let mut parts = Vec::new();
     let mut annotation_sets = Vec::new();
+    let mut expression_sets = Vec::new();
     let mut initial_meter = None;
     let mut initial_key = None;
     let mut initial_tempo = None;
@@ -165,6 +166,7 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
             ));
         }
         let mut annotations = Annotations::default();
+        let mut expressions = super::expressions::Expressions::default();
         let mut annotation_mapping = BTreeMap::new();
         let repeat_map = crate::repeats::parse_musicxml(source, measures.len())?;
         if !repeat_map.is_empty() {
@@ -330,18 +332,36 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
                         chord_start = None;
                     }
                     "direction" | "sound" => {
-                        if let Some(bpm) = tempo(item)? {
+                        let imported_tempo = tempo(item)?;
+                        if let Some(bpm) = imported_tempo {
                             if !bpm.is_finite() || !(20.0..=400.0).contains(&bpm) {
                                 return Err("Imported tempo must be 20–400 BPM.".into());
                             }
-                            let bpm = bpm.round() as u16;
-                            if initial_tempo.is_some_and(|first| first != bpm) {
-                                warnings.add("Tempo changes are not retained; playback uses the first tempo.");
-                            } else if initial_tempo.is_none() {
-                                initial_tempo = Some(bpm);
-                                score.tempo = bpm;
+                            if initial_tempo.is_none() {
+                                initial_tempo = Some(bpm.round() as u16);
+                                score.tempo = bpm.round() as u16;
                             }
                         }
+                        let offset = number::<f64>(item, "offset")?.unwrap_or(0.0);
+                        let scaled = offset * 480.0 / divisions.unwrap_or(480.0);
+                        if !scaled.is_finite() || (scaled - scaled.round()).abs() > 0.000001 {
+                            return Err("Expression offset is not on Encore's timing grid.".into());
+                        }
+                        let direction_tick = (f64::from(cursor) + scaled).round();
+                        if direction_tick < 0.0 || direction_tick > f64::from(u32::MAX) {
+                            return Err("Expression offset extends outside its measure.".into());
+                        }
+                        expressions.xml(
+                            item,
+                            SourceAnchor {
+                                staff: number::<u32>(item, "staff")?.unwrap_or(1),
+                                voice: value(item, "voice").unwrap_or("1").to_owned(),
+                                measure: measure_index,
+                                tick: direction_tick as u32,
+                            },
+                            imported_tempo.map(|bpm| bpm.round() as u16),
+                            &mut warnings,
+                        )?;
                         let staff = number::<u32>(item, "staff")?.unwrap_or(1);
                         if let Some(dynamic) =
                             item.descendants().find(|n| n.has_tag_name("dynamics"))
@@ -349,12 +369,11 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
                         {
                             velocities.insert(staff, dynamic_velocity(mark.tag_name().name()));
                         }
-                        if item.descendants().any(|n| {
-                            n.has_tag_name("wedge")
-                                || n.has_tag_name("pedal")
-                                || n.has_tag_name("octave-shift")
-                        }) {
-                            warnings.add("Hairpins, pedal marks, and octave lines are not retained; explicit note pitches and written dynamics are imported.");
+                        if item
+                            .descendants()
+                            .any(|n| n.has_tag_name("pedal") || n.has_tag_name("octave-shift"))
+                        {
+                            warnings.add("Pedal marks and octave lines are not retained; pitches, dynamics and supported hairpins are imported.");
                         }
                     }
                     "note" => {
@@ -454,11 +473,7 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
                                     "{context}: chords with unequal note lengths are not supported yet."
                                 ));
                             }
-                            if prior.tied != tied {
-                                return Err(format!(
-                                    "{context}: partially tied chords are not supported yet; separate those pitches into voices before importing."
-                                ));
-                            }
+                            prior.tied |= tied;
                             if prior.pitches.is_empty() || pitches.is_empty() {
                                 return Err("A rest cannot be a member of a chord.".into());
                             }
@@ -521,6 +536,7 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
                 0
             };
             annotations.shift(measure_index, pickup_shift);
+            expressions.shift(measure_index, pickup_shift);
             if extent > measure_ticks {
                 return Err(format!(
                     "{context}: music extends beyond the fixed time signature."
@@ -667,6 +683,7 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
                 solo: false,
             });
         }
+        expression_sets.push((expressions, annotation_mapping.clone()));
         annotation_sets.push((annotations, annotation_mapping));
     }
     if initial_tempo.is_none() {
@@ -675,6 +692,9 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
     score.parts = parts;
     for (annotations, mapping) in annotation_sets {
         annotations.finish(&mut score, &mapping, &mut warnings)?;
+    }
+    for (expressions, mapping) in expression_sets {
+        expressions.resolve(&mut score, &mapping, &mut warnings)?;
     }
     let parts = std::mem::take(&mut score.parts);
     finish_parts(score, parts, warnings)

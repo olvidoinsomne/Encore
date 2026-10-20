@@ -499,23 +499,32 @@ pub(super) fn parse_with_quantization(
     let mut active = BTreeMap::<(u8, u8, u8), Active>::new();
     let mut notes = Vec::new();
     let mut tempo_seen = None;
+    let mut tempo_changes = BTreeMap::new();
     let mut meter_seen = None;
     let mut key_seen = None;
     for event in events {
         match event.kind {
             Kind::Tempo(micros) => {
+                let bpm = 60_000_000.0 / f64::from(micros);
+                if !(20.0..=400.0).contains(&bpm) {
+                    return Err("MIDI tempo must be 20–400 BPM.".into());
+                }
+                let bpm = bpm.round() as u16;
                 if event.tick == 0 && tempo_seen.is_none() {
-                    let bpm = 60_000_000.0 / f64::from(micros);
-                    if !(20.0..=400.0).contains(&bpm) {
-                        return Err("Initial MIDI tempo must be between 20 and 400 BPM.".into());
-                    }
-                    score.tempo = bpm.round() as u16;
-                    if (bpm - bpm.round()).abs() > 0.0001 {
-                        warnings.add("Fractional MIDI tempo was rounded to a whole BPM.");
-                    }
+                    score.tempo = bpm;
                     tempo_seen = Some(micros);
-                } else if tempo_seen != Some(micros) {
-                    warnings.add("MIDI tempo changes are not retained; the initial tempo is used throughout.");
+                }
+                if event.tick > 0 {
+                    let tick = scaled(event.tick, division)?;
+                    if tempo_changes
+                        .insert(tick, bpm)
+                        .is_some_and(|prior| prior != bpm)
+                    {
+                        return Err("MIDI tracks disagree on simultaneous tempo changes.".into());
+                    }
+                }
+                if (60_000_000.0 / f64::from(micros) - f64::from(bpm)).abs() > 0.0001 {
+                    warnings.add("Fractional MIDI tempos were rounded to whole BPM.");
                 }
             }
             Kind::Meter(numerator, denominator) => {
@@ -810,6 +819,20 @@ pub(super) fn parse_with_quantization(
                 measure.notes = filled;
             }
             parts.push(part);
+        }
+    }
+    for (tick, bpm) in tempo_changes {
+        if ((tick / bar_ticks) as usize) < measures {
+            score
+                .notation
+                .tempo
+                .push(crate::expressions::TempoChange::new(
+                    crate::expressions::TimePoint {
+                        measure: (tick / bar_ticks) as usize,
+                        tick: tick % bar_ticks,
+                    },
+                    bpm,
+                ));
         }
     }
     finish_parts(score, parts, warnings)
@@ -1287,7 +1310,6 @@ mod tests {
             (120, 4, 0)
         );
         for loss in [
-            "tempo changes",
             "meter changes",
             "key-signature changes",
             "sustain",

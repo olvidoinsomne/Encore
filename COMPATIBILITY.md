@@ -1,6 +1,6 @@
 # Platforms and score compatibility
 
-Encore 0.7 targets Linux, macOS and Windows. Linux builds and packaging are
+Encore 0.8 targets Linux, macOS and Windows. Linux builds and packaging are
 verified on the development machine. Native macOS and Windows validation is
 still required; their build commands, packaging scripts and manual GitLab CI
 jobs are in [BUILDING.md](BUILDING.md). A Rust target alone does not supply the
@@ -36,9 +36,9 @@ being rounded into a misleading score.
 MusicXML and MuseScore readers retain the supported pitches, rhythms, chords,
 rests, ties, staccato, accent, marcato, tenuto, staccatissimo, instruments, initial tempo/key/meter and available mixer
 information. They convert transposing instruments to concert pitch. Playback
-uses the initial tempo; later tempo changes are reported. Key changes use the
+uses retained tempo marks and supported ramps. Key changes use the
 initial signature while preserving explicit note pitches. Lyrics and same-layer
-slurs now retain the subset described below. Page layout, pedal/hairpin lines
+slurs now retain the subset described below. Page layout, pedal/other expression lines
 and advanced articulations are not fully retained. Breve through 128th values and exact representable tuplets are supported. Nested tuplets, fractional-grid ratios, percussion maps and changing time signatures still need simplification in the source program first.
 When no explicit tempo is stored, import uses 120 quarter notes per minute and
 reports that choice in the import notes.
@@ -73,6 +73,36 @@ with explicit notes. Unmatched endpoints are reported. Curves attach to notes
 rather than chord tones; ties remain separate notation. Public editing and
 imports validate anchors and enforce at most 16 overlapping phrases per staff
 for reliable MusicXML numbering.
+
+### Expressions, hairpins and tempo
+
+**Notation → Expressions and tempo** edits beat-attached dynamic, text,
+technique and rehearsal marks, crescendo/diminuendo spans and global tempo
+marks/linear BPM ramps. Marks may sit on rests; removing a note does not remove
+its beat expression. Staff/system scope and bounded placement offsets persist.
+Explicit velocity expressions and hairpins change note-attack velocities without
+rewriting written rhythms. Technique text is presently descriptive; it does not
+switch sample programs or articulations. Continuous swells during sustained
+notes remain pending.
+
+MusicXML preserves these marks, supported hairpin endpoints and dashes-delimited
+tempo ramps; hidden standard extension elements retain Encore-specific expression
+categories, playback endpoints and offsets during round trips. Other applications
+can use the standard visible direction, dynamic, wedge and metronome data.
+MuseScore imports tempo steps, dynamics, staff/system/rehearsal text and basic
+hairpin spans; gradual-tempo spanners are reported as unsupported. MIDI import
+retains later tempo steps. Imported per-note velocities remain authoritative
+unless a direction explicitly supplies a playback velocity.
+
+The tempo map integrates linear changes in BPM analytically and resets to written
+tempo state on repeat/navigation jumps. The same map drives sampled/procedural
+note timing, duration and playhead position. MIDI approximates ramps with tempo
+samples normally every eighth of a quarter-note; very long files use a coarser
+bounded grid. The four-beat 120→60 BPM regression differs from the analytic map
+by under one millisecond. Limits are 20,000 expressions, 10,000 nonoverlapping
+staff/layer hairpins, 4,096 tempo changes and 200,000 performed timing segments.
+Curved/swing timing, fermatas, arbitrary controller lanes and full Finale Human
+Playback interpretation remain open.
 
 ### Repeats and navigation
 
@@ -120,7 +150,7 @@ The direct reader uses independent public
 and the public MUSX container description. No Finale executable, proprietary
 implementation, fonts or sample libraries are bundled.
 
-MIDI import accepts format 0/1 files with PPQ divisions, running status, track/channel/program assignments, initial tempo/key/meter and available volume/pan information. It infers ordinary and exact conventional tuplet notation, separates overlapping independent rhythms when needed, and warns about ignored controllers or later tempo changes. SMPTE timing, unpitched drum maps and performances that cannot be represented exactly are rejected. File → Open offers **Exact timing** or an explicit rhythmic quantization grid. Exact mode rejects unnotatable performance timing. Choosing a grid changes note positions/durations and reports the affected-note count and maximum timing shift in the import notes. The original MIDI file is never changed. Detached playback gates can prevent exact reimport of MIDI exported from notation; MusicXML preserves the original written rhythm and articulation marks. This does not add real-time MIDI keyboard input.
+MIDI import accepts format 0/1 files with PPQ divisions, running status, track/channel/program assignments, initial tempo/key/meter and available volume/pan information. It infers ordinary and exact conventional tuplet notation, separates overlapping independent rhythms when needed, and retains later tempo steps and warns about ignored controllers. SMPTE timing, unpitched drum maps and performances that cannot be represented exactly are rejected. File → Open offers **Exact timing** or an explicit rhythmic quantization grid. Exact mode rejects unnotatable performance timing. Choosing a grid changes note positions/durations and reports the affected-note count and maximum timing shift in the import notes. The original MIDI file is never changed. Detached playback gates can prevent exact reimport of MIDI exported from notation; MusicXML preserves the original written rhythm and articulation marks. This does not add real-time MIDI keyboard input.
 
 ```sh
 ./run-encore --import-midi performance.mid converted.encore --quantize 16th
@@ -171,6 +201,56 @@ errors rather than clamping or changing the source. Playback uses source
 concert pitches. Voiced extraction from layers/chord notes, automatic
 multimeasure rests, per-part clefs and per-item unlink/relink are not yet
 implemented. See [linked parts](LINKED_PARTS.md).
+
+## Page production
+
+**Document → Page and system layout** edits the current full-score or linked-part
+format. Formats retain Letter/A4/Legal/Tabloid paper, landscape orientation,
+four physical margins, staff size (50–150%), extra staff gap and the preferred
+number of measures per system. Scaling preserves physical page size and keeps
+mouse entry aligned with the displayed staff. PDF and SVG share the resulting
+pages, including independent part formats.
+
+At the current measure, create a system/page break, adjust its relative width,
+or lock/unlock visible systems. Locks preserve their measure membership;
+automatic systems still adapt to dense music. Selection-mode lock commands
+apply to the selected visible systems. Width controls are relative weights
+inside the available system width, not absolute engraving points. Explicit
+page breaks begin a fresh page before that measure. In very dense locked
+systems, the user may still need fewer measures or a smaller staff size.
+
+Left/center/right headers and footers accept `{title}`, `{composer}`, `{page}`
+and `{pages}` tokens. The first page retains the title/composer block; headers
+begin on later pages. Copyright prints on the first page. Starting page numbers
+are saved; `{pages}` is the final displayed page number. These settings remain
+native Encore metadata: foreign page layout is still re-engraved. Custom paper,
+mirrored margins, rich text/title pages, arbitrary beat-chart positions and full
+collision editing remain future production work.
+
+## Whole-measure editing
+
+Selection mode supports measure/staff rectangles, including nonadjacent source
+staves shown together in a linked part. **Edit → Measure range tools** exposes
+clear, transpose, blank-measure insertion and full-stack deletion. Standard
+copy/cut/paste works with either a selected event or a measure region. Region
+paste can replace destination measures, require empty measures, or insert a
+full-score measure stack first. Matching time signatures and representable
+pitches are required; destination instrument assignments and publication
+formats are preserved.
+
+Regional clipboard data includes lyrics, phrase/hairpin spans, entry engraving
+styles and expressions that fit inside the selected bounds. A copied lyric
+keeps its syllable when its word extension crosses the boundary; crossing
+slurs/hairpins are omitted with a warning. Repeats, navigation and tempo travel
+only with all source staves selected, and jumps whose targets fall outside the
+copy are explicitly omitted. D.C. clips must be pasted at the beginning of the
+document so their implicit target cannot silently change. Insertion/deletion shifts source anchors and saved
+layouts consistently. Dependency failures leave the complete score unchanged. Region transposition
+supports chromatic, spelled fixed intervals and the current key's diatonic scale
+while preserving chromatic inflections.
+Single-event clipboard versions 1/2 remain readable; version 3 adds per-pitch
+engraving/tie overrides. Partial-measure selections, selective clipboard filters,
+repeated paste and Finale clip files remain unimplemented.
 
 ## Appearance
 

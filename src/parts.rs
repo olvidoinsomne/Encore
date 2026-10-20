@@ -6,74 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub enum PageSize {
-    #[default]
-    Letter,
-    A4,
-    Legal,
-    Tabloid,
-}
-
-impl PageSize {
-    pub const ALL: &'static [Self] = &[Self::Letter, Self::A4, Self::Legal, Self::Tabloid];
-
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::Letter => "Letter",
-            Self::A4 => "A4",
-            Self::Legal => "Legal",
-            Self::Tabloid => "Tabloid",
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct PartLayout {
-    pub page_size: PageSize,
-    pub landscape: bool,
-    /// Additional distance between staves in the engraving's page coordinates.
-    pub staff_gap: f32,
-    pub measures_per_system: u8,
-}
-
-impl Default for PartLayout {
-    fn default() -> Self {
-        Self {
-            page_size: PageSize::Letter,
-            landscape: false,
-            staff_gap: 0.0,
-            measures_per_system: 4,
-        }
-    }
-}
-
-impl PartLayout {
-    pub fn dimensions(self) -> (f32, f32) {
-        let (width, height) = match self.page_size {
-            PageSize::Letter => (850.0, 1100.0),
-            PageSize::A4 => (827.0, 1169.0),
-            PageSize::Legal => (850.0, 1400.0),
-            PageSize::Tabloid => (1100.0, 1700.0),
-        };
-        if self.landscape {
-            (height, width)
-        } else {
-            (width, height)
-        }
-    }
-
-    pub fn validate(self) -> Result<(), String> {
-        if !self.staff_gap.is_finite() || !(0.0..=80.0).contains(&self.staff_gap) {
-            return Err("Part staff spacing must be between 0 and 80 page units.".into());
-        }
-        if !(1..=8).contains(&self.measures_per_system) {
-            return Err("Parts must contain 1–8 measures per system.".into());
-        }
-        Ok(())
-    }
-}
+pub use crate::layout::{DocumentLayout as PartLayout, PageSize};
 
 /// Interval from a sounding/concert pitch to the written pitch. The diatonic
 /// component preserves note names and key signatures instead of respelling every
@@ -303,6 +236,7 @@ impl Projection {
 
 pub fn project(score: &Score, part: &LinkedPart) -> Result<Projection, String> {
     part.validate(score.parts.len())?;
+    part.layout.validate_for_score(score.measure_count())?;
     let mut projected = score.clone();
     projected.title = format!("{} — {}", score.title, part.name);
     projected.key_fifths = part.transposition.written_key(score.key_fifths)?;
@@ -320,17 +254,18 @@ pub fn project(score: &Score, part: &LinkedPart) -> Result<Projection, String> {
             }
         }
     }
-    project_notation(&mut projected, &part.staves);
+    project_notation(&mut projected, &part.staves, part.transposition);
+    projected.notation.layout = part.layout.clone();
     projected.validate()?;
     Ok(Projection {
         score: projected,
         source_staves: part.staves.clone(),
-        layout: part.layout,
+        layout: part.layout.clone(),
         transposition: part.transposition,
     })
 }
 
-fn project_notation(score: &mut Score, source_staves: &[usize]) {
+fn project_notation(score: &mut Score, source_staves: &[usize], transposition: Transposition) {
     let map = |anchor: &mut crate::document::Anchor| {
         if let Some(index) = source_staves.iter().position(|staff| *staff == anchor.part) {
             anchor.part = index;
@@ -347,6 +282,33 @@ fn project_notation(score: &mut Score, source_staves: &[usize]) {
         .notation
         .slurs
         .retain_mut(|slur| map(&mut slur.start) && map(&mut slur.end));
+    score.notation.entries.retain_mut(|entry| {
+        if !map(&mut entry.anchor) {
+            return false;
+        }
+        for accidental in &mut entry.accidentals {
+            accidental.pitch =
+                (i16::from(accidental.pitch) + i16::from(transposition.semitones)) as u8;
+        }
+        if let Some(ties) = &mut entry.tie_pitches {
+            for pitch in ties {
+                *pitch = (i16::from(*pitch) + i16::from(transposition.semitones)) as u8;
+            }
+        }
+        true
+    });
+    score.notation.expressions.retain_mut(|mark| {
+        if mark.system {
+            mark.anchor.part = 0;
+            true
+        } else {
+            map(&mut mark.anchor)
+        }
+    });
+    score
+        .notation
+        .spanners
+        .retain_mut(|line| map(&mut line.start) && map(&mut line.end));
     score.notation.parts.clear();
 }
 
@@ -667,5 +629,71 @@ mod tests {
             assert!(std::fs::read(path).unwrap().starts_with(b"%PDF-"));
         }
         std::fs::remove_dir_all(directory).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod notation_projection_tests {
+    use super::*;
+    use crate::{
+        document::Anchor,
+        entry_style::{AccidentalDisplay, AccidentalOverride, EntryStyle},
+        expressions::{Expression, Hairpin},
+    };
+    #[test]
+    fn new_anchored_notation_and_pitch_overrides_follow_written_parts() {
+        let mut score = Score::demo();
+        let start = Anchor {
+            part: 2,
+            measure: 0,
+            tick: 0,
+            layer: 0,
+        };
+        let end = Anchor {
+            part: 2,
+            measure: 1,
+            tick: 0,
+            layer: 0,
+        };
+        let pitch = score.parts[2].measures[0].notes[0].pitches[0].midi();
+        let mut style = EntryStyle::new(start);
+        style.accidentals.push(AccidentalOverride {
+            pitch,
+            display: AccidentalDisplay::Parenthesized,
+        });
+        style.tie_pitches = Some(vec![pitch]);
+        score.notation.entries.push(style);
+        score
+            .notation
+            .expressions
+            .push(Expression::text(start, "cantabile"));
+        score.notation.spanners.push(Hairpin::new(start, end));
+        let part = LinkedPart {
+            id: "test".into(),
+            name: "Test".into(),
+            staves: vec![2],
+            transposition: Transposition {
+                semitones: 2,
+                diatonic_steps: 1,
+            },
+            layout: PartLayout {
+                staff_scale: 0.8,
+                ..Default::default()
+            },
+        };
+        let projected = project(&score, &part).unwrap();
+        assert_eq!(projected.score.notation.entries[0].anchor.part, 0);
+        assert_eq!(
+            projected.score.notation.entries[0].accidentals[0].pitch,
+            pitch + 2
+        );
+        assert_eq!(
+            projected.score.notation.entries[0].tie_pitches,
+            Some(vec![pitch + 2])
+        );
+        assert_eq!(projected.score.notation.expressions[0].anchor.part, 0);
+        assert_eq!(projected.score.notation.spanners[0].end.part, 0);
+        assert_eq!(projected.score.notation.layout.staff_scale, 0.8);
+        assert_eq!(score.notation.layout.staff_scale, 1.0);
     }
 }

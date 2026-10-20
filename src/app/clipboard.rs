@@ -2,6 +2,7 @@ use super::*;
 use serde::{Deserialize, Serialize};
 
 const CLIPBOARD_MARKER: &str = "ENCORE-EVENT\n";
+const REGION_MARKER: &str = "ENCORE-REGION\n";
 const MAX_CLIPBOARD_BYTES: usize = 16 * 1024;
 
 #[derive(Serialize, Deserialize)]
@@ -11,6 +12,8 @@ struct ClipboardEvent {
     note: Note,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     lyrics: Vec<encore::lyrics::Lyric>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    style: Option<encore::entry_style::EntryStyle>,
 }
 
 #[cfg(test)]
@@ -18,14 +21,30 @@ fn encode_event(note: Note) -> Result<String, String> {
     encode_annotated_event(note, Vec::new())
 }
 
+#[cfg(test)]
 fn encode_annotated_event(
     note: Note,
     lyrics: Vec<encore::lyrics::Lyric>,
 ) -> Result<String, String> {
+    encode_document_event(note, lyrics, None)
+}
+
+fn encode_document_event(
+    note: Note,
+    lyrics: Vec<encore::lyrics::Lyric>,
+    style: Option<encore::entry_style::EntryStyle>,
+) -> Result<String, String> {
     let data = serde_json::to_string(&ClipboardEvent {
-        version: if lyrics.is_empty() { 1 } else { 2 },
+        version: if style.is_some() {
+            3
+        } else if lyrics.is_empty() {
+            1
+        } else {
+            2
+        },
         note,
         lyrics,
+        style,
     })
     .map_err(|error| format!("Could not copy event: {error}"))?;
     if data.len() + CLIPBOARD_MARKER.len() > MAX_CLIPBOARD_BYTES {
@@ -43,7 +62,7 @@ fn decode_event(text: &str) -> Result<ClipboardEvent, String> {
         .ok_or("Copy a single note, chord, or rest in Encore before pasting.")?;
     let event: ClipboardEvent = serde_json::from_str(data)
         .map_err(|error| format!("Invalid Encore clipboard event: {error}"))?;
-    if ![1, 2].contains(&event.version) {
+    if ![1, 2, 3].contains(&event.version) {
         return Err("This clipboard event requires a different Encore version.".into());
     }
     Ok(event)
@@ -51,6 +70,10 @@ fn decode_event(text: &str) -> Result<ClipboardEvent, String> {
 
 impl EncoreApp {
     pub(super) fn copy_selection(&mut self, ctx: &egui::Context, cut: bool) {
+        if self.region_selection.is_some() {
+            self.copy_selected_region(ctx, cut);
+            return;
+        }
         let Some(selection) = self.selected else {
             self.status = "Select a single note, chord, or rest to copy.".into();
             return;
@@ -79,7 +102,10 @@ impl EncoreApp {
                 lyric
             })
             .collect();
-        let text = match encode_annotated_event(note.clone(), lyrics) {
+        let style = anchor
+            .and_then(|anchor| encore::entry_style::at(&self.score, &anchor))
+            .cloned();
+        let text = match encode_document_event(note.clone(), lyrics, style) {
             Ok(text) => text,
             Err(error) => {
                 self.status = error;
@@ -112,14 +138,116 @@ impl EncoreApp {
     }
 
     pub(super) fn paste_selection(&mut self, text: &str) {
+        let insert = std::mem::take(&mut self.region_editor.insert_paste_once);
+        if let Some(text) = text.strip_prefix(REGION_MARKER) {
+            if let Err(error) = self.try_paste_region(text, insert) {
+                self.status = format!("Cannot paste region: {error}");
+            }
+            return;
+        }
+        if insert {
+            self.status = "Insert requires a copied whole-measure region.".into();
+            return;
+        }
         if let Err(error) = self.try_paste_event(text) {
             self.status = format!("Cannot paste: {error}");
         }
     }
 
+    pub(super) fn copy_selected_region(&mut self, ctx: &egui::Context, cut: bool) {
+        let Some(region) = self.region_selection.clone() else {
+            self.status = "Select a measure region to copy.".into();
+            return;
+        };
+        let result = (|| {
+            let clip = encore::editing::copy_region(&self.score, &region)?;
+            let text = clip.encode()?;
+            if cut {
+                encore::editing::clear_region(&mut self.score, &region)?;
+                self.selected = None;
+                self.cached_score = None;
+            }
+            Ok::<_, String>((text, clip.warnings))
+        })();
+        match result {
+            Ok((text, warnings)) => {
+                ctx.copy_text(format!("{REGION_MARKER}{text}"));
+                self.status = format!(
+                    "{} {} staves × {} measures.{}",
+                    if cut { "Cut" } else { "Copied" },
+                    region.staves.len(),
+                    region.measure_count(),
+                    if warnings.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" {}", warnings.join(" "))
+                    }
+                );
+            }
+            Err(error) => self.status = format!("Cannot copy region: {error}"),
+        }
+    }
+
+    fn try_paste_region(&mut self, text: &str, insert: bool) -> Result<(), String> {
+        let clip = encore::editing::RegionClip::decode(text)?;
+        let visible = self.region_visible_staves();
+        let start = self
+            .region_selection
+            .as_ref()
+            .map_or(self.cursor_measure, |region| region.start);
+        let staves = if let Some(region) = &self.region_selection
+            && region.staves.len() == clip.measures.len()
+        {
+            region.staves.clone()
+        } else {
+            let staff = self
+                .region_selection
+                .as_ref()
+                .and_then(|region| region.staves.first())
+                .copied()
+                .unwrap_or(self.active_part);
+            let row = visible
+                .iter()
+                .position(|source| *source == staff)
+                .ok_or("Select a visible destination staff.")?;
+            visible.get(row..row + clip.measures.len()).ok_or("The copied region has more staves than the visible destination. Open the full score or select another part.")?.to_vec()
+        };
+        let region = encore::editing::paste_region(
+            &mut self.score,
+            &clip,
+            &staves,
+            start,
+            if insert {
+                encore::editing::PasteMode::Insert
+            } else {
+                self.region_editor.paste_mode
+            },
+        )?;
+        self.active_part = staves[0];
+        self.cursor_measure = start;
+        self.cursor_tick = 0;
+        self.region_selection = Some(region);
+        self.selected = None;
+        self.cached_score = None;
+        self.status = format!(
+            "Pasted {} staves × {} measures.{}",
+            staves.len(),
+            clip.measure_count(),
+            if clip.warnings.is_empty() {
+                String::new()
+            } else {
+                format!(" {}", clip.warnings.join(" "))
+            }
+        );
+        Ok(())
+    }
+
     fn try_paste_event(&mut self, text: &str) -> Result<(), String> {
         let ClipboardEvent {
-            mut note, lyrics, ..
+            mut note,
+            lyrics,
+            style,
+            ..
         } = decode_event(text)?;
         note.start = self.cursor_tick;
         note.layer = self.active_layer;
@@ -164,10 +292,15 @@ impl EncoreApp {
             lyric.extend_to = None;
             encore::lyrics::assign(&mut candidate, lyric)?;
         }
+        if let Some(mut style) = style {
+            style.anchor = anchor;
+            encore::entry_style::assign(&mut candidate, style)?;
+        }
         candidate.validate()?;
         // Commit only after the complete score validates. A failed paste keeps
         // the score, selection, cursor, and undo history exactly as they were.
         self.score = candidate;
+        self.region_selection = None;
         self.selected = Some(Selection {
             part: self.active_part,
             measure: self.cursor_measure,
@@ -347,6 +480,7 @@ mod tests {
                 version: 99,
                 note: original.clone(),
                 lyrics: Vec::new(),
+                style: None,
             })
             .unwrap()
         );
@@ -442,5 +576,170 @@ mod tests {
             && lyric.extend_to.is_none()));
         assert!(lyrics.iter().any(|lyric| lyric.text == "Shine"));
         app.score.validate().unwrap();
+    }
+    #[test]
+    fn single_event_cut_paste_keeps_per_pitch_ties_and_engraving_style() {
+        use encore::{
+            document::Anchor,
+            entry_style::{self, AccidentalDisplay, AccidentalOverride, EntryStyle, Notehead},
+        };
+        let ctx = egui::Context::default();
+        let mut app = app();
+        app.score.parts[0].measures[0].notes.push(note());
+        let mut style = EntryStyle::new(Anchor {
+            part: 0,
+            measure: 0,
+            tick: 480,
+            layer: 0,
+        });
+        style.notehead = Notehead::Diamond;
+        style.tie_pitches = Some(vec![60]);
+        style.accidentals.push(AccidentalOverride {
+            pitch: 60,
+            display: AccidentalDisplay::Parenthesized,
+        });
+        entry_style::assign(&mut app.score, style.clone()).unwrap();
+        app.selected = Some(Selection {
+            part: 0,
+            measure: 0,
+            note: 0,
+        });
+        app.copy_selection(&ctx, true);
+        assert!(app.score.notation.entries.is_empty());
+        let text = copied_text(&ctx);
+        assert!(text.contains("\"version\":3"));
+        app.active_part = 1;
+        app.cursor_measure = 2;
+        app.cursor_tick = 800;
+        app.paste_selection(&text);
+        style.anchor = Anchor {
+            part: 1,
+            measure: 2,
+            tick: 800,
+            layer: 0,
+        };
+        assert_eq!(app.score.notation.entries, vec![style]);
+        app.score.validate().unwrap();
+    }
+    #[test]
+    fn insert_region_clipboard_is_one_shot_and_preserves_later_source_music() {
+        let ctx = egui::Context::default();
+        let mut app = EncoreApp::from_score(Score::demo(), None, "Ready".into());
+        app.region_selection = Some(encore::editing::Region {
+            staves: vec![0],
+            start: 0,
+            end: 0,
+        });
+        app.copy_selection(&ctx, false);
+        let copied = copied_text(&ctx);
+        let old_count = app.score.measure_count();
+        let following = app.score.parts[0].measures[2].clone();
+        app.region_selection = Some(encore::editing::Region {
+            staves: vec![0],
+            start: 2,
+            end: 2,
+        });
+        app.region_editor.insert_paste_once = true;
+        app.paste_selection(&copied);
+        assert_eq!(app.score.measure_count(), old_count + 1);
+        assert_eq!(app.score.parts[0].measures[3], following);
+        assert!(!app.region_editor.insert_paste_once);
+        app.paste_selection(&copied);
+        assert_eq!(app.score.measure_count(), old_count + 1);
+    }
+    #[test]
+    fn failed_region_cut_keeps_document_and_system_clipboard_unchanged() {
+        use encore::repeats::{NavigationKind, NavigationMark};
+        let ctx = egui::Context::default();
+        let mut app = EncoreApp::from_score(Score::demo(), None, "Ready".into());
+        app.score.notation.navigation = vec![
+            NavigationMark {
+                measure: 0,
+                kind: NavigationKind::ToCoda,
+                play_repeats_after_jump: false,
+            },
+            NavigationMark {
+                measure: 2,
+                kind: NavigationKind::DaCapoAlCoda,
+                play_repeats_after_jump: false,
+            },
+            NavigationMark {
+                measure: 7,
+                kind: NavigationKind::Coda,
+                play_repeats_after_jump: false,
+            },
+        ];
+        app.region_selection = Some(encore::editing::Region {
+            staves: (0..app.score.parts.len()).collect(),
+            start: 7,
+            end: 7,
+        });
+        let before = app.score.clone();
+        app.copy_selection(&ctx, true);
+        assert_eq!(app.score, before);
+        assert!(ctx.output(|output| output.commands.is_empty()));
+    }
+    #[test]
+    fn single_event_style_clipboard_keeps_concert_keys_in_a_transposed_linked_part() {
+        use encore::{
+            document::Anchor,
+            entry_style::{self, AccidentalDisplay, AccidentalOverride, EntryStyle},
+            model::Instrument,
+        };
+        let ctx = egui::Context::default();
+        let mut score = Score::blank();
+        score.parts.truncate(1);
+        score.parts[0].instrument = Instrument::Clarinet;
+        score.parts[0].measures[0].notes.push(note());
+        let mut app = EncoreApp::from_score(score, None, "Ready".into());
+        app.part_view = true;
+        let mut style = EntryStyle::new(Anchor {
+            part: 0,
+            measure: 0,
+            tick: 480,
+            layer: 0,
+        });
+        style.tie_pitches = Some(vec![60]);
+        style.accidentals.push(AccidentalOverride {
+            pitch: 60,
+            display: AccidentalDisplay::Courtesy,
+        });
+        entry_style::assign(&mut app.score, style).unwrap();
+        app.selected = Some(Selection {
+            part: 0,
+            measure: 0,
+            note: 0,
+        });
+        app.copy_selection(&ctx, false);
+        app.cursor_measure = 1;
+        app.cursor_tick = 0;
+        app.paste_selection(&copied_text(&ctx));
+        let source = app
+            .score
+            .notation
+            .entries
+            .iter()
+            .find(|style| style.anchor.measure == 1)
+            .unwrap();
+        assert_eq!(source.accidentals[0].pitch, 60);
+        assert_eq!(source.tie_pitches, Some(vec![60]));
+        let projection = app.selected_part_projection().unwrap().unwrap();
+        let written = projection
+            .score
+            .notation
+            .entries
+            .iter()
+            .find(|style| style.anchor.measure == 1)
+            .unwrap();
+        assert_eq!(written.accidentals[0].pitch, 62);
+        assert_eq!(written.tie_pitches, Some(vec![62]));
+        assert_eq!(
+            app.score.parts[0].measures[1].notes[0].pitches[0].midi(),
+            60
+        );
+        assert_eq!(
+            projection.score.parts[0].measures[1].notes[0].pitches[0].midi(),
+            62
+        );
     }
 }

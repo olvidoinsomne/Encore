@@ -22,12 +22,14 @@ fields keep their normal typing and clipboard behavior.
 | Copy / cut selected event | Ctrl+C / Ctrl+X | Command+C / Command+X |
 | Paste event at cursor | Ctrl+V | Command+V |
 | Play / pause | Space | Space |
-| Stop | Escape | Escape |
+| Stop / Selection tool | Escape | Escape |
+| Selection tool | Ctrl+Shift+A | Command+Shift+A |
+| Select layer 1–4 | Alt+Shift+1–4 | Command+Option+1–4 |
+| Zoom in / out | Ctrl+= / Ctrl+− | Command+= / Command+− |
 
-Clipboard operations currently handle one note, chord or rest. Paste retains
-its notation and performance fields and rejects collisions or barline
-overflow. Region/measure-stack selection, filtered paste and repeated paste
-remain pending. **Space** is Encore's convenient transport key on every OS;
+Clipboard operations handle a note/chord/rest or selected whole-measure region.
+Paste retains supported attached notation and rejects invalid destinations;
+partial-measure selection, filtered paste and repeated paste remain pending. **Space** is Encore's convenient transport key on every OS;
 Finale's Windows table also documents menu accelerators and Space-click.
 
 ## Simple Entry · Laptop
@@ -51,6 +53,16 @@ Finale's Windows table also documents menu accelerators and Space-click.
 | Previous / next measure | Primary+Left / Primary+Right |
 | Delete selected event | Delete |
 | Clear selection | Backspace on Windows/Linux; Shift+Delete on macOS |
+| Flip stem / automatic stem | L / Shift+L |
+| Break or join previous beam / automatic | / / Shift+/ |
+| Flatten beam | Alternate+/ |
+| Respell active chord pitch | Backslash or Alternate+E |
+| Hide/show entry | H |
+| Parenthesize accidental | P |
+| Show/hide courtesy accidental | Primary+Shift+− |
+| Flip tie / automatic tie direction | Primary+F / Primary+Shift+F |
+| Expression / articulation controls | X or Alternate+X / backtick |
+| Select accidental tool: flat / natural / sharp | Alternate+− / Alternate+N / Alternate+= |
 
 The Laptop profile deliberately avoids Finale's standard profile distinction
 between top-row interval keys and keypad duration keys. The current egui
@@ -77,10 +89,19 @@ remain pending.
 | Tie forward / backward | T / Shift+T | Same |
 | Set sharp / flat / natural / double sharp / double flat | S / F / N / X / V | Same |
 | Raise / lower accidental by half step | + or Shift+S / − or Shift+F | Same |
+| Next layer | Shift+apostrophe | Shift+Up (previous: Shift+Down) |
+| Flip / automatic stem | L / Ctrl+L | L / Option+L |
+| Break/join / automatic beam | / or B / Shift+B | Same |
+| Flatten beam | Backslash or Shift+M | Same |
+| Respell / parenthesize accidental | 9 / P | Same |
+| Hide/show / courtesy accidental | H or O / Shift+A | Same |
+| Flip / automatic tie direction | Ctrl+F / Ctrl+Shift+F | Command+F / Command+Shift+F |
+| Show/hide accidental | * (text-producing key) | Same |
 
 Speedy currently operates without MIDI input. Caps Lock pitch rows,
-independent voices, insert mode, courtesy accidentals/stem/beam commands and
-MIDI held-chord input remain pending. macOS Finale distinguishes **Return**
+independent voices, insert mode, and MIDI held-chord input remain pending.
+The modified asterisk command for restoring automatic accidentals requires
+native keyboard validation; the Entry engraving window provides that control. macOS Finale distinguishes **Return**
 (staff navigation) from keypad **Enter**, often Fn+Return (chord entry).
 Encore cannot yet promise that distinction on all keyboards; mouse/Shift-click
 chord entry remains available. A macOS backward Delete event may be reported
@@ -90,8 +111,7 @@ still needs keyboard validation.
 
 Four independent layers can share each staff. Select the active layer in the
 toolbar; each has independent note navigation and rhythm. A second voice
-inside each layer and the complete platform-specific layer shortcut set remain
-pending. Select a chord tone in the Inspector to target its pitch edits.
+inside each layer remains pending. Select a chord tone in the Inspector to target its pitch edits.
 The Inspector also edits staccato, accent, marcato, tenuto and staccatissimo.
 Finale's articulation trigger keys and programmable marking metatools remain
 pending; these checkboxes are the current entry route.
@@ -142,7 +162,45 @@ click-assignment cursor, metatools, and native keypad/Clear distinctions remain
 on the parity audit. Repeat regions, endings and navigation marks are edited in
 **Notation → Repeats and endings**; no invented global repeat shortcut is assigned.
 
-Single-event copy/cut/paste now carries attached lyric syllables. A melisma or
-slur spanning other events needs region-aware clipboard support; that remains
-open. A cut repairs source anchors and a paste validates all syllables before
-committing.
+**Notation → Expressions and tempo** opens the dynamic, text, rehearsal, hairpin and tempo editors. Text fields retain ordinary typing behavior. Finale expression metatools and Smart Shape assignment shortcuts remain pending; no unrelated global shortcut is substituted.
+
+Single-event copy/cut/paste carries attached lyric syllables and entry engraving
+styles, including per-pitch ties. Whole-measure regional clipboard data also
+preserves fully contained lyric/slur/hairpin spans, expressions and engraving
+styles. Cross-boundary spans are omitted or shortened with an explicit warning.
+Score-wide repeats, navigation and tempo travel only with full source staff
+stacks. Every cut/paste validates before committing.
+
+## Whole-measure regions
+
+| Action | Windows / Linux | macOS |
+| --- | --- | --- |
+| Select all visible measures/staves | Ctrl+A | Command+A |
+| Copy / cut / paste selected region | Ctrl+C / X / V | Command+C / X / V |
+| Insert copied measure stacks | Ctrl+I | Command+I |
+| Extend by full measure | Ctrl+Shift+Left / Right | Option+Shift+Left / Right |
+| Extend by visible staff | Shift+Up / Down | Same |
+| Extend to first / last bar | Shift+Home / End | Same |
+| Extend to top / bottom visible staff | Shift+Page Up / Down | Same |
+| Clear region, retaining measure positions | Backspace | Clear / Fn+Shift+Delete |
+| Delete full source measure stack | Delete | Delete |
+
+A linked part containing only some source staves clears its selected music when
+Delete is pressed; it cannot delete hidden players' measure stacks. Partial-note
+selection with plain Shift+Left/Right, paste filters, repeated paste and clip
+files remain pending. The region tool provides explicit Replace, Empty Only and
+Insert paste modes and custom chromatic, spelled-interval and key-aware diatonic
+transposition controls.
+
+## Layout and entry engraving
+
+| Action | Windows / Linux | macOS |
+| --- | --- | --- |
+| Fit Measures controls (Selection tool) | Ctrl+M | Command+Shift+M |
+| Lock selected systems | Ctrl+L or L in Selection | Command+L or L in Selection |
+| Unlock selected systems | Ctrl+U / Ctrl+Shift+U or U in Selection | Command+Shift+U or U in Selection |
+
+**Notation → Entry engraving** also offers explicit notehead, cue size,
+visibility, accidental, stem/beam and per-pitch tie controls. Appearance changes
+preserve sounding pitch and timing. Automatic layout is recalculated after
+edits; manual beam slopes, lengths and rest offsets remain pending.

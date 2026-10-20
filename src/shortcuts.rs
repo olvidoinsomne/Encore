@@ -33,6 +33,9 @@ impl EntryProfile {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EntryCommand {
+    Style(StyleCommand),
+    EditExpressions,
+    EditArticulations,
     Duration(Duration, bool), // bool: alter selected entry rather than tool
     SpeedyDuration(Duration),
     SpeedyRest(Duration),
@@ -49,6 +52,7 @@ pub enum EntryCommand {
     Tie(bool),      // bool: previous entry
     Accidental(i8), // chromatic increment; 0 sets natural
     SetAccidental(i8),
+    ToolAccidental(i8),
     Diatonic(i32),
     Octave(i8),
     Navigate(i8),
@@ -56,11 +60,29 @@ pub enum EntryCommand {
     /// First entry (-1) or just after the last entry (+1) in this measure.
     Boundary(i8),
     Staff(i8),
+    Layer(i8),
     Delete,
     RemoveTone,
     ClearSelection,
     Triplet,
     ExitEntry,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StyleCommand {
+    FlipStem,
+    DefaultStem,
+    CycleBeam,
+    DefaultBeam,
+    FlatBeam,
+    ToggleHidden,
+    Respell,
+    ToggleAccidental,
+    ToggleCourtesy,
+    ToggleParentheses,
+    DefaultAccidental,
+    FlipTie,
+    DefaultTie,
 }
 
 pub fn duration_digit(duration: Duration) -> &'static str {
@@ -106,6 +128,20 @@ fn duration(number: u8) -> Duration {
     ][number as usize]
 }
 
+/// Document-wide layer selection uses distinct platform modifiers.
+pub fn layer_command(key: Key, modifiers: Modifiers, mac: bool) -> Option<u8> {
+    let matches = if mac {
+        modifiers.mac_cmd && modifiers.alt && !modifiers.ctrl && !modifiers.shift
+    } else {
+        modifiers.alt && modifiers.shift && !modifiers.ctrl && !modifiers.mac_cmd
+    };
+    matches
+        .then(|| digit(key))
+        .flatten()
+        .filter(|number| (1..=4).contains(number))
+        .map(|number| number - 1)
+}
+
 pub fn entry_command(
     profile: EntryProfile,
     key: Key,
@@ -120,12 +156,27 @@ pub fn entry_command(
     };
     let alternate = modifiers.alt;
     let shift = modifiers.shift;
+    if profile == EntryProfile::Speedy
+        && primary
+        && !alternate
+        && (!mac || !modifiers.ctrl)
+        && key == Key::F
+    {
+        return Some(Style(if shift {
+            StyleCommand::DefaultTie
+        } else {
+            StyleCommand::FlipTie
+        }));
+    }
     if profile == EntryProfile::SimpleLaptop {
         if primary {
             if alternate || (mac && modifiers.ctrl) {
                 return None;
             }
             return match (key, shift) {
+                (Key::F, false) => Some(Style(StyleCommand::FlipTie)),
+                (Key::F, true) => Some(Style(StyleCommand::DefaultTie)),
+                (Key::Minus, true) => Some(Style(StyleCommand::ToggleCourtesy)),
                 (Key::Enter, false) => Some(Chord),
                 (Key::ArrowLeft, false) => Some(Measure(-1)),
                 (Key::ArrowRight, false) => Some(Measure(1)),
@@ -146,6 +197,12 @@ pub fn entry_command(
                 return Some(Duration(duration(number), true));
             }
             return match key {
+                Key::Slash => Some(Style(StyleCommand::FlatBeam)),
+                Key::E => Some(Style(StyleCommand::Respell)),
+                Key::X => Some(EditExpressions),
+                Key::Minus => Some(ToolAccidental(-1)),
+                Key::Equals => Some(ToolAccidental(1)),
+                Key::N => Some(ToolAccidental(0)),
                 Key::R => Some(ToggleRestTool),
                 Key::Enter => Some(EnterRest),
                 _ => None,
@@ -174,6 +231,21 @@ pub fn entry_command(
             return (!shift).then(|| Duration(duration(number), false));
         }
         return match key {
+            Key::L => Some(Style(if shift {
+                StyleCommand::DefaultStem
+            } else {
+                StyleCommand::FlipStem
+            })),
+            Key::H if !shift => Some(Style(StyleCommand::ToggleHidden)),
+            Key::P if !shift => Some(Style(StyleCommand::ToggleParentheses)),
+            Key::Slash => Some(Style(if shift {
+                StyleCommand::DefaultBeam
+            } else {
+                StyleCommand::CycleBeam
+            })),
+            Key::Backslash if !shift => Some(Style(StyleCommand::Respell)),
+            Key::X if !shift => Some(EditExpressions),
+            Key::Backtick if !shift => Some(EditArticulations),
             Key::Enter if shift => Some(EnterRest),
             Key::Enter => Some(Enter),
             Key::Tab if !shift => Some(EnterRest),
@@ -218,6 +290,8 @@ pub fn entry_command(
     };
     if edit_modifier && !shift {
         return match key {
+            Key::L => Some(Style(StyleCommand::DefaultStem)),
+            Key::F if !mac => Some(Style(StyleCommand::FlipTie)),
             Key::Num0 => Some(SpeedyDuration(encore::model::Duration::OneTwentyEighth)),
             Key::Num3 => Some(Triplet),
             Key::ArrowLeft => Some(Boundary(-1)),
@@ -231,17 +305,22 @@ pub fn entry_command(
     }
     if shift {
         return match key {
+            Key::A => Some(Style(StyleCommand::ToggleCourtesy)),
+            Key::B => Some(Style(StyleCommand::DefaultBeam)),
+            Key::M => Some(Style(StyleCommand::FlatBeam)),
             Key::ArrowLeft => Some(Measure(-1)),
             Key::ArrowRight => Some(Measure(1)),
             Key::ArrowUp if !mac => Some(Staff(-1)),
             Key::ArrowDown if !mac => Some(Staff(1)),
             Key::Enter if mac => Some(Staff(-1)),
+            Key::ArrowUp if mac => Some(Layer(1)),
+            Key::ArrowDown if mac => Some(Layer(-1)),
+            Key::Quote if !mac => Some(Layer(1)),
             Key::Backspace | Key::Delete if mac => Some(RemoveTone),
             Key::T => Some(Tie(true)),
             Key::S | Key::Plus | Key::Equals => Some(Accidental(1)),
             Key::F => Some(Accidental(-1)),
-            // Shift+duration is insertion, and Shift+Up/Down on macOS changes
-            // layers. Those pending workflows must never replace a note.
+            // Shift+duration is an insertion workflow and must never replace a note.
             _ => None,
         };
     }
@@ -249,6 +328,12 @@ pub fn entry_command(
         return Some(SpeedyDuration(duration(number)));
     }
     match key {
+        Key::L => Some(Style(StyleCommand::FlipStem)),
+        Key::Slash | Key::B => Some(Style(StyleCommand::CycleBeam)),
+        Key::Backslash => Some(Style(StyleCommand::FlatBeam)),
+        Key::H | Key::O => Some(Style(StyleCommand::ToggleHidden)),
+        Key::Num9 => Some(Style(StyleCommand::Respell)),
+        Key::P => Some(Style(StyleCommand::ToggleParentheses)),
         Key::Num0 => Some(ExitEntry),
         Key::Enter if mac => Some(Staff(1)),
         Key::Enter => Some(Chord),
@@ -553,5 +638,126 @@ mod tests {
                 None
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod engraving_tests {
+    use super::*;
+    #[test]
+    fn engraving_commands_and_layer_modifiers_follow_each_platform_profile() {
+        use EntryCommand::*;
+        use StyleCommand::*;
+        for mac in [false, true] {
+            let primary = Modifiers {
+                ctrl: !mac,
+                mac_cmd: mac,
+                command: true,
+                ..Modifiers::NONE
+            };
+            for profile in [EntryProfile::SimpleLaptop, EntryProfile::Speedy] {
+                assert_eq!(
+                    entry_command(profile, Key::L, Modifiers::NONE, mac),
+                    Some(Style(FlipStem))
+                );
+                assert_eq!(
+                    entry_command(profile, Key::F, primary, mac),
+                    Some(Style(FlipTie))
+                );
+                assert_eq!(
+                    entry_command(
+                        profile,
+                        Key::F,
+                        Modifiers {
+                            shift: true,
+                            ..primary
+                        },
+                        mac
+                    ),
+                    Some(Style(DefaultTie))
+                );
+                assert_eq!(
+                    entry_command(profile, Key::P, Modifiers::NONE, mac),
+                    Some(Style(ToggleParentheses))
+                );
+            }
+            assert_eq!(
+                entry_command(
+                    EntryProfile::SimpleLaptop,
+                    Key::Backslash,
+                    Modifiers::NONE,
+                    mac
+                ),
+                Some(Style(Respell))
+            );
+            assert_eq!(
+                entry_command(EntryProfile::Speedy, Key::Backslash, Modifiers::NONE, mac),
+                Some(Style(FlatBeam))
+            );
+            assert_eq!(
+                entry_command(EntryProfile::Speedy, Key::Num9, Modifiers::NONE, mac),
+                Some(Style(Respell))
+            );
+            let layers = if mac {
+                Modifiers {
+                    mac_cmd: true,
+                    command: true,
+                    alt: true,
+                    ..Modifiers::NONE
+                }
+            } else {
+                Modifiers {
+                    alt: true,
+                    shift: true,
+                    ..Modifiers::NONE
+                }
+            };
+            for (key, index) in [
+                (Key::Num1, 0),
+                (Key::Num2, 1),
+                (Key::Num3, 2),
+                (Key::Num4, 3),
+            ] {
+                assert_eq!(layer_command(key, layers, mac), Some(index));
+            }
+            assert_eq!(layer_command(Key::Num5, layers, mac), None);
+            assert_eq!(layer_command(Key::Num2, Modifiers::NONE, mac), None);
+        }
+        assert_eq!(
+            entry_command(
+                EntryProfile::Speedy,
+                Key::ArrowUp,
+                Modifiers {
+                    shift: true,
+                    ..Modifiers::NONE
+                },
+                true
+            ),
+            Some(Layer(1))
+        );
+        assert_eq!(
+            entry_command(
+                EntryProfile::Speedy,
+                Key::ArrowUp,
+                Modifiers {
+                    shift: true,
+                    ..Modifiers::NONE
+                },
+                false
+            ),
+            Some(Staff(-1))
+        );
+        assert_eq!(
+            entry_command(
+                EntryProfile::Speedy,
+                Key::Quote,
+                Modifiers {
+                    shift: true,
+                    ..Modifiers::NONE
+                },
+                false
+            ),
+            Some(Layer(1))
+        );
     }
 }

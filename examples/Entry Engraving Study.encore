@@ -1,0 +1,470 @@
+{
+  "title": "Entry Engraving Study",
+  "composer": "Encore original notation study",
+  "tempo": 100,
+  "time_numerator": 4,
+  "time_denominator": 4,
+  "key_fifths": 0,
+  "parts": [
+    {
+      "name": "Piano · right hand",
+      "instrument": "Piano",
+      "clef": "Treble",
+      "measures": [
+        {
+          "notes": [
+            {
+              "start": 0,
+              "duration": "Eighth",
+              "dotted": false,
+              "pitches": [
+                {
+                  "step": "C",
+                  "octave": 4,
+                  "alter": 0
+                }
+              ],
+              "velocity": 80,
+              "staccato": false,
+              "tied": false
+            },
+            {
+              "start": 240,
+              "duration": "Eighth",
+              "dotted": false,
+              "pitches": [
+                {
+                  "step": "E",
+                  "octave": 4,
+                  "alter": 0
+                }
+              ],
+              "velocity": 80,
+              "staccato": false,
+              "tied": false
+            },
+            {
+              "start": 480,
+              "duration": "Eighth",
+              "dotted": false,
+              "pitches": [
+                {
+                  "step": "G",
+                  "octave": 4,
+                  "alter": 0
+                }
+              ],
+              "velocity": 80,
+              "staccato": false,
+              "tied": false
+            },
+            {
+              "start": 720,
+              "duration": "Eighth",
+              "dotted": false,
+              "pitches": [
+                {
+                  "step": "C",
+                  "octave": 5,
+                  "alter": 0
+                }
+              ],
+              "velocity": 80,
+              "staccato": false,
+              "tied": false
+            },
+            {
+              "start": 960,
+              "duration": "Eighth",
+              "dotted": false,
+              "pitches": [
+                {
+                  "step": "D",
+                  "octave": 5,
+                  "alter": 0
+                }
+              ],
+              "velocity": 80,
+              "staccato": false,
+              "tied": false
+            },
+            {
+              "start": 1200,
+              "duration": "Eighth",
+              "dotted": false,
+              "pitches": [
+                {
+                  "step": "E",
+                  "octave": 5,
+                  "alter": 0
+                }
+              ],
+              "velocity": 80,
+              "staccato": false,
+              "tied": false
+            },
+            {
+              "start": 1440,
+              "duration": "Eighth",
+              "dotted": false,
+              "pitches": [
+                {
+                  "step": "G",
+                  "octave": 5,
+                  "alter": 0
+                }
+              ],
+              "velocity": 80,
+              "staccato": false,
+              "tied": false
+            },
+            {
+              "start": 1680,
+              "duration": "Eighth",
+              "dotted": false,
+              "pitches": [
+                {
+                  "step": "C",
+                  "octave": 6,
+                  "alter": 0
+                }
+              ],
+              "velocity": 80,
+              "staccato": false,
+              "tied": false
+            }
+          ]
+        },
+        {
+          "notes": [
+            {
+              "start": 0,
+              "duration": "Half",
+              "dotted": false,
+              "pitches": [
+                {
+                  "step": "C",
+                  "octave": 4,
+                  "alter": 0
+                },
+                {
+                  "step": "E",
+                  "octave": 4,
+                  "alter": 0
+                },
+                {
+                  "step": "G",
+                  "octave": 4,
+                  "alter": 0
+                }
+              ],
+              "velocity": 80,
+              "staccato": false,
+              "tied": false
+            },
+            {
+              "start": 960,
+              "duration": "Half",
+              "dotted": false,
+              "pitches": [
+                {
+                  "step": "C",
+                  "octave": 4,
+                  "alter": 0
+                },
+                {
+                  "step": "E",
+                  "octave": 4,
+                  "alter": 0
+                },
+                {
+                  "step": "G",
+                  "octave": 4,
+                  "alter": 0
+                }
+              ],
+              "velocity": 80,
+              "staccato": false,
+              "tied": false
+            }
+          ]
+        },
+        {
+          "notes": [
+            {
+              "start": 0,
+              "duration": "Quarter",
+              "dotted": false,
+              "pitches": [
+                {
+                  "step": "C",
+                  "octave": 4,
+                  "alter": 1
+                }
+              ],
+              "velocity": 80,
+              "staccato": false,
+              "tied": false
+            },
+            {
+              "start": 480,
+              "duration": "Quarter",
+              "dotted": false,
+              "pitches": [
+                {
+                  "step": "C",
+                  "octave": 4,
+                  "alter": 1
+                }
+              ],
+              "velocity": 80,
+              "staccato": false,
+              "tied": false
+            },
+            {
+              "start": 960,
+              "duration": "Quarter",
+              "dotted": false,
+              "pitches": [
+                {
+                  "step": "G",
+                  "octave": 4,
+                  "alter": 0
+                }
+              ],
+              "velocity": 80,
+              "staccato": false,
+              "tied": false
+            },
+            {
+              "start": 1440,
+              "duration": "Quarter",
+              "dotted": false,
+              "pitches": [
+                {
+                  "step": "C",
+                  "octave": 5,
+                  "alter": 0
+                }
+              ],
+              "velocity": 80,
+              "staccato": false,
+              "tied": false
+            }
+          ]
+        }
+      ],
+      "volume": 0.8,
+      "pan": 0.0,
+      "muted": false,
+      "solo": false
+    }
+  ],
+  "notation": {
+    "entries": [
+      {
+        "anchor": {
+          "part": 0,
+          "measure": 0,
+          "tick": 0,
+          "layer": 0
+        },
+        "stem": "Up",
+        "beam": "Flat",
+        "visible": true,
+        "scale": 1.0,
+        "notehead": "Normal",
+        "tie_direction": "Auto"
+      },
+      {
+        "anchor": {
+          "part": 0,
+          "measure": 0,
+          "tick": 240,
+          "layer": 0
+        },
+        "stem": "Up",
+        "beam": "Join",
+        "visible": true,
+        "scale": 1.0,
+        "notehead": "Cross",
+        "tie_direction": "Auto"
+      },
+      {
+        "anchor": {
+          "part": 0,
+          "measure": 0,
+          "tick": 480,
+          "layer": 0
+        },
+        "stem": "Up",
+        "beam": "Join",
+        "visible": true,
+        "scale": 1.0,
+        "notehead": "Diamond",
+        "tie_direction": "Auto"
+      },
+      {
+        "anchor": {
+          "part": 0,
+          "measure": 0,
+          "tick": 720,
+          "layer": 0
+        },
+        "stem": "Up",
+        "beam": "Join",
+        "visible": true,
+        "scale": 1.0,
+        "notehead": "Triangle",
+        "tie_direction": "Auto"
+      },
+      {
+        "anchor": {
+          "part": 0,
+          "measure": 0,
+          "tick": 960,
+          "layer": 0
+        },
+        "stem": "Down",
+        "beam": "Break",
+        "visible": true,
+        "scale": 1.0,
+        "notehead": "Slash",
+        "tie_direction": "Auto"
+      },
+      {
+        "anchor": {
+          "part": 0,
+          "measure": 0,
+          "tick": 1200,
+          "layer": 0
+        },
+        "stem": "Down",
+        "beam": "Join",
+        "visible": true,
+        "scale": 1.0,
+        "notehead": "Square",
+        "tie_direction": "Auto"
+      },
+      {
+        "anchor": {
+          "part": 0,
+          "measure": 0,
+          "tick": 1440,
+          "layer": 0
+        },
+        "stem": "Down",
+        "beam": "Join",
+        "visible": true,
+        "scale": 1.0,
+        "notehead": "Square",
+        "tie_direction": "Auto"
+      },
+      {
+        "anchor": {
+          "part": 0,
+          "measure": 0,
+          "tick": 1680,
+          "layer": 0
+        },
+        "stem": "Down",
+        "beam": "Join",
+        "visible": true,
+        "scale": 1.0,
+        "notehead": "Square",
+        "tie_direction": "Auto"
+      },
+      {
+        "anchor": {
+          "part": 0,
+          "measure": 1,
+          "tick": 0,
+          "layer": 0
+        },
+        "stem": "Auto",
+        "beam": "Auto",
+        "visible": true,
+        "scale": 1.0,
+        "notehead": "Normal",
+        "accidentals": [
+          {
+            "pitch": 64,
+            "display": "Parenthesized"
+          }
+        ],
+        "tie_pitches": [
+          64
+        ],
+        "tie_direction": "Above"
+      },
+      {
+        "anchor": {
+          "part": 0,
+          "measure": 2,
+          "tick": 0,
+          "layer": 0
+        },
+        "stem": "Auto",
+        "beam": "Auto",
+        "visible": true,
+        "scale": 1.0,
+        "notehead": "Normal",
+        "accidentals": [
+          {
+            "pitch": 61,
+            "display": "Parenthesized"
+          }
+        ],
+        "tie_direction": "Auto"
+      },
+      {
+        "anchor": {
+          "part": 0,
+          "measure": 2,
+          "tick": 480,
+          "layer": 0
+        },
+        "stem": "Auto",
+        "beam": "Auto",
+        "visible": true,
+        "scale": 1.0,
+        "notehead": "Normal",
+        "accidentals": [
+          {
+            "pitch": 61,
+            "display": "Hide"
+          }
+        ],
+        "tie_direction": "Auto"
+      },
+      {
+        "anchor": {
+          "part": 0,
+          "measure": 2,
+          "tick": 960,
+          "layer": 0
+        },
+        "stem": "Auto",
+        "beam": "Auto",
+        "visible": true,
+        "scale": 0.65,
+        "notehead": "Normal",
+        "tie_direction": "Auto"
+      },
+      {
+        "anchor": {
+          "part": 0,
+          "measure": 2,
+          "tick": 1440,
+          "layer": 0
+        },
+        "stem": "None",
+        "beam": "Auto",
+        "visible": true,
+        "scale": 1.0,
+        "notehead": "Normal",
+        "tie_direction": "Auto"
+      }
+    ]
+  }
+}

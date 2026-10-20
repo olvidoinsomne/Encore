@@ -22,6 +22,10 @@ const TABLE_SIZE: usize = 4096;
 
 /// Performed score length, including repeats and excluding the release tail.
 pub fn duration_seconds(score: &Score) -> f32 {
+    if !score.notation.tempo.is_empty() {
+        return crate::expressions::TempoMap::new(score)
+            .map_or(f32::INFINITY, |map| map.duration_seconds() as f32);
+    }
     let Ok(order) = crate::repeats::playback_order(score) else {
         return f32::INFINITY;
     };
@@ -47,6 +51,11 @@ pub(crate) fn render_dry(score: &Score) -> Vec<f32> {
     let Ok(order) = crate::repeats::playback_order(score) else {
         return Vec::new();
     };
+    let tempo_map = (!score.notation.tempo.is_empty())
+        .then(|| crate::expressions::TempoMap::new(score).ok())
+        .flatten();
+    let expression_map = crate::expressions::ExpressionMap::new(score);
+    let style_index = crate::entry_style::Index::new(score);
     let any_solo = score.parts.iter().any(|p| p.solo && !p.muted);
 
     for (part_index, part) in score.parts.iter().enumerate() {
@@ -70,7 +79,16 @@ pub(crate) fn render_dry(score: &Score) -> Vec<f32> {
                 let mut last_note = event.note;
                 let mut current_index = index;
                 // Ties join each matching pitch independently, including across barlines.
-                while last_note.tied {
+                while style_index.ties_forward(
+                    &crate::document::Anchor {
+                        part: part_index,
+                        measure: events[current_index].measure,
+                        tick: last_note.start,
+                        layer: last_note.layer,
+                    },
+                    last_note,
+                    midi,
+                ) {
                     let next = events
                         .iter()
                         .enumerate()
@@ -113,14 +131,33 @@ pub(crate) fn render_dry(score: &Score) -> Vec<f32> {
                 let voice = synth_voice_seeded(
                     part.instrument,
                     midi,
-                    event.note.playback_velocity(),
-                    held_ticks * seconds_per_tick,
+                    expression_map.velocity(
+                        crate::document::Anchor {
+                            part: part_index,
+                            measure: event.measure,
+                            tick: event.note.start,
+                            layer: event.note.layer,
+                        },
+                        event.note,
+                    ),
+                    tempo_map
+                        .as_ref()
+                        .map_or(held_ticks * seconds_per_tick, |map| {
+                            (map.seconds_at_tick(event.tick as f64 + f64::from(held_ticks))
+                                - map.seconds_at_tick(event.tick as f64))
+                                as f32
+                        }),
                     event.tick
                         ^ (part_index as u64 + 1).wrapping_mul(0x517C_C1B7_2722_0A95)
                         ^ u64::from(event.note.layer).wrapping_mul(0x9e37_79b9_7f4a_7c15),
                 );
-                let offset =
-                    (event.tick as f32 * seconds_per_tick * SAMPLE_RATE as f32).round() as usize;
+                let offset = tempo_map.as_ref().map_or_else(
+                    || (event.tick as f32 * seconds_per_tick * SAMPLE_RATE as f32).round() as usize,
+                    |map| {
+                        (map.seconds_at_tick(event.tick as f64) * f64::from(SAMPLE_RATE)).round()
+                            as usize
+                    },
+                );
                 for (frame, sample) in voice.iter().enumerate() {
                     let target = (offset + frame) * 2;
                     if target + 1 >= output.len() {

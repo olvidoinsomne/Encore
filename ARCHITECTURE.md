@@ -60,6 +60,25 @@ Native editing and MusicXML/MuseScore readers reject ambiguous targets or
 unsupported custom pass conditions. Removing a final bar is preflighted against
 all navigation dependencies before the editor commits the structural change.
 
+## Saved page production
+
+`src/layout.rs` defines `DocumentLayout`, also re-exported as the backward-
+compatible `parts::PartLayout` type name. The native full score stores
+`Notation::layout`; linked parts retain independent instances. Format validation
+checks printable paper area, finite margins/scaling, measure-index bounds,
+nonoverlapping system locks, break/lock conflicts, unique width weights and
+bounded publication text. `remap_measures()` updates formatting after structural
+measure edits without treating page settings as musical clipboard contents.
+
+Engraving works in scaled musical coordinates, then transforms every primitive,
+staff region and hit point back onto the physical sheet. Nonlinear time-map
+anchors remain normalized, preserving the mouse inverse under staff scaling.
+Explicit boundaries limit automatic systems; locks fix membership; relative
+weights allocate remaining width while reserving basic glyph room. Headers,
+footers, copyright and pagination are drawn after music scaling so their text
+size and physical margins remain stable. `src/app/layout.rs` edits the current
+full-score or part format and exposes lock/unlock helpers for contextual keys.
+
 ## Linked parts
 
 `src/parts.rs` stores `LinkedPart` definitions inside `Score::notation.parts`.
@@ -72,6 +91,27 @@ hits back to the source; inverse transposition converts written mouse entry to
 concert pitch. Playback always consumes the source. Definitions participate in
 native serialization and score undo/redo. `export_pdf_parts()` preflights all definitions before writing numbered PDFs
 one at a time, bounding memory even when parts overlap.
+
+## Regional editing
+
+`src/editing.rs` owns atomic whole-measure editing. `Region` keeps ordered
+source staff indices, including nonadjacent staves displayed in linked parts.
+A bounded, versioned `RegionClip` carries measure rows and supported relative
+notation anchors. Copying omits cross-boundary spans with explicit warnings;
+score-wide repeat/navigation/tempo metadata travels only with full staff stacks.
+Paste supports replacement, empty-only collision protection and inserted measure
+stacks. Native source pitches, instrument assignments and linked definitions
+remain separate from musical clipboard contents. Partial-measure selections,
+clipboard filters and clip files are future work.
+
+Insert/delete remaps anchored notation, tempo points, repeat endings and every
+saved full-score/part layout. Missing navigation targets and removed alternate
+endings or ramp endpoints fail without changing the source. Chromatic/spelled
+transposition updates MIDI-keyed engraving overrides alongside notes. A known
+metadata-field guard rejects unsupported future notation rather than silently
+losing it. `src/app/regions.rs` supplies selection/action controls; clipboard
+routing keeps previous single-event formats readable, and all changes enter the
+shared score snapshot history.
 
 ## Audio
 

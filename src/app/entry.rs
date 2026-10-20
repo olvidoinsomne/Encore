@@ -82,7 +82,7 @@ impl EncoreApp {
         .max(1)
     }
 
-    fn edit_entry(&mut self, edit: impl FnOnce(&mut Note)) -> bool {
+    pub(super) fn edit_entry(&mut self, edit: impl FnOnce(&mut Note)) -> bool {
         let Some(s) = self.selected else { return false };
         let old_anchor = encore::document::Anchor::from_selection(&self.score, s);
         let bar_ticks = self.score.measure_ticks();
@@ -92,6 +92,7 @@ impl EncoreApp {
         let cursor_at_end =
             old_end == Some(self.cursor_measure as u32 * bar_ticks + self.cursor_tick);
         let mut candidate = self.score.clone();
+        let original_note = self.selected_entry().cloned();
         let Some(note) = candidate
             .parts
             .get_mut(s.part)
@@ -118,6 +119,9 @@ impl EncoreApp {
         if now_rest && let Some(anchor) = old_anchor {
             encore::document::remove_anchor(&mut candidate, &anchor);
         }
+        if let (Some(anchor), Some(original)) = (old_anchor, original_note) {
+            encore::entry_style::synchronize_note(&mut candidate, &anchor, &original);
+        }
         if let Err(error) = candidate.validate() {
             self.status = format!("Cannot change entry: {error}");
             return false;
@@ -135,7 +139,7 @@ impl EncoreApp {
         true
     }
 
-    fn selected_entry(&self) -> Option<&Note> {
+    pub(super) fn selected_entry(&self) -> Option<&Note> {
         let s = self.selected?;
         self.score
             .parts
@@ -146,7 +150,7 @@ impl EncoreApp {
             .get(s.note)
     }
 
-    fn active_pitch_index(&self) -> Option<usize> {
+    pub(super) fn active_pitch_index(&self) -> Option<usize> {
         let note = self.selected_entry()?;
         note.pitches
             .iter()
@@ -403,6 +407,9 @@ impl EncoreApp {
     pub(super) fn apply_entry_command(&mut self, command: EntryCommand) {
         use EntryCommand::*;
         match command {
+            Style(command) => self.apply_style_command(command),
+            EditExpressions => self.open_expressions(),
+            EditArticulations => self.show_entry_style = true,
             Duration(duration, selected) => {
                 if selected {
                     self.edit_entry(|n| n.duration = duration);
@@ -583,11 +590,7 @@ impl EncoreApp {
                     self.navigate_entry(-1);
                 }
                 if !previous || self.selected != location.0 {
-                    self.edit_entry(|n| {
-                        if !n.pitches.is_empty() {
-                            n.tied = !n.tied;
-                        }
-                    });
+                    self.toggle_selected_pitch_tie();
                 }
                 if previous {
                     (
@@ -601,6 +604,7 @@ impl EncoreApp {
             }
             Accidental(change) => self.set_pitch_accidental(change, change != 0),
             SetAccidental(alter) => self.set_pitch_accidental(alter, false),
+            ToolAccidental(alter) => self.accidental = Some(alter),
             Boundary(direction) => {
                 let measure = &self.score.parts[self.active_part].measures[self.cursor_measure];
                 if direction < 0 {
@@ -641,6 +645,12 @@ impl EncoreApp {
                     as usize;
                 self.cursor_tick = 0;
                 self.selected = None;
+            }
+            Layer(direction) => {
+                self.active_layer =
+                    (i16::from(self.active_layer) + i16::from(direction)).rem_euclid(4) as u8;
+                self.selected = None;
+                self.status = format!("Layer {}", self.active_layer + 1);
             }
             Staff(direction) => {
                 if self.part_view {

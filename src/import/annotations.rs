@@ -37,6 +37,7 @@ struct RawSlur {
 }
 #[derive(Default)]
 pub(super) struct Annotations {
+    styles: super::entry_style::Styles,
     lyrics: Vec<RawLyric>,
     slurs: Vec<RawSlur>,
     lyric_keys: BTreeSet<(SourceAnchor, LyricKind, u16)>,
@@ -50,6 +51,7 @@ impl Annotations {
         at: SourceAnchor,
         warnings: &mut Warnings,
     ) -> Result<(), String> {
+        self.styles.xml(node, at.clone(), warnings)?;
         if child(node, "rest").is_some() {
             if node
                 .descendants()
@@ -190,6 +192,7 @@ impl Annotations {
     }
 
     pub(super) fn shift(&mut self, measure: usize, ticks: u32) {
+        self.styles.shift(measure, ticks);
         for l in &mut self.lyrics {
             if l.at.measure == measure {
                 l.at.tick += ticks;
@@ -399,6 +402,7 @@ impl Annotations {
                 tick: at.tick % mt,
             })
         };
+        self.styles.finish(score, mapping)?;
         for raw in self.lyrics {
             let mut lyric = raw.value;
             lyric.anchor = resolve(&raw.at)?;
