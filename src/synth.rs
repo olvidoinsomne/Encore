@@ -5,7 +5,7 @@
 //! tuned membrane modes. The extended GM catalog uses family approximations in
 //! this explicitly selected procedural engine. No sound bank or asset is used.
 
-use crate::model::{Instrument, Note, PPQ, Score};
+use crate::model::{Instrument, PPQ, Score};
 use rodio::{OutputStream, OutputStreamBuilder, Sink, buffer::SamplesBuffer};
 use std::{
     collections::HashSet,
@@ -20,16 +20,13 @@ pub const MAX_RENDER_SECONDS: f32 = 600.0;
 const TAIL_SECONDS: f32 = 1.8;
 const TABLE_SIZE: usize = 4096;
 
-/// Written score length, excluding the reverberation/release tail.
+/// Performed score length, including repeats and excluding the release tail.
 pub fn duration_seconds(score: &Score) -> f32 {
-    score.measure_count() as f32 * score.measure_ticks() as f32 / PPQ as f32 * 60.0
+    let Ok(order) = crate::repeats::playback_order(score) else {
+        return f32::INFINITY;
+    };
+    order.len() as f32 * score.measure_ticks() as f32 / PPQ as f32 * 60.0
         / score.tempo.max(1) as f32
-}
-
-#[derive(Clone, Copy)]
-struct Event<'a> {
-    tick: u64,
-    note: &'a Note,
 }
 
 /// Render the entire score to interleaved stereo samples at 44.1 kHz.
@@ -47,23 +44,16 @@ pub(crate) fn render_dry(score: &Score) -> Vec<f32> {
     }
     let mut output = vec![0.0; ((seconds + TAIL_SECONDS) * SAMPLE_RATE as f32).ceil() as usize * 2];
     let seconds_per_tick = 60.0 / (score.tempo.max(1) as f32 * PPQ as f32);
-    let ticks_per_measure = score.measure_ticks() as u64;
+    let Ok(order) = crate::repeats::playback_order(score) else {
+        return Vec::new();
+    };
     let any_solo = score.parts.iter().any(|p| p.solo && !p.muted);
 
     for (part_index, part) in score.parts.iter().enumerate() {
         if part.muted || (any_solo && !part.solo) || part.volume <= 0.0 {
             continue;
         }
-        let mut events = Vec::new();
-        for (measure_index, measure) in part.measures.iter().enumerate() {
-            for note in &measure.notes {
-                events.push(Event {
-                    tick: measure_index as u64 * ticks_per_measure + note.start as u64,
-                    note,
-                });
-            }
-        }
-        events.sort_by_key(|e| e.tick);
+        let events = crate::repeats::events(part, score.measure_ticks(), &order);
         let mut consumed = HashSet::new();
         let pan = finite_clamp(part.pan, -1.0, 1.0, 0.0);
         let volume = finite_clamp(part.volume, 0.0, 2.0, 0.8);
@@ -89,6 +79,11 @@ pub(crate) fn render_dry(score: &Score) -> Vec<f32> {
                         .find(|(_, e)| {
                             e.tick == end
                                 && e.note.layer == event.note.layer
+                                && crate::repeats::written_adjacent(
+                                    &events[current_index],
+                                    e,
+                                    score.measure_ticks(),
+                                )
                                 && e.note.pitches.iter().any(|p| p.midi() == midi)
                         });
                     let Some((next_index, next_event)) = next else {
@@ -103,7 +98,18 @@ pub(crate) fn render_dry(score: &Score) -> Vec<f32> {
                 }
                 let last_shortening =
                     last_note.ticks() as f32 * last_note.playback_shortening() as f32;
-                let held_ticks = ((end - event.tick) as f32 - last_shortening).max(1.0);
+                let following = events
+                    .iter()
+                    .skip(current_index + 1)
+                    .find(|next| next.note.layer == event.note.layer && next.tick >= end);
+                let overlap = crate::repeats::legato_extension(
+                    score,
+                    part_index,
+                    &events[current_index],
+                    following,
+                );
+                let held_ticks =
+                    ((end - event.tick) as f32 - last_shortening + overlap as f32).max(1.0);
                 let voice = synth_voice_seeded(
                     part.instrument,
                     midi,
@@ -953,7 +959,7 @@ impl Playback {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Duration, Pitch};
+    use crate::model::{Duration, Note, Pitch};
 
     fn one_note() -> Score {
         let mut score = Score::blank();
@@ -1304,5 +1310,24 @@ mod tests {
         first.tuplet = None;
         first.tied = false;
         assert_eq!(render(&triplets), render(&quarter));
+    }
+    #[test]
+    fn performed_repeats_match_an_expanded_procedural_score_exactly() {
+        let mut score = one_note();
+        score.parts[0].measures.resize(2, Default::default());
+        let mut next = score.parts[0].measures[0].notes[0].clone();
+        next.pitches = vec![Pitch::from_midi(64)];
+        score.parts[0].measures[1].notes.push(next);
+        score
+            .notation
+            .repeats
+            .push(crate::repeats::RepeatRegion::simple(0, 1));
+        let mut expanded = score.clone();
+        expanded.notation.repeats.clear();
+        expanded.parts[0]
+            .measures
+            .extend(score.parts[0].measures.clone());
+        assert_eq!(duration_seconds(&score), duration_seconds(&expanded));
+        assert_eq!(render(&score), render(&expanded));
     }
 }

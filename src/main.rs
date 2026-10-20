@@ -148,6 +148,7 @@ fn cli(parsed: &Arguments) -> Result<(), String> {
                 "encore --demo-all OUTPUT_DIR         Export both demos\n",
                 "encore --compare-carol OUTPUT_DIR    Export procedural/sampled WAV comparisons\n",
                 "encore --export INPUT OUTPUT         Export .pdf/.svg/.musicxml/.mid/.wav\n",
+                "encore --parts INPUT OUTPUT_DIR      Export all linked parts as PDF\n",
                 "encore --import INPUT OUTPUT.encore   Import a score into an Encore project\n",
                 "encore --import-midi INPUT OUTPUT.encore --quantize 16th\n",
                 "                                    Import performance MIDI on a chosen grid\n",
@@ -211,6 +212,12 @@ fn cli(parsed: &Arguments) -> Result<(), String> {
             } else {
                 export_to(&score, path)
             }
+        }
+        "--parts" if args.len() == 3 => {
+            let score = load_score(Path::new(&args[1]))?;
+            let paths = encore::parts::export_pdf_parts(&score, Path::new(&args[2]))?;
+            println!("Exported {} linked parts to {}", paths.len(), args[2]);
+            Ok(())
         }
         "--import" if args.len() == 3 => {
             let output = Path::new(&args[2]);
@@ -384,6 +391,15 @@ pub(crate) fn export_to_with_engine(
     path: &Path,
     engine: &AudioEngine,
 ) -> Result<(), String> {
+    export_to_with_layout(score, path, engine, None)
+}
+
+pub(crate) fn export_to_with_layout(
+    score: &Score,
+    path: &Path,
+    engine: &AudioEngine,
+    layout: Option<encore::parts::PartLayout>,
+) -> Result<(), String> {
     score.validate()?;
     let ext = path
         .extension()
@@ -396,7 +412,13 @@ pub(crate) fn export_to_with_engine(
         "mid" | "midi" => export::midi(score),
         "wav" => synth::wav(&engine.render(score)?),
         "pdf" | "svg" => {
-            let pages = engraving::engrave(score, &Default::default());
+            let pages = engraving::engrave(
+                score,
+                &encore::engraving::EngravingOptions {
+                    layout,
+                    ..Default::default()
+                },
+            );
             if ext == "pdf" {
                 engraving::pdf(&pages)
             } else {

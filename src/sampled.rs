@@ -10,7 +10,7 @@
 //! application-level timing quantization. SF2 modulators are honored by OxiSynth.
 
 use crate::{
-    model::{Instrument, Note, PPQ, Part, Score},
+    model::{Instrument, PPQ, Part, Score},
     synth::{self, MAX_RENDER_SECONDS, SAMPLE_RATE},
 };
 use oxisynth::{MidiEvent, SoundFont, SoundFontId, Synth, SynthDescriptor};
@@ -132,12 +132,20 @@ impl SampleBank {
         let frames = ((duration + RELEASE_TAIL) * SAMPLE_RATE as f32).ceil() as usize;
         let mut output = vec![0.0; frames * 2];
         let any_solo = score.parts.iter().any(|part| part.solo && !part.muted);
-        for part in &score.parts {
+        let order = crate::repeats::playback_order(score)?;
+        for (part_index, part) in score.parts.iter().enumerate() {
             if part.muted || part.volume <= 0.0 || (any_solo && !part.solo) {
                 continue;
             }
             for layer in 0..4 {
-                let events = timeline(part, score.measure_ticks(), score.tempo, layer);
+                let events = timeline_order(
+                    part,
+                    score.measure_ticks(),
+                    score.tempo,
+                    layer,
+                    &order,
+                    Some((score, part_index)),
+                );
                 if events.is_empty() {
                     continue;
                 }
@@ -444,23 +452,24 @@ struct Command {
     kind: Kind,
 }
 
-#[derive(Clone, Copy)]
-struct Event<'a> {
-    tick: u64,
-    note: &'a Note,
+#[cfg(test)]
+fn timeline(part: &Part, measure_ticks: u32, tempo: u16, layer: u8) -> Vec<Command> {
+    let order: Vec<_> = (0..part.measures.len()).collect();
+    timeline_order(part, measure_ticks, tempo, layer, &order, None)
 }
 
-fn timeline(part: &Part, measure_ticks: u32, tempo: u16, layer: u8) -> Vec<Command> {
-    let mut notes = Vec::new();
-    for (measure_index, measure) in part.measures.iter().enumerate() {
-        for note in measure.notes.iter().filter(|note| note.layer == layer) {
-            notes.push(Event {
-                tick: measure_index as u64 * measure_ticks as u64 + note.start as u64,
-                note,
-            });
-        }
-    }
-    notes.sort_by_key(|note| note.tick);
+fn timeline_order(
+    part: &Part,
+    measure_ticks: u32,
+    tempo: u16,
+    layer: u8,
+    order: &[usize],
+    score: Option<(&Score, usize)>,
+) -> Vec<Command> {
+    let notes: Vec<_> = crate::repeats::events(part, measure_ticks, order)
+        .into_iter()
+        .filter(|event| event.note.layer == layer)
+        .collect();
     let frames_per_tick = 60.0_f64 * SAMPLE_RATE as f64 / (tempo.max(1) as f64 * PPQ as f64);
     let mut consumed = HashSet::new();
     let mut commands = Vec::new();
@@ -483,7 +492,13 @@ fn timeline(part: &Part, measure_ticks: u32, tempo: u16, layer: u8) -> Vec<Comma
                     .skip(current + 1)
                     .take_while(|(_, note)| note.tick <= end)
                     .find(|(_, note)| {
-                        note.tick == end && note.note.pitches.iter().any(|p| p.midi() == midi)
+                        note.tick == end
+                            && crate::repeats::written_adjacent(
+                                &notes[current],
+                                note,
+                                measure_ticks,
+                            )
+                            && note.note.pitches.iter().any(|p| p.midi() == midi)
                     });
                 let Some((next_index, next_note)) = next else {
                     break;
@@ -496,7 +511,15 @@ fn timeline(part: &Part, measure_ticks: u32, tempo: u16, layer: u8) -> Vec<Comma
                 current = next_index;
             }
             let shortening = last.ticks() as f64 * last.playback_shortening();
-            let gate_end = end as f64 - shortening;
+            let overlap = score.map_or(0, |(score, part)| {
+                crate::repeats::legato_extension(
+                    score,
+                    part,
+                    &notes[current],
+                    notes.get(current + 1),
+                )
+            });
+            let gate_end = end as f64 - shortening + f64::from(overlap);
             let start_frame = (event.tick as f64 * frames_per_tick).round() as usize;
             let end_frame = ((gate_end * frames_per_tick).round() as usize).max(start_frame + 1);
             commands.push(Command {
@@ -592,7 +615,7 @@ fn guarded_mix(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Duration, Pitch};
+    use crate::model::{Duration, Note, Pitch};
 
     fn score() -> Score {
         let mut score = Score::blank();
@@ -1032,5 +1055,73 @@ mod tests {
         assert_eq!(lower.len(), 2);
         assert_eq!((upper[0].frame, upper[1].frame), (0, 22050));
         assert_eq!((lower[0].frame, lower[1].frame), (22050, 44100));
+    }
+    #[test]
+    fn sampled_timeline_performs_repeats_and_breaks_ties_at_jumps() {
+        use crate::repeats::RepeatRegion;
+        let mut score = score();
+        let mut event = note(0, &[60]);
+        event.duration = Duration::Whole;
+        event.tied = true;
+        score.parts[0].measures[0].notes = vec![event];
+        score.notation.repeats.push(RepeatRegion::simple(0, 0));
+        let order = crate::repeats::playback_order(&score).unwrap();
+        assert_eq!(order, [0, 0, 1]);
+        let events = timeline_order(
+            &score.parts[0],
+            score.measure_ticks(),
+            120,
+            0,
+            &order,
+            Some((&score, 0)),
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event.kind, Kind::On(_)))
+                .map(|event| event.frame)
+                .collect::<Vec<_>>(),
+            [0, 88200]
+        );
+        assert!(events.contains(&Command {
+            frame: 88200,
+            midi: 60,
+            kind: Kind::Off
+        }));
+    }
+
+    #[test]
+    fn sampled_phrase_overlap_uses_source_slur_anchors_and_never_crosses_jumps() {
+        use crate::{document::Anchor, slurs::Slur};
+        let mut score = score();
+        score.parts[0].measures[0].notes = vec![note(0, &[60]), note(480, &[62])];
+        let start = Anchor {
+            part: 0,
+            measure: 0,
+            tick: 0,
+            layer: 0,
+        };
+        score
+            .notation
+            .slurs
+            .push(Slur::new(start, Anchor { tick: 480, ..start }));
+        let events = timeline_order(
+            &score.parts[0],
+            score.measure_ticks(),
+            120,
+            0,
+            &[0, 0, 1],
+            Some((&score, 0)),
+        );
+        assert!(events.contains(&Command {
+            frame: 22739,
+            midi: 60,
+            kind: Kind::Off
+        }));
+        assert!(events.contains(&Command {
+            frame: 110939,
+            midi: 60,
+            kind: Kind::Off
+        }));
     }
 }

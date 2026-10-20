@@ -1,6 +1,6 @@
 # Encore implementation contract
 
-Encore 0.6 is an original clean-room Rust music notation application. No Finale source, assets, file parsers or proprietary UI are used. The native interface has persistent light/dark themes around a white, printable score page. No Finale proprietary code or assets are used; foreign readers use public format documentation.
+Encore 0.7 is an original clean-room Rust music notation application. No Finale source, assets, file parsers or proprietary UI are used. The native interface has persistent light/dark themes around a white, printable score page. No Finale proprietary code or assets are used; foreign readers use public format documentation.
 
 ## Score and instrument catalog
 
@@ -21,9 +21,57 @@ Other core APIs:
 
 ## Engraving
 
-`src/engraving.rs` turns a score and `EngravingOptions` into vector `Page`s. Options select a note, playhead and optional staff filter. Each page contains line, ellipse, path and outlined text primitives, staff regions and note hit maps. SVG and PDF output use these same pages. Text and notation are portable vector outlines with no runtime font dependency for printing.
+`src/engraving.rs` turns a score and `EngravingOptions` into vector `Page`s. Options select a note, playhead, optional staff filter and independent `PartLayout` paper geometry. Each page contains line, ellipse, path and outlined text primitives, staff regions and note hit maps. SVG and PDF output use these same pages. Text and notation are portable vector outlines with no runtime font dependency for printing.
 
 Coordinates grow downward. Staff diatonic references are treble bottom-line E4 = 30, bass G2 = 18 and alto F3 = 24; a pitch's vertical position is `bottom_y - (staff_step - bottom_step) * spacing / 2`. Layout aims for four measures per system and adapts staff groups and page count to the score. The playhead uses absolute quarter beats. Shared nonlinear measure maps align onsets across displayed staves and reserve space for short-note bursts; `StaffRegion::x_at_tick()` and `tick_at_x()` are also used by the editor playhead and mouse entry.
+
+## Anchored lyrics and slurs
+
+`src/document.rs` stores additive, empty-default `Notation` in the score.
+`Anchor` identifies a rhythmic entry by source staff, measure, onset tick and
+layer. Removing/reindexing staves or deleting notes updates or removes dependent
+annotations; validation rejects dangling anchors. `src/lyrics.rs` owns numbered
+verse/chorus/section syllables, syllabic state, optional extension endpoints and
+baseline offsets. `assign_text` tokenizes and applies an entire text assignment
+using one sorted melody traversal and a map of lyric keys, then validates before
+committing metadata. `src/slurs.rs` stores same-layer phrase endpoints,
+direction, arch height and endpoint offsets. Validation uses sorted endpoint
+sets and a sweep of active phrases, with at most 16 overlaps per staff.
+
+The engraving child modules add outlined lyric text, hyphens, word extensions
+and original flattened vector phrase curves after staff regions are known.
+Each system/page receives its own continuation fragment. Lyric widths inform
+shared temporal spacing and system measure counts; lyric baselines and slur
+clearance inform vertical staff spacing. Foreign format `annotations` collectors
+retain source voice identities until each reader resolves them into native
+staff/layer anchors, including pickup shifts. MusicXML emits matched numbered
+slur starts/stops and explicit lyric-extension starts/stops. Unsupported rich
+text, cross-staff phrases or custom shape details produce import notes.
+
+## Repeats and navigation
+
+`src/repeats.rs` validates inclusive repeat regions, nested bodies and contiguous
+alternate endings. `src/repeats/navigation.rs` adds conventional one-shot
+D.C./D.S., Fine and coda navigation over either the normal or final-ending
+route. `Score::playback_order()` is shared by duration, playhead, MIDI and both
+audio schedulers. Traversal is capped at 16,384 performed bars and two million
+events; jumps break ties and phrase overlap across nonadjacent source bars.
+Native editing and MusicXML/MuseScore readers reject ambiguous targets or
+unsupported custom pass conditions. Removing a final bar is preflighted against
+all navigation dependencies before the editor commits the structural change.
+
+## Linked parts
+
+`src/parts.rs` stores `LinkedPart` definitions inside `Score::notation.parts`.
+A definition has a stable ID, name, source staff indices, a spelled
+`Transposition` and independent `PartLayout`. Empty definitions generate views
+from the current instrument list without mutating the score. `project()` clones
+only for presentation, remaps lyric/slur anchors and selections, and transforms
+written notes and key signatures. `Projection::source_staves` maps all canvas
+hits back to the source; inverse transposition converts written mouse entry to
+concert pitch. Playback always consumes the source. Definitions participate in
+native serialization and score undo/redo. `export_pdf_parts()` preflights all definitions before writing numbered PDFs
+one at a time, bounding memory even when parts overlap.
 
 ## Audio
 

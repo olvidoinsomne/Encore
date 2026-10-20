@@ -1,6 +1,6 @@
 # Platforms and score compatibility
 
-Encore 0.6 targets Linux, macOS and Windows. Linux builds and packaging are
+Encore 0.7 targets Linux, macOS and Windows. Linux builds and packaging are
 verified on the development machine. Native macOS and Windows validation is
 still required; their build commands, packaging scripts and manual GitLab CI
 jobs are in [BUILDING.md](BUILDING.md). A Rust target alone does not supply the
@@ -37,11 +37,69 @@ MusicXML and MuseScore readers retain the supported pitches, rhythms, chords,
 rests, ties, staccato, accent, marcato, tenuto, staccatissimo, instruments, initial tempo/key/meter and available mixer
 information. They convert transposing instruments to concert pitch. Playback
 uses the initial tempo; later tempo changes are reported. Key changes use the
-initial signature while preserving explicit note pitches. Page layout, lyrics,
-slurs, repeat playback, pedal/hairpin lines and advanced articulations are not
-fully retained. Breve through 128th values and exact representable tuplets are supported. Nested tuplets, fractional-grid ratios, percussion maps and changing time signatures still need simplification in the source program first.
+initial signature while preserving explicit note pitches. Lyrics and same-layer
+slurs now retain the subset described below. Page layout, pedal/hairpin lines
+and advanced articulations are not fully retained. Breve through 128th values and exact representable tuplets are supported. Nested tuplets, fractional-grid ratios, percussion maps and changing time signatures still need simplification in the source program first.
 When no explicit tempo is stored, import uses 120 quarter notes per minute and
 reports that choice in the import notes.
+
+### Lyrics and slurs
+
+Native Encore scores retain numbered **Verse, Chorus and Section** lyric lines,
+syllable hyphens, word-extension endpoints, undertie elisions and baseline
+adjustments. Type/assign text with spaces between words, hyphens between
+syllables and underscores for additional melody notes. Assigning more text than
+there are notes fails atomically. Baselines and shared time spacing reserve
+room for common vocal underlay; systems/pages receive continuation fragments.
+Very long unbroken syllables and extremely dense multiple-line layouts still
+need manual simplification; rich typography and Finale's full lyric window
+remain open.
+
+MusicXML imports/exports the supported line names/numbers, syllabic values,
+elisions, baseline offsets and melisma endpoints. MuseScore imports numbered
+verses and tick/fraction extensions. Pickup-spanning MuseScore location slurs
+still require migration through MusicXML or simplifying the source; unresolved
+endpoints are rejected rather than moved silently. Hidden or above-staff lyrics, font markup
+and per-repeat visibility produce loss notes. Non-numeric MusicXML lyric line
+labels currently use line 1 with a warning; rename them numerically in the
+source application when different lines would collide.
+
+Slurs preserve same-staff, same-layer start/end notes, automatic/above/below
+direction, arch height and endpoint offsets. Native persistence and MusicXML
+round trips preserve this geometry subset; MuseScore supports legacy numbered
+and modern location-based endpoints. Original page-specific control points,
+dashed/dotted styling and cross-staff/cross-voice slurs are re-engraved or omitted
+with explicit notes. Unmatched endpoints are reported. Curves attach to notes
+rather than chord tones; ties remain separate notation. Public editing and
+imports validate anchors and enforce at most 16 overlapping phrases per staff
+for reliable MusicXML numbering.
+
+### Repeats and navigation
+
+Native Encore, MusicXML and MuseScore support ordinary repeat barlines and
+numbered alternate endings. Repeat regions may nest without crossing; endings
+form a contiguous suffix and assign every pass to exactly one ending. Total
+passes are 2–16. Barline dots and volta brackets appear in scores and linked
+parts, with bracket continuations across systems/pages.
+
+Measure-boundary **D.C., D.S., al Fine, al Coda, Segno, To Coda and Coda** marks
+use the same performed timeline for sampled audio, procedural audio, MIDI,
+duration and playhead tracking. Each D.C./D.S. jump executes once; Fine and
+To Coda activate on their corresponding return route. Return routes normally
+skip repeats and use final endings. The editor can enable repeat replay after
+jumps; jumps within one document share that setting. Segno, Coda, Fine and
+To Coda each have one unambiguous target. MusicXML uses its public
+[`sound`](https://www.w3.org/2021/06/musicxml40/musicxml-reference/elements/sound/)
+and [`repeat`](https://www.w3.org/2021/06/musicxml40/musicxml-reference/elements/repeat/)
+attributes; MuseScore uses explicit marker/jump labels.
+
+Validation rejects crossed/ambiguous repeats, missing or unreachable targets,
+custom pass/offset navigation, and more than 16,384 performed measures or
+2,000,000 performed note/rest events. Audio retains its ten-minute performed
+length limit. Ties and phrase overlap stop at jumps or skipped endings. MIDI
+unfolds the performance and includes UTF-8 lyric meta events at performed
+syllable onsets. Multiple named targets, arbitrary conditional jump programs,
+within-measure navigation and direct Finale MUSX repeat import remain pending.
 
 The direct Finale reader targets the **Finale 27 era** at the product's sunset.
 It handles up to four layers per staff with supported ordinary rhythms, chords, rests,
@@ -49,6 +107,8 @@ complete chord ties, standard constant keys/meters, staff order, initial tempo
 and available instrument identifiers. It recreates notation in Encore's layout.
 It currently rejects multiple voices within one layer, tuplets, grace notes, partial chord ties, staff styles and custom/nonlinear keys. Its import notes also identify
 losses of expressions, articulations, original mixer settings and plug-in setup.
+Direct MUSX does not yet decode lyric underlay or slur/Smart Shape objects;
+export MusicXML from Finale to migrate those supported Encore features.
 MusicXML is the broader migration path for such Finale scores, subject to
 Encore's own notation limits. This is not a promise that every Finale 27 score
 can be converted without editing.
@@ -92,6 +152,25 @@ licensed, installed player and libraries; it would not redistribute Finale's
 Garritan assets. Finale's separate
 [notation libraries](https://usermanuals.finalemusic.com/FinaleWin/Content/Finale/ht-libraries.htm)
 contain expressions, articulations, chord suffixes and document settings.
+
+## Linked parts and transposition
+
+**Notation → Manage linked parts…** defines named parts over one or several source
+staves. Piano treble/bass pairs generate as one part. Notes, lyrics, slurs and
+repeats remain shared with the full score; viewing a part does not modify the
+document. Definitions and independent paper size/orientation, measures per
+system and staff spacing are stored in the `.encore` file and participate in
+undo/redo. Current-part PDF/SVG and batch part PDFs use these settings.
+
+The source score stays in concert pitch. Written parts use a spelled chromatic
+and diatonic interval, with standard defaults for B-flat/E-flat/F instruments
+and octave-transposing instruments. Note entry in a written part converts back
+to the source pitch. Unrepresentable MIDI pitches, accidentals beyond double
+sharps/flats and key signatures beyond seven sharps/flats produce visible
+errors rather than clamping or changing the source. Playback uses source
+concert pitches. Voiced extraction from layers/chord notes, automatic
+multimeasure rests, per-part clefs and per-item unlink/relink are not yet
+implemented. See [linked parts](LINKED_PARTS.md).
 
 ## Appearance
 

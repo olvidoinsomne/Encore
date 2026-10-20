@@ -10,6 +10,7 @@ use std::fs::File;
 use std::io::{Cursor, Read};
 use std::path::Path;
 
+mod annotations;
 mod finale;
 mod midi;
 mod musescore;
@@ -304,6 +305,7 @@ pub(super) fn initial_score(title: String, composer: String) -> Score {
         time_denominator: 4,
         key_fifths: 0,
         parts: Vec::new(),
+        notation: Default::default(),
     }
 }
 

@@ -325,6 +325,148 @@ fn controller(score: Score) -> EncoreApp {
     EncoreApp::from_score(score, None, "Ready".into())
 }
 
+#[test]
+fn trimming_a_required_coda_target_is_rejected_without_changing_the_score() {
+    use encore::repeats::{NavigationKind, NavigationMark};
+    let mut score = Score::blank();
+    score.notation.navigation = [
+        (0, NavigationKind::ToCoda),
+        (2, NavigationKind::DaCapoAlCoda),
+        (3, NavigationKind::Coda),
+    ]
+    .into_iter()
+    .map(|(measure, kind)| NavigationMark {
+        measure,
+        kind,
+        play_repeats_after_jump: false,
+    })
+    .collect();
+    score.validate().unwrap();
+    let mut app = controller(score.clone());
+    assert!(
+        app.trim_last_empty_bar()
+            .unwrap_err()
+            .contains("coda target")
+    );
+    assert_eq!(app.score, score);
+    assert!(!app.dirty());
+    app.score.validate().unwrap();
+}
+
+#[test]
+fn selecting_another_staff_in_a_part_view_follows_that_staff_before_keyboard_entry() {
+    let ctx = egui::Context::default();
+    configure_context(&ctx);
+    let mut score = Score::blank();
+    score.parts[0].instrument = Instrument::Clarinet;
+    let mut app = controller(score);
+    app.part_view = true;
+    app.write_mode = true;
+    let _ = ctx.run(raw_input(0, vec![], egui::Modifiers::NONE), |ctx| {
+        app.ui(ctx)
+    });
+    app.active_part = 1;
+    app.octave = 4;
+    let _ = ctx.run(
+        raw_input(
+            1,
+            vec![key(egui::Key::C, true, egui::Modifiers::NONE)],
+            egui::Modifiers::NONE,
+        ),
+        |ctx| app.ui(ctx),
+    );
+    assert_eq!(app.selected_linked_part, 1);
+    assert_eq!(
+        app.score.parts[1].measures[0].notes[0].pitches[0].midi(),
+        60
+    );
+    assert!(app.score.parts[0].measures[0].notes.is_empty());
+    assert!(
+        app.cached_pages
+            .iter()
+            .flat_map(|page| &page.staves)
+            .all(|staff| staff.part == 1)
+    );
+}
+
+#[test]
+fn written_part_mouse_entry_edits_source_and_view_shortcuts_leave_it_saved() {
+    let ctx = egui::Context::default();
+    configure_context(&ctx);
+    let mut score = Score::blank();
+    score.parts[0].instrument = Instrument::Clarinet;
+    let mut app = controller(score);
+    app.part_view = true;
+    app.write_mode = true;
+    let mut paper = None;
+    for frame in 0..3 {
+        let output = ctx.run(raw_input(frame, vec![], egui::Modifiers::NONE), |ctx| {
+            app.ui(ctx)
+        });
+        paper = output.shapes.iter().find_map(|shape| match &shape.shape {
+            egui::Shape::Rect(rect)
+                if rect.fill == Color32::WHITE
+                    && rect.rect.width() > 700.0
+                    && rect.rect.height() > 900.0 =>
+            {
+                Some(rect.rect)
+            }
+            _ => None,
+        });
+    }
+    assert!(!app.dirty());
+    let staff = &app.cached_pages[0].staves[0];
+    // Written D4 below the treble staff sounds C4 on a B-flat clarinet.
+    let position = paper.unwrap().min + Vec2::new(staff.x_at_tick(0.0), staff.y + 45.0) * app.zoom;
+    for (frame, pressed) in [(3, true), (4, false)] {
+        let _ = ctx.run(
+            raw_input(
+                frame,
+                vec![
+                    egui::Event::PointerMoved(position),
+                    egui::Event::PointerButton {
+                        pos: position,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+                egui::Modifiers::NONE,
+            ),
+            |ctx| app.ui(ctx),
+        );
+    }
+    assert_eq!(
+        app.score.parts[0].measures[0].notes[0].pitches[0].midi(),
+        60
+    );
+    assert_eq!(app.undo.len(), 1);
+    let edited = app.score.clone();
+    let modifiers = egui::Modifiers {
+        ctrl: true,
+        command: true,
+        alt: true,
+        ..Default::default()
+    };
+    for (frame, key) in [
+        (5, egui::Key::Period),
+        (6, egui::Key::Comma),
+        (7, egui::Key::Slash),
+    ] {
+        let _ = ctx.run(
+            raw_input(frame, vec![key_event_for_test(key, modifiers)], modifiers),
+            |ctx| app.ui(ctx),
+        );
+    }
+    assert_eq!(app.score, edited);
+    assert_eq!(app.undo.len(), 1);
+    app.score.validate().unwrap();
+}
+
+fn key_event_for_test(key_value: egui::Key, modifiers: egui::Modifiers) -> egui::Event {
+    key(key_value, true, modifiers)
+}
+
 fn screenshot_theme(app: &mut EncoreApp, ctx: &egui::Context) {
     if std::env::var("ENCORE_SCREENSHOT_THEME").as_deref() == Ok("light") {
         app.set_theme(ctx, Theme::Light);
@@ -1047,7 +1189,14 @@ impl SoftwarePainter {
 fn headless_full_editor_renders_notation_and_font_textures() {
     let ctx = egui::Context::default();
     configure_context(&ctx);
-    let mut app = controller(Score::demo());
+    let score = std::env::var_os("ENCORE_HEADLESS_SCORE").map_or_else(Score::demo, |path| {
+        Score::load(&PathBuf::from(path)).unwrap()
+    });
+    let mut app = controller(score);
+    if let Ok(index) = std::env::var("ENCORE_HEADLESS_PART") {
+        app.part_view = true;
+        app.selected_linked_part = index.parse().unwrap();
+    }
     screenshot_theme(&mut app, &ctx);
     if let Some(path) = std::env::var_os("ENCORE_LAB_SOUNDFONT") {
         app.set_audio_engine(AudioEngine::from_soundfont(&PathBuf::from(path)).unwrap());

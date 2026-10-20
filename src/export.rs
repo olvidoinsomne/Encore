@@ -114,6 +114,7 @@ pub fn musicxml(score: &Score) -> String {
         );
     }
     out.push_str("  </part-list>\n");
+    let notation = xml_annotations(score);
     let measure_ticks = score.measure_ticks();
     for (pi, part) in score.parts.iter().enumerate() {
         let _ = writeln!(out, "  <part id=\"P{}\">", pi + 1);
@@ -147,6 +148,10 @@ pub fn musicxml(score: &Score) -> String {
                     score.tempo, score.tempo
                 );
             }
+            out.push_str(&crate::repeats::musicxml_before_measure(score, mi));
+            out.push_str(&crate::repeats::musicxml_navigation_before_measure(
+                score, mi,
+            ));
             for (layer_index, &layer) in layers.iter().enumerate() {
                 if layer_index > 0 {
                     let _ = writeln!(
@@ -175,8 +180,27 @@ pub fn musicxml(score: &Score) -> String {
                         write_gap(&mut out, note.start - cursor, layer);
                     }
                     let start = mi as u32 * measure_ticks + note.start;
+                    let anchor = crate::document::Anchor {
+                        part: pi,
+                        measure: mi,
+                        tick: note.start,
+                        layer: note.layer,
+                    };
+                    let marks = notation
+                        .get(&anchor)
+                        .map(|(s, l)| (s.as_str(), l.as_str()))
+                        .unwrap_or(("", ""));
                     if note.pitches.is_empty() {
-                        write_xml_note(&mut out, note, None, false, false, false, tuplet_bounds);
+                        write_xml_note(
+                            &mut out,
+                            note,
+                            None,
+                            false,
+                            false,
+                            false,
+                            tuplet_bounds,
+                            ("", ""),
+                        );
                     } else {
                         let dynamic = crate::model::dynamic_name(note.velocity);
                         if note.velocity > 0
@@ -202,6 +226,7 @@ pub fn musicxml(score: &Score) -> String {
                                 } else {
                                     (false, false)
                                 },
+                                if chord_index == 0 { marks } else { ("", "") },
                             );
                         }
                     }
@@ -211,7 +236,12 @@ pub fn musicxml(score: &Score) -> String {
                     write_gap(&mut out, measure_ticks - cursor, layer);
                 }
             }
-            if mi + 1 == part.measures.len() {
+            out.push_str(&crate::repeats::musicxml_navigation_after_measure(
+                score, mi,
+            ));
+            out.push_str(&crate::repeats::musicxml_after_measure(score, mi));
+            if mi + 1 == part.measures.len() && !score.notation.repeats.iter().any(|r| r.end == mi)
+            {
                 out.push_str("      <barline location=\"right\"><bar-style>light-heavy</bar-style></barline>\n");
             }
             out.push_str("    </measure>\n");
@@ -220,6 +250,83 @@ pub fn musicxml(score: &Score) -> String {
     }
     out.push_str("</score-partwise>\n");
     out
+}
+
+/// MusicXML uses matched numbered start/stop marks. Reuse free numbers as
+/// phrases end; distinct lyric names keep verse/chorus/section lines separate.
+fn xml_annotations(
+    score: &Score,
+) -> std::collections::BTreeMap<crate::document::Anchor, (String, String)> {
+    use crate::lyrics::position;
+    use crate::slurs::SlurDirection;
+    let mut result: std::collections::BTreeMap<crate::document::Anchor, (String, String)> =
+        Default::default();
+    for part in 0..score.parts.len() {
+        let mut slurs = score
+            .notation
+            .slurs
+            .iter()
+            .filter(|s| s.start.part == part)
+            .collect::<Vec<_>>();
+        slurs.sort_by_key(|s| (position(&s.start), position(&s.end)));
+        let mut active: Vec<((usize, u32), usize)> = Vec::new();
+        for slur in slurs {
+            active.retain(|(end, _)| *end > position(&slur.start));
+            let number = (1..=16)
+                .find(|n| !active.iter().any(|(_, used)| used == n))
+                .unwrap_or(1);
+            active.push((position(&slur.end), number));
+            let placement = match slur.direction {
+                SlurDirection::Auto => "",
+                SlurDirection::Above => " placement=\"above\"",
+                SlurDirection::Below => " placement=\"below\"",
+            };
+            let _ = write!(
+                result.entry(slur.start).or_default().0,
+                "<slur type=\"start\" number=\"{number}\"{placement} relative-x=\"{}\" relative-y=\"{}\" bezier-y=\"{}\"/>",
+                slur.start_offset[0],
+                -slur.start_offset[1],
+                slur.height
+            );
+            // Stop first when one phrase ends where another starts.
+            let end = &mut result.entry(slur.end).or_default().0;
+            let stop = format!(
+                "<slur type=\"stop\" number=\"{number}\" relative-x=\"{}\" relative-y=\"{}\"/>",
+                slur.end_offset[0], -slur.end_offset[1]
+            );
+            end.insert_str(0, &stop);
+        }
+    }
+    for lyric in &score.notation.lyrics {
+        let output = &mut result.entry(lyric.anchor).or_default().1;
+        let _ = write!(
+            output,
+            "<lyric number=\"{}\" name=\"{}\" relative-y=\"{}\"><syllabic>{}</syllabic>",
+            lyric.verse,
+            lyric.kind.name().to_ascii_lowercase(),
+            -lyric.baseline,
+            lyric.syllabic.musicxml()
+        );
+        for (index, piece) in lyric.text.split('‿').enumerate() {
+            if index > 0 {
+                output.push_str("<elision>‿</elision>");
+            }
+            let _ = write!(output, "<text>{}</text>", xml(piece));
+        }
+        if lyric.extend_to.is_some() {
+            output.push_str("<extend type=\"start\"/>");
+        }
+        output.push_str("</lyric>");
+        if let Some(end) = lyric.extend_to {
+            let _ = write!(
+                result.entry(end).or_default().1,
+                "<lyric number=\"{}\" name=\"{}\"><extend type=\"stop\"/></lyric>",
+                lyric.verse,
+                lyric.kind.name().to_ascii_lowercase()
+            );
+        }
+    }
+    result
 }
 
 fn tuplet_boundaries(notes: &[&Note]) -> Vec<(bool, bool)> {
@@ -265,7 +372,16 @@ fn write_gap(out: &mut String, mut ticks: u32, layer: u8) {
                     staccato: false,
                     tied: false,
                 };
-                write_xml_note(out, &note, None, false, false, false, (false, false));
+                write_xml_note(
+                    out,
+                    &note,
+                    None,
+                    false,
+                    false,
+                    false,
+                    (false, false),
+                    ("", ""),
+                );
                 ticks -= size;
             }
         }
@@ -279,6 +395,7 @@ fn write_gap(out: &mut String, mut ticks: u32, layer: u8) {
         );
     }
 }
+#[allow(clippy::too_many_arguments)]
 fn write_xml_note(
     out: &mut String,
     note: &Note,
@@ -287,6 +404,7 @@ fn write_xml_note(
     tie_in: bool,
     tie_out: bool,
     tuplet_bounds: (bool, bool),
+    annotations: (&str, &str),
 ) {
     if pitch.is_some() {
         let _ = write!(
@@ -337,7 +455,13 @@ fn write_xml_note(
     // Pitch alter is authoritative; accidental display is left to the importer.
     let has_articulations =
         pitch.is_some() && (note.staccato || (!chord && !note.articulations.is_empty()));
-    if tie_in || tie_out || has_articulations || tuplet_bounds.0 || tuplet_bounds.1 {
+    if tie_in
+        || tie_out
+        || has_articulations
+        || tuplet_bounds.0
+        || tuplet_bounds.1
+        || !annotations.0.is_empty()
+    {
         out.push_str("<notations>");
         if tie_in {
             out.push_str("<tied type=\"stop\"/>");
@@ -363,8 +487,10 @@ fn write_xml_note(
         if tuplet_bounds.1 {
             out.push_str("<tuplet type=\"stop\"/>");
         }
+        out.push_str(annotations.0);
         out.push_str("</notations>");
     }
+    out.push_str(annotations.1);
     out.push_str("</note>\n");
 }
 
@@ -397,9 +523,19 @@ fn track(mut events: Vec<Event>, end: u32) -> Vec<u8> {
     let mut data = Vec::new();
     let mut previous = 0;
     for event in events {
+        while event.tick.saturating_sub(previous) > 0x0fff_ffff {
+            variable_length(0x0fff_ffff, &mut data);
+            data.extend_from_slice(&[0xff, 0x7f, 0]);
+            previous += 0x0fff_ffff;
+        }
         variable_length(event.tick.saturating_sub(previous), &mut data);
         data.extend_from_slice(&event.bytes);
         previous = event.tick;
+    }
+    while end.saturating_sub(previous) > 0x0fff_ffff {
+        variable_length(0x0fff_ffff, &mut data);
+        data.extend_from_slice(&[0xff, 0x7f, 0]);
+        previous += 0x0fff_ffff;
     }
     variable_length(end.saturating_sub(previous), &mut data);
     data.extend_from_slice(&[0xff, 0x2f, 0]);
@@ -417,7 +553,10 @@ pub fn midi(score: &Score) -> Vec<u8> {
         return Vec::new();
     }
     let measure_ticks = score.measure_ticks();
-    let end = measure_ticks * score.measure_count() as u32;
+    let Ok(order) = crate::repeats::playback_order(score) else {
+        return Vec::new();
+    };
+    let end = measure_ticks * order.len() as u32;
     let tempo = 60_000_000u32 / u32::from(score.tempo);
     let denominator_power = score.time_denominator.trailing_zeros() as u8;
     let mut tracks = vec![track(
@@ -451,8 +590,16 @@ pub fn midi(score: &Score) -> Vec<u8> {
         end,
     )];
     let has_solo = score.parts.iter().any(|part| part.solo);
+    let mut lyric_index: HashMap<crate::document::Anchor, Vec<&crate::lyrics::Lyric>> =
+        HashMap::new();
+    for lyric in &score.notation.lyrics {
+        lyric_index.entry(lyric.anchor).or_default().push(lyric);
+    }
+    for lyrics in lyric_index.values_mut() {
+        lyrics.sort_by_key(|lyric| (lyric.kind, lyric.verse));
+    }
     let mut lane_index = 0;
-    for part in &score.parts {
+    for (part_index, part) in score.parts.iter().enumerate() {
         let layers = (0..4)
             .filter(|layer| {
                 part.measures
@@ -492,25 +639,83 @@ pub fn midi(score: &Score) -> Vec<u8> {
                 },
             ];
             if !part.muted && (!has_solo || part.solo) {
-                let timeline = Timeline::new(part, measure_ticks);
-                for (start, note) in timeline
-                    .notes
+                let timeline = crate::repeats::events(part, measure_ticks, &order);
+                let starts: HashMap<_, _> = timeline
                     .iter()
-                    .filter(|(_, note)| note.layer == layer)
-                {
+                    .enumerate()
+                    .map(|(index, event)| ((event.tick, event.note.layer), index))
+                    .collect();
+                let ends: HashMap<_, _> = timeline
+                    .iter()
+                    .enumerate()
+                    .map(|(index, event)| {
+                        (
+                            (event.tick + u64::from(event.note.ticks()), event.note.layer),
+                            index,
+                        )
+                    })
+                    .collect();
+                for event in timeline.iter().filter(|event| event.note.layer == layer) {
+                    let note = event.note;
+                    let start = event.tick as u32;
+                    let anchor = crate::document::Anchor {
+                        part: part_index,
+                        measure: event.measure,
+                        tick: note.start,
+                        layer,
+                    };
+                    if let Some(lyrics) = lyric_index.get(&anchor) {
+                        for lyric in lyrics {
+                            let mut text = lyric.text.clone();
+                            if matches!(
+                                lyric.syllabic,
+                                crate::lyrics::Syllabic::Begin | crate::lyrics::Syllabic::Middle
+                            ) {
+                                text.push('-');
+                            }
+                            events.push(Event {
+                                tick: start,
+                                priority: 0,
+                                bytes: meta(0x05, text.as_bytes()),
+                            });
+                        }
+                    }
+                    let previous = ends
+                        .get(&(event.tick, layer))
+                        .map(|index| &timeline[*index]);
+                    let following = starts
+                        .get(&(event.tick + u64::from(note.ticks()), layer))
+                        .map(|index| &timeline[*index]);
                     for pitch in &note.pitches {
                         let midi = pitch.midi();
-                        if !timeline.tie_in(*start, note.layer, midi) {
+                        let tie_in = previous.is_some_and(|previous| {
+                            previous.note.tied
+                                && crate::repeats::written_adjacent(previous, event, measure_ticks)
+                                && previous
+                                    .note
+                                    .pitches
+                                    .iter()
+                                    .any(|pitch| pitch.midi() == midi)
+                        });
+                        let tie_out = note.tied
+                            && following.is_some_and(|next| {
+                                crate::repeats::written_adjacent(event, next, measure_ticks)
+                                    && next.note.pitches.iter().any(|pitch| pitch.midi() == midi)
+                            });
+                        if !tie_in {
                             events.push(Event {
-                                tick: *start,
+                                tick: start,
                                 priority: 3,
                                 bytes: vec![0x90 | channel, midi, note.playback_velocity()],
                             });
                         }
-                        if !timeline.tie_out(*start, note, midi) {
-                            let ticks = note.playback_ticks();
+                        if !tie_out {
+                            let ticks = note.playback_ticks()
+                                + crate::repeats::legato_extension(
+                                    score, part_index, event, following,
+                                );
                             events.push(Event {
-                                tick: *start + ticks.max(1),
+                                tick: start + ticks.max(1),
                                 priority: 2,
                                 bytes: vec![0x80 | channel, midi, 0],
                             });
@@ -813,5 +1018,174 @@ mod tests {
             );
             assert!(bytes.windows(3).any(|event| event == [0x80 | layer, 60, 0]));
         }
+    }
+    #[test]
+    fn midi_performs_voltas_and_does_not_join_ties_across_repeat_jumps() {
+        use crate::repeats::{Ending, RepeatRegion};
+        let mut score = Score::blank();
+        score.parts.truncate(1);
+        for (bar, measure) in score.parts[0].measures.iter_mut().enumerate() {
+            let mut value = note(0, &[60 + bar as u8]);
+            value.duration = Duration::Whole;
+            value.tied = true;
+            measure.notes = vec![value];
+        }
+        score.notation.repeats.push(RepeatRegion {
+            start: 0,
+            end: 3,
+            times: 2,
+            endings: vec![
+                Ending {
+                    start: 2,
+                    end: 2,
+                    passes: vec![1],
+                },
+                Ending {
+                    start: 3,
+                    end: 3,
+                    passes: vec![2],
+                },
+            ],
+        });
+        let result = midi_notes(&midi(&score));
+        let ons: Vec<_> = result
+            .iter()
+            .filter(|(_, status, _)| *status == 0x90)
+            .map(|(tick, _, pitch)| (*tick, *pitch))
+            .collect();
+        assert_eq!(
+            ons,
+            [
+                (0, 60),
+                (1920, 61),
+                (3840, 62),
+                (5760, 60),
+                (7680, 61),
+                (9600, 63)
+            ]
+        );
+        // A tied repeat-end C must reattack when returning to the initial C.
+        score.notation.repeats = vec![RepeatRegion::simple(0, 0)];
+        let ons: Vec<_> = midi_notes(&midi(&score))
+            .into_iter()
+            .filter(|(_, status, _)| *status == 0x90)
+            .collect();
+        assert_eq!(&ons[..2], &[(0, 0x90, 60), (1920, 0x90, 60)]);
+    }
+
+    #[test]
+    fn midi_slur_overlap_respects_detached_marks_and_unison_reattacks() {
+        use crate::{document::Anchor, slurs::Slur};
+        let mut score = Score::blank();
+        score.parts.truncate(1);
+        score.parts[0].measures[0].notes = vec![note(0, &[60]), note(480, &[62])];
+        let start = Anchor {
+            part: 0,
+            measure: 0,
+            tick: 0,
+            layer: 0,
+        };
+        let end = Anchor { tick: 480, ..start };
+        score.notation.slurs.push(Slur::new(start, end));
+        assert!(midi_notes(&midi(&score)).contains(&(495, 0x80, 60)));
+        score.parts[0].measures[0].notes[0].staccato = true;
+        assert!(midi_notes(&midi(&score)).contains(&(240, 0x80, 60)));
+        score.parts[0].measures[0].notes[0].staccato = false;
+        score.parts[0].measures[0].notes[1].pitches = vec![Pitch::from_midi(60)];
+        let events = midi_notes(&midi(&score));
+        assert_eq!(events[1], (480, 0x80, 60));
+        assert_eq!(events[2], (480, 0x90, 60));
+    }
+
+    #[test]
+    fn long_repeat_midi_uses_legal_four_byte_delta_times() {
+        let bytes = track(Vec::new(), 0x3000_0000);
+        let mut index = 8;
+        let mut tick = 0;
+        while index < bytes.len() {
+            let begin = index;
+            tick += read_variable(&bytes, &mut index);
+            assert!(index - begin <= 4);
+            assert_eq!(bytes[index], 0xff);
+            let kind = bytes[index + 1];
+            index += 2;
+            let length = read_variable(&bytes, &mut index) as usize;
+            index += length;
+            if kind == 0x2f {
+                break;
+            }
+        }
+        assert_eq!(tick, 0x3000_0000);
+    }
+
+    #[test]
+    fn midi_repeats_utf8_lyric_meta_at_every_performed_source_onset() {
+        use crate::{
+            document::Anchor,
+            lyrics::{Lyric, Syllabic},
+            repeats::RepeatRegion,
+        };
+        let mut score = Score::blank();
+        score.parts.truncate(1);
+        score.parts[0].measures[0].notes = vec![note(0, &[60])];
+        let mut lyric = Lyric::new(
+            Anchor {
+                part: 0,
+                measure: 0,
+                tick: 0,
+                layer: 0,
+            },
+            "Gló",
+        );
+        lyric.syllabic = Syllabic::Begin;
+        score.notation.lyrics.push(lyric);
+        score.notation.repeats.push(RepeatRegion::simple(0, 0));
+        let expected = [0xff, 0x05, 5, b'G', b'l', 0xc3, 0xb3, b'-'];
+        assert_eq!(
+            midi(&score)
+                .windows(expected.len())
+                .filter(|window| *window == expected)
+                .count(),
+            2
+        );
+    }
+    #[test]
+    fn midi_da_capo_al_fine_uses_the_shared_performed_route() {
+        use crate::repeats::{NavigationKind, NavigationMark};
+        let mut score = Score::blank();
+        score.tempo = 120;
+        score.parts.truncate(1);
+        for (bar, measure) in score.parts[0].measures.iter_mut().enumerate() {
+            measure.notes = vec![note(0, &[60 + bar as u8])];
+        }
+        score.notation.navigation = vec![
+            NavigationMark {
+                measure: 1,
+                kind: NavigationKind::Fine,
+                play_repeats_after_jump: false,
+            },
+            NavigationMark {
+                measure: 3,
+                kind: NavigationKind::DaCapoAlFine,
+                play_repeats_after_jump: false,
+            },
+        ];
+        let ons: Vec<_> = midi_notes(&midi(&score))
+            .into_iter()
+            .filter(|(_, status, _)| *status == 0x90)
+            .map(|(tick, _, pitch)| (tick, pitch))
+            .collect();
+        assert_eq!(
+            ons,
+            [
+                (0, 60),
+                (1920, 61),
+                (3840, 62),
+                (5760, 63),
+                (7680, 60),
+                (9600, 61)
+            ]
+        );
+        assert_eq!(crate::synth::duration_seconds(&score), 12.0);
     }
 }

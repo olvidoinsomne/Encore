@@ -112,3 +112,37 @@ References checked against MakeMusic's official
 [Simple Entry guide](https://usermanuals.finalemusic.com/FinaleWin/Content/Finale/Simple_Entry.htm),
 [Speedy Entry guide](https://usermanuals.finalemusic.com/FinaleWin/Content/Finale/Speedy_Entry.htm),
 and [tuplet guide](https://usermanuals.finalemusic.com/FinaleWin/Content/Finale/Tuplets.htm).
+
+## Lyrics, phrase slurs and linked parts
+
+These bindings apply in their tool context, following the official
+[Windows](https://usermanuals.finalemusic.com/FinaleWin/Content/Finale/Keyboard_Shortcuts_and_Special_Mouse_Clicks.htm)
+and [macOS](https://usermanuals.finalemusic.com/FinaleMac/Content/Finale/Keyboard_Shortcuts_and_Special_Mouse_Clicks.htm)
+tables. Text fields retain normal editing; live score typing resumes when the
+score owns focus. Document save, undo and redo remain available.
+
+| Context/action | Windows / Linux | macOS |
+| --- | --- | --- |
+| Lyrics: show lyric window | Ctrl+L | Command+L |
+| Lyrics: next syllable / hyphenate | Space / hyphen | Same |
+| Lyrics: word extension | Underscore | Same |
+| Lyrics: previous / next lyric number | Up / Down | Same |
+| Lyrics: previous / next note | Left / Right | Same |
+| Lyrics: remove preceding character / syllable | Backspace / Delete | Logical Backspace / Delete |
+| Slurs: flip active phrase curve | Ctrl+F | Command+F |
+| Slurs: delete active curve | Delete | Logical Delete |
+| Slurs: reset curve adjustments | Backspace | Backspace fallback; native Clear qualification pending |
+| Next / previous linked part | Ctrl+Alt+. / Ctrl+Alt+, | Command+Option+. / Command+Option+, |
+| Last viewed score/part | Ctrl+Alt+/ | Command+Option+/ |
+
+Use **Slurs** then click its start/end notes, or drag between them; Finale's
+second-click drag also works. The Notation window exposes endpoint, direction
+and curve controls. Full shape handles, lyric justification/shift shortcuts,
+click-assignment cursor, metatools, and native keypad/Clear distinctions remain
+on the parity audit. Repeat regions, endings and navigation marks are edited in
+**Notation → Repeats and endings**; no invented global repeat shortcut is assigned.
+
+Single-event copy/cut/paste now carries attached lyric syllables. A melisma or
+slur spanning other events needs region-aware clipboard support; that remains
+open. A cut repairs source anchors and a paste validates all syllables before
+committing.

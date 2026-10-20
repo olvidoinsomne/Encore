@@ -1,3 +1,4 @@
+use super::annotations::{Annotations, SourceAnchor};
 use super::{
     ImportResult, Warnings, child, finish_parts, initial_score, number, push_event,
     push_rhythmic_event, text, value,
@@ -210,6 +211,7 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
     let mut initial_key = None;
     let mut initial_tempo = None;
     let mut parts = Vec::new();
+    let mut annotation_sets = Vec::new();
     let mut staff_ids = Vec::new();
     for staff in source.children().filter(|n| n.has_tag_name("Staff")) {
         if parts.len() >= MAX_PARTS {
@@ -243,6 +245,11 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
                 "MuseScore staff {id} must contain 1–{MAX_MEASURES} measures."
             ));
         }
+        let mut annotations = Annotations::default();
+        let source_staff = id
+            .parse::<u32>()
+            .map_err(|_| "MuseScore staff id must be numeric.")?;
+        let mut annotation_mapping = BTreeMap::new();
         let mut lanes: BTreeMap<usize, Vec<Measure>> = BTreeMap::new();
         let mut clef = info.clef;
         let mut velocities = BTreeMap::new();
@@ -426,6 +433,7 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
                                 tied = Some(outgoing);
                                 if child(*note, "Events").is_some() || child(*note, "velocity").is_some() || child(*note, "tuning").is_some() { warnings.add("Custom per-note playback events, tuning, and velocity overrides are not retained; written dynamics are used."); }
                             }
+                            annotations.muse(item,SourceAnchor{staff:source_staff,voice:voice_index.to_string(),measure:measure_index,tick:cursor as u32+pickup_shift},division,&mut warnings)?;
                             let (staccato, articulations) = read_articulations(item, &mut warnings);
                             if let Some(duration) = rhythm {
                                 push_rhythmic_event(&mut notes, Note { start: cursor as u32 + pickup_shift,
@@ -436,14 +444,16 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
                                     .map(|()| super::musicxml::decorate_split_event(&mut notes[first_piece..], articulations, &mut warnings))
                             }.map_err(|e| format!("{context}: {e}"))?;
                             cursor += i64::from(ticks);
-                            if item.descendants().any(|n| n.has_tag_name("Lyrics") || n.has_tag_name("Ornament") || n.has_tag_name("Tremolo")) { warnings.add("Lyrics, ornaments, and tremolo notation are not retained in the editable score."); }
+                            if item.descendants().any(|n| n.has_tag_name("Ornament") || n.has_tag_name("Tremolo")) { warnings.add("Ornaments and tremolo notation are not retained in the editable score."); }
                             if number::<i16>(item, "staffMove")?.unwrap_or(0) != 0 { warnings.add("Cross-staff notes remain on their source staff; sounding pitches are preserved."); }
                         }
-                        "Spanner" => { if item.attribute("type") != Some("Tie") { warnings.add("Slurs, hairpins, pedals, and other expression lines are not retained."); } }
+                        "Slur" | "endSpanner" => annotations.muse_spanner(item,SourceAnchor{staff:source_staff,voice:voice_index.to_string(),measure:measure_index,tick:cursor.try_into().map_err(|_|"Invalid MuseScore slur location.")?},&mut warnings)?,
+                        "Spanner" if item.attribute("type")==Some("Slur") => annotations.muse_spanner(item,SourceAnchor{staff:source_staff,voice:voice_index.to_string(),measure:measure_index,tick:cursor.try_into().map_err(|_|"Invalid MuseScore slur location.")?},&mut warnings)?,
+                        "Spanner" => { if item.attribute("type") != Some("Tie") && item.attribute("type") != Some("Volta") { warnings.add("Hairpins, pedals, and other expression lines are not retained."); } }
                         "InstrumentChange" | "StaffState" => warnings.add("Instrument changes use the staff's initial instrument for playback."),
                         "Harmony" | "FiguredBass" => warnings.add("Chord symbols and figured bass are not retained in the editable score."),
                         "RepeatMeasure" | "MeasureRepeat" => return Err("Measure-repeat shorthand is not supported yet. Expand those measures before importing.".into()),
-                        "startRepeat" | "endRepeat" | "Jump" | "Marker" => warnings.add("Repeats, jumps, and alternate endings are imported in written order and play once."),
+
                         "SystemText" if child(item, "swing").is_some() => warnings.add("Swing playback settings are not retained; notes use their written durations."),
                         _ => (),
                     }
@@ -465,9 +475,6 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
                         .notes = notes;
                 }
             }
-            if child(*measure, "startRepeat").is_some() || child(*measure, "endRepeat").is_some() {
-                warnings.add("Repeats, jumps, and alternate endings are imported in written order and play once.");
-            }
             source_start = source_start
                 .checked_add(actual_ticks)
                 .ok_or("MuseScore measure position overflowed.")?;
@@ -475,11 +482,34 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
         if lanes.is_empty() {
             lanes.insert(0, vec![Measure::default(); measures.len()]);
         }
+        let repeat_map = crate::repeats::parse_musescore(
+            staff,
+            measures.len(),
+            division,
+            score.measure_ticks(),
+        )?;
+        if !repeat_map.is_empty() {
+            if !score.notation.repeats.is_empty() && score.notation.repeats != repeat_map {
+                return Err("MuseScore staves disagree on repeat navigation.".into());
+            }
+            score.notation.repeats = repeat_map;
+        }
+        let navigation = crate::repeats::parse_musescore_navigation(staff, measures.len())?;
+        if !navigation.is_empty() {
+            if !score.notation.navigation.is_empty() && score.notation.navigation != navigation {
+                return Err("MuseScore staves disagree on navigation instructions.".into());
+            }
+            score.notation.navigation = navigation;
+        }
         let mut combined = vec![Measure::default(); measures.len()];
         if lanes.len() > 1 {
             warnings.add("Independent MuseScore voices are preserved as rhythmic layers on their source staff.");
         }
         for (voice, measures) in lanes {
+            annotation_mapping.insert(
+                (source_staff, voice.to_string()),
+                (parts.len(), voice as u8),
+            );
             if voice > 3 {
                 return Err("MuseScore staff has more than four independent voices.".into());
             }
@@ -511,12 +541,18 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
             muted: info.muted,
             solo: false,
         });
+        annotation_sets.push((annotations, annotation_mapping));
     }
     if initial_tempo.is_none() {
         // MuseScore's documented default when a score has no tempo marking:
         // https://handbook.musescore.org/text/tempo-markings
         warnings.add("No explicit tempo was found; playback uses MuseScore's default of 120 quarter notes per minute. Set the tempo to match your intended performance.");
     }
+    score.parts = parts;
+    for (annotations, mapping) in annotation_sets {
+        annotations.finish(&mut score, &mapping, &mut warnings)?;
+    }
+    let parts = std::mem::take(&mut score.parts);
     finish_parts(score, parts, warnings)
 }
 
@@ -607,7 +643,7 @@ fn event_ticks(node: Node<'_, '_>, measure_ticks: u32) -> Result<u32, String> {
     Ok(numerator / divisor)
 }
 
-fn fraction_ticks(fraction: &str) -> Result<i64, String> {
+pub(super) fn fraction_ticks(fraction: &str) -> Result<i64, String> {
     let (numerator, denominator) = fraction
         .trim()
         .split_once('/')

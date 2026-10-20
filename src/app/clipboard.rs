@@ -9,18 +9,32 @@ const MAX_CLIPBOARD_BYTES: usize = 16 * 1024;
 struct ClipboardEvent {
     version: u8,
     note: Note,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    lyrics: Vec<encore::lyrics::Lyric>,
 }
 
+#[cfg(test)]
 fn encode_event(note: Note) -> Result<String, String> {
-    let data = serde_json::to_string(&ClipboardEvent { version: 1, note })
-        .map_err(|error| format!("Could not copy event: {error}"))?;
+    encode_annotated_event(note, Vec::new())
+}
+
+fn encode_annotated_event(
+    note: Note,
+    lyrics: Vec<encore::lyrics::Lyric>,
+) -> Result<String, String> {
+    let data = serde_json::to_string(&ClipboardEvent {
+        version: if lyrics.is_empty() { 1 } else { 2 },
+        note,
+        lyrics,
+    })
+    .map_err(|error| format!("Could not copy event: {error}"))?;
     if data.len() + CLIPBOARD_MARKER.len() > MAX_CLIPBOARD_BYTES {
         return Err("The selected event exceeds the clipboard size limit.".into());
     }
     Ok(format!("{CLIPBOARD_MARKER}{data}"))
 }
 
-fn decode_event(text: &str) -> Result<Note, String> {
+fn decode_event(text: &str) -> Result<ClipboardEvent, String> {
     if text.len() > MAX_CLIPBOARD_BYTES {
         return Err("Clipboard event exceeds 16 KiB.".into());
     }
@@ -29,10 +43,10 @@ fn decode_event(text: &str) -> Result<Note, String> {
         .ok_or("Copy a single note, chord, or rest in Encore before pasting.")?;
     let event: ClipboardEvent = serde_json::from_str(data)
         .map_err(|error| format!("Invalid Encore clipboard event: {error}"))?;
-    if event.version != 1 {
+    if ![1, 2].contains(&event.version) {
         return Err("This clipboard event requires a different Encore version.".into());
     }
-    Ok(event.note)
+    Ok(event)
 }
 
 impl EncoreApp {
@@ -52,7 +66,20 @@ impl EncoreApp {
             self.status = "The selected event is no longer available.".into();
             return;
         };
-        let text = match encode_event(note.clone()) {
+        let anchor = encore::document::Anchor::from_selection(&self.score, selection);
+        let lyrics = self
+            .score
+            .notation
+            .lyrics
+            .iter()
+            .filter(|lyric| Some(lyric.anchor) == anchor)
+            .cloned()
+            .map(|mut lyric| {
+                lyric.extend_to = None;
+                lyric
+            })
+            .collect();
+        let text = match encode_annotated_event(note.clone(), lyrics) {
             Ok(text) => text,
             Err(error) => {
                 self.status = error;
@@ -61,6 +88,9 @@ impl EncoreApp {
         };
         if cut {
             let mut candidate = self.score.clone();
+            if let Some(anchor) = encore::document::Anchor::from_selection(&candidate, selection) {
+                encore::document::remove_anchor(&mut candidate, &anchor);
+            }
             candidate.parts[selection.part].measures[selection.measure]
                 .notes
                 .remove(selection.note);
@@ -88,7 +118,9 @@ impl EncoreApp {
     }
 
     fn try_paste_event(&mut self, text: &str) -> Result<(), String> {
-        let mut note = decode_event(text)?;
+        let ClipboardEvent {
+            mut note, lyrics, ..
+        } = decode_event(text)?;
         note.start = self.cursor_tick;
         note.layer = self.active_layer;
         let end = note
@@ -121,6 +153,17 @@ impl EncoreApp {
             .notes
             .partition_point(|other| (other.start, other.layer) < (note.start, note.layer));
         measure.notes.insert(index, note);
+        let anchor = encore::document::Anchor {
+            part: self.active_part,
+            measure: self.cursor_measure,
+            tick: self.cursor_tick,
+            layer: self.active_layer,
+        };
+        for mut lyric in lyrics {
+            lyric.anchor = anchor;
+            lyric.extend_to = None;
+            encore::lyrics::assign(&mut candidate, lyric)?;
+        }
         candidate.validate()?;
         // Commit only after the complete score validates. A failed paste keeps
         // the score, selection, cursor, and undo history exactly as they were.
@@ -137,7 +180,9 @@ impl EncoreApp {
             .copied()
         {
             self.entry_pitch = pitch;
-            self.octave = pitch.octave;
+            self.octave = self
+                .entry_written_pitch(pitch)
+                .map_or(pitch.octave, |written| written.octave);
         }
         self.cursor_tick = end;
         if end == bar_ticks && self.cursor_measure + 1 < self.score.measure_count() {
@@ -296,16 +341,17 @@ mod tests {
     fn malformed_clipboard_versions_and_invalid_targets_are_atomic() {
         let mut app = app();
         let original = note();
-        let version_two = format!(
+        let unsupported_version = format!(
             "{CLIPBOARD_MARKER}{}",
             serde_json::to_string(&ClipboardEvent {
-                version: 2,
+                version: 99,
                 note: original.clone(),
+                lyrics: Vec::new(),
             })
             .unwrap()
         );
         let before = app.score.clone();
-        app.paste_selection(&version_two);
+        app.paste_selection(&unsupported_version);
         assert!(app.status.contains("different Encore version"));
         assert_eq!(app.score, before);
         let text = encode_event(original).unwrap();
@@ -360,5 +406,41 @@ mod tests {
         assert_eq!(app.cursor_tick, 960);
         assert!(app.selected.is_some());
         assert!(ctx.output(|output| output.commands.is_empty()));
+    }
+
+    #[test]
+    fn cutting_and_pasting_a_syllable_reanchors_it_without_a_dangling_melisma() {
+        let ctx = egui::Context::default();
+        let score: Score =
+            serde_json::from_str(include_str!("../../examples/Cantabile.encore")).unwrap();
+        let mut app = EncoreApp::from_score(score, None, "Ready".into());
+        app.selected = Some(Selection {
+            part: 0,
+            measure: 2,
+            note: 2,
+        });
+        app.copy_selection(&ctx, true);
+        assert!(app.status.starts_with("Cut one"));
+        let copied = copied_text(&ctx);
+        app.active_part = 1;
+        app.cursor_measure = 7;
+        app.cursor_tick = 480;
+        app.duration = Duration::Quarter;
+        // Open a free onset in this destination staff.
+        app.score.parts[1].measures[7].notes.clear();
+        app.paste_selection(&copied);
+        let lyrics = app
+            .score
+            .notation
+            .lyrics
+            .iter()
+            .filter(|lyric| lyric.anchor.part == 1)
+            .collect::<Vec<_>>();
+        assert_eq!(lyrics.len(), 3);
+        assert!(lyrics.iter().all(|lyric| lyric.anchor.measure == 7
+            && lyric.anchor.tick == 480
+            && lyric.extend_to.is_none()));
+        assert!(lyrics.iter().any(|lyric| lyric.text == "Shine"));
+        app.score.validate().unwrap();
     }
 }

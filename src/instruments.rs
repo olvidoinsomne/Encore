@@ -424,6 +424,7 @@ pub fn audition_phrase(instrument: Instrument, velocity: u8) -> Score {
         time_numerator: 4,
         time_denominator: 4,
         key_fifths: 0,
+        notation: Default::default(),
         parts: vec![Part {
             name: instrument.name().into(),
             instrument,

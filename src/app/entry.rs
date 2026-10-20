@@ -2,6 +2,69 @@
 use super::*;
 
 impl EncoreApp {
+    /// The caret stores a concert pitch; its octave control is displayed in the
+    /// active part's written pitch. Keep this conversion out of source notation.
+    pub(super) fn entry_transposition(&self) -> encore::parts::Transposition {
+        if self.part_view {
+            let definitions = encore::parts::definitions(&self.score);
+            definitions
+                .get(self.selected_linked_part)
+                .or_else(|| definitions.first())
+                .map(|part| part.transposition)
+                .unwrap_or_default()
+        } else {
+            encore::parts::Transposition::CONCERT
+        }
+    }
+
+    pub(super) fn entry_written_pitch(&self, pitch: Pitch) -> Result<Pitch, String> {
+        self.entry_transposition().written_pitch(pitch)
+    }
+
+    fn written_key(&self) -> Result<i8, String> {
+        self.entry_transposition()
+            .written_key(self.score.key_fifths)
+    }
+
+    fn set_pitch_accidental(&mut self, value: i8, relative: bool) {
+        let Some(index) = self.active_pitch_index() else {
+            self.accidental = Some(if relative {
+                self.accidental
+                    .unwrap_or(0)
+                    .saturating_add(value)
+                    .clamp(-2, 2)
+            } else {
+                value.clamp(-2, 2)
+            });
+            return;
+        };
+        let source = self.selected_entry().unwrap().pitches[index];
+        let result = self.entry_written_pitch(source).and_then(|mut written| {
+            written.alter = if relative {
+                written.alter.saturating_add(value)
+            } else {
+                value
+            };
+            if !(-2..=2).contains(&written.alter) {
+                return Err(
+                    "Written accidentals must be within double-flat and double-sharp.".into(),
+                );
+            }
+            self.entry_transposition()
+                .concert_pitch(written)
+                .map(|source| (source, written))
+        });
+        match result {
+            Ok((source, written)) => {
+                if self.edit_entry(|note| note.pitches[index] = source) {
+                    self.entry_pitch = source;
+                    self.octave = written.octave;
+                }
+            }
+            Err(error) => self.status = format!("Cannot change written pitch: {error}"),
+        }
+    }
+
     pub(super) fn entry_ticks(&self) -> u32 {
         Note {
             start: 0,
@@ -21,6 +84,7 @@ impl EncoreApp {
 
     fn edit_entry(&mut self, edit: impl FnOnce(&mut Note)) -> bool {
         let Some(s) = self.selected else { return false };
+        let old_anchor = encore::document::Anchor::from_selection(&self.score, s);
         let bar_ticks = self.score.measure_ticks();
         let old_end = self
             .selected_entry()
@@ -37,6 +101,10 @@ impl EncoreApp {
             return false;
         };
         edit(note);
+        let now_rest = note.pitches.is_empty();
+        if now_rest {
+            note.tied = false;
+        }
         let new_end = s.measure as u32 * bar_ticks + note.start + note.ticks();
         // Ordinary entry extends a score when the caret fills its last bar.
         // Resizing the entry just typed must preserve that continuation, too.
@@ -46,6 +114,9 @@ impl EncoreApp {
             && candidate.measure_count() < encore::model::MAX_MEASURES
         {
             candidate.add_measures(1);
+        }
+        if now_rest && let Some(anchor) = old_anchor {
+            encore::document::remove_anchor(&mut candidate, &anchor);
         }
         if let Err(error) = candidate.validate() {
             self.status = format!("Cannot change entry: {error}");
@@ -84,24 +155,52 @@ impl EncoreApp {
     }
 
     fn enter_caret(&mut self, rest: bool, chord: bool) {
-        self.entry_pitch.octave = self.octave;
+        let transposition = self.entry_transposition();
+        let written = match transposition.written_pitch(self.entry_pitch) {
+            Ok(mut written) => {
+                written.octave = self.octave;
+                if let Some(alter) = self.accidental {
+                    written.alter = alter;
+                }
+                written
+            }
+            Err(error) => {
+                self.status = error;
+                return;
+            }
+        };
+        let source = match transposition.concert_pitch(written) {
+            Ok(source) => source,
+            Err(error) => {
+                self.status = error;
+                return;
+            }
+        };
         let previous_rest = self.rest;
+        let previous_accidental = self.accidental.take();
         self.rest = rest;
         let (part, measure, start) = if chord {
             self.selected
-                .map(|s| {
+                .map(|selection| {
                     (
-                        s.part,
-                        s.measure,
-                        self.score.parts[s.part].measures[s.measure].notes[s.note].start,
+                        selection.part,
+                        selection.measure,
+                        self.score.parts[selection.part].measures[selection.measure].notes
+                            [selection.note]
+                            .start,
                     )
                 })
                 .unwrap_or((self.active_part, self.cursor_measure, self.cursor_tick))
         } else {
             (self.active_part, self.cursor_measure, self.cursor_tick)
         };
-        self.enter_note(part, measure, start, self.entry_pitch, chord);
+        self.entry_pitch = source;
+        self.enter_note(part, measure, start, source, chord);
         self.rest = previous_rest;
+        self.accidental = previous_accidental;
+        if let Ok(written) = transposition.written_pitch(self.entry_pitch) {
+            self.octave = written.octave;
+        }
     }
 
     fn navigate_entry(&mut self, direction: i8) {
@@ -147,7 +246,9 @@ impl EncoreApp {
                 .first()
             {
                 self.entry_pitch = *pitch;
-                self.octave = pitch.octave;
+                self.octave = self
+                    .entry_written_pitch(*pitch)
+                    .map_or(pitch.octave, |written| written.octave);
             }
         } else if direction > 0
             && let Some(n) = self.selected_entry()
@@ -165,41 +266,55 @@ impl EncoreApp {
     }
 
     fn change_entry_pitch(&mut self, steps: i32, octave: bool) {
-        let fifths = self.score.key_fifths;
-        let move_pitch = |pitch: Pitch| {
-            if octave {
-                Pitch {
-                    octave: pitch.octave.saturating_add(steps as i8),
-                    ..pitch
-                }
-            } else {
-                Pitch::from_staff_step(pitch.staff_step() + steps, fifths)
+        let fifths = match self.written_key() {
+            Ok(fifths) => fifths,
+            Err(error) => {
+                self.status = error;
+                return;
             }
         };
         let index = self.active_pitch_index();
         let base = self
             .selected_entry()
             .filter(|_| self.entry_profile == EntryProfile::SimpleLaptop)
-            .and_then(|n| index.map(|i| n.pitches[i]))
+            .and_then(|note| index.map(|index| note.pitches[index]))
             .unwrap_or(self.entry_pitch);
-        let caret = move_pitch(base);
-        let raw =
-            (i32::from(caret.octave) + 1) * 12 + caret.step.semitone() + i32::from(caret.alter);
-        if !(0..=127).contains(&raw) {
-            self.status = "Pitch is outside the MIDI range.".into();
-            return;
+        let mut written = match self.entry_written_pitch(base) {
+            Ok(pitch) => pitch,
+            Err(error) => {
+                self.status = error;
+                return;
+            }
+        };
+        if self.entry_profile == EntryProfile::Speedy || self.selected.is_none() {
+            written.octave = self.octave;
         }
+        let caret = if octave {
+            Pitch {
+                octave: written.octave.saturating_add(steps as i8),
+                ..written
+            }
+        } else {
+            Pitch::from_staff_step(written.staff_step() + steps, fifths)
+        };
+        let source = match self.entry_transposition().concert_pitch(caret) {
+            Ok(pitch) => pitch,
+            Err(error) => {
+                self.status = error;
+                return;
+            }
+        };
         if self.entry_profile == EntryProfile::SimpleLaptop && self.selected.is_some() {
-            if self.edit_entry(|n| {
+            if self.edit_entry(|note| {
                 if let Some(index) = index {
-                    n.pitches[index] = move_pitch(n.pitches[index]);
+                    note.pitches[index] = source;
                 }
             }) {
-                self.entry_pitch = caret;
+                self.entry_pitch = source;
                 self.octave = caret.octave;
             }
         } else {
-            self.entry_pitch = caret;
+            self.entry_pitch = source;
             self.octave = caret.octave;
         }
     }
@@ -316,28 +431,50 @@ impl EncoreApp {
                 }
             }
             Pitch(step, chord) => {
-                let pitch = encore::model::Pitch::from_staff_step(
+                let fifths = match self.written_key() {
+                    Ok(fifths) => fifths,
+                    Err(error) => {
+                        self.status = error;
+                        return;
+                    }
+                };
+                let mut written = encore::model::Pitch::from_staff_step(
                     i32::from(self.octave) * 7 + step.index(),
-                    self.score.key_fifths,
+                    fifths,
                 );
-                let at_selected = self.selected.is_some_and(|s| {
-                    s.part == self.active_part
-                        && s.measure == self.cursor_measure
-                        && self.score.parts[s.part].measures[s.measure].notes[s.note].layer
+                if let Some(alter) = self.accidental {
+                    written.alter = alter;
+                }
+                let pitch = match self.entry_transposition().concert_pitch(written) {
+                    Ok(pitch) => pitch,
+                    Err(error) => {
+                        self.status = error;
+                        return;
+                    }
+                };
+                let at_selected = self.selected.is_some_and(|selection| {
+                    selection.part == self.active_part
+                        && selection.measure == self.cursor_measure
+                        && self.score.parts[selection.part].measures[selection.measure].notes
+                            [selection.note]
+                            .layer
                             == self.active_layer
-                        && self.score.parts[s.part].measures[s.measure].notes[s.note].start
+                        && self.score.parts[selection.part].measures[selection.measure].notes
+                            [selection.note]
+                            .start
                             == self.cursor_tick
                 });
                 if !chord && at_selected {
                     let index = self.active_pitch_index();
-                    if self.edit_entry(|n| {
-                        if let Some(i) = index {
-                            n.pitches[i] = pitch;
+                    if self.edit_entry(|note| {
+                        if let Some(index) = index {
+                            note.pitches[index] = pitch;
                         } else {
-                            n.pitches.push(pitch);
+                            note.pitches.push(pitch);
                         }
                     }) {
                         self.entry_pitch = pitch;
+                        self.octave = written.octave;
                     }
                 } else {
                     self.entry_pitch = pitch;
@@ -362,7 +499,9 @@ impl EncoreApp {
                     let end = note.start + note.ticks();
                     if let Some(pitch) = note.pitches.first().copied() {
                         self.entry_pitch = pitch;
-                        self.octave = pitch.octave;
+                        self.octave = self
+                            .entry_written_pitch(pitch)
+                            .map_or(pitch.octave, |written| written.octave);
                     }
                     self.cursor_tick = end;
                     if end == self.score.measure_ticks()
@@ -381,17 +520,28 @@ impl EncoreApp {
             Interval(interval) => {
                 let Some(base) = self
                     .active_pitch_index()
-                    .and_then(|i| self.selected_entry().map(|n| n.pitches[i]))
+                    .and_then(|index| self.selected_entry().map(|note| note.pitches[index]))
                 else {
                     return;
                 };
-                let steps = i32::from(interval.signum()) * (i32::from(interval.abs()) - 1);
-                self.entry_pitch = encore::model::Pitch::from_staff_step(
-                    base.staff_step() + steps,
-                    self.score.key_fifths,
-                );
-                self.octave = self.entry_pitch.octave;
-                self.enter_caret(false, true);
+                let result = self.entry_written_pitch(base).and_then(|written| {
+                    let steps = i32::from(interval.signum()) * (i32::from(interval.abs()) - 1);
+                    let pitch = encore::model::Pitch::from_staff_step(
+                        written.staff_step() + steps,
+                        self.written_key()?,
+                    );
+                    self.entry_transposition()
+                        .concert_pitch(pitch)
+                        .map(|source| (source, pitch.octave))
+                });
+                match result {
+                    Ok((source, octave)) => {
+                        self.entry_pitch = source;
+                        self.octave = octave;
+                        self.enter_caret(false, true);
+                    }
+                    Err(error) => self.status = error,
+                }
             }
             SpeedyRest(duration) => {
                 self.duration = duration;
@@ -449,38 +599,8 @@ impl EncoreApp {
                     ) = location;
                 }
             }
-            Accidental(change) => {
-                if let Some(index) = self.active_pitch_index() {
-                    if self.edit_entry(|n| {
-                        let p = &mut n.pitches[index];
-                        p.alter = if change == 0 {
-                            0
-                        } else {
-                            p.alter.saturating_add(change)
-                        };
-                    }) {
-                        self.entry_pitch = self.selected_entry().unwrap().pitches[index];
-                        self.octave = self.entry_pitch.octave;
-                    }
-                } else {
-                    self.accidental = Some(
-                        if change == 0 {
-                            0
-                        } else {
-                            self.accidental.unwrap_or(0) + change
-                        }
-                        .clamp(-2, 2),
-                    );
-                }
-            }
-            SetAccidental(alter) => {
-                if let Some(index) = self.active_pitch_index()
-                    && self.edit_entry(|n| n.pitches[index].alter = alter)
-                {
-                    self.entry_pitch = self.selected_entry().unwrap().pitches[index];
-                    self.octave = self.entry_pitch.octave;
-                }
-            }
+            Accidental(change) => self.set_pitch_accidental(change, change != 0),
+            SetAccidental(alter) => self.set_pitch_accidental(alter, false),
             Boundary(direction) => {
                 let measure = &self.score.parts[self.active_part].measures[self.cursor_measure];
                 if direction < 0 {
@@ -523,9 +643,27 @@ impl EncoreApp {
                 self.selected = None;
             }
             Staff(direction) => {
-                self.active_part = (self.active_part as isize + isize::from(direction))
-                    .clamp(0, self.score.parts.len() as isize - 1)
-                    as usize;
+                if self.part_view {
+                    let definitions = encore::parts::definitions(&self.score);
+                    if let Some(part) = definitions
+                        .get(self.selected_linked_part)
+                        .or_else(|| definitions.first())
+                    {
+                        let current = part
+                            .staves
+                            .iter()
+                            .position(|staff| *staff == self.active_part)
+                            .unwrap_or(0);
+                        let next = (current as isize + isize::from(direction))
+                            .clamp(0, part.staves.len() as isize - 1)
+                            as usize;
+                        self.active_part = part.staves[next];
+                    }
+                } else {
+                    self.active_part = (self.active_part as isize + isize::from(direction))
+                        .clamp(0, self.score.parts.len() as isize - 1)
+                        as usize;
+                }
                 self.selected = None;
             }
             Delete => self.delete_selected(),
@@ -555,6 +693,138 @@ impl EncoreApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn clarinet() -> EncoreApp {
+        let mut score = Score::blank();
+        score.parts.truncate(1);
+        score.parts[0].instrument = Instrument::Clarinet;
+        score.parts[0].name = "Clarinet in B♭".into();
+        let mut app = EncoreApp::from_score(score, None, "Ready".into());
+        app.part_view = true;
+        app
+    }
+
+    #[test]
+    fn linked_clarinet_letters_and_chord_intervals_store_concert_pitches() {
+        let mut app = clarinet();
+        app.apply_entry_command(EntryCommand::Pitch(Step::D, false));
+        assert_eq!(
+            app.score.parts[0].measures[0].notes[0].pitches[0].midi(),
+            60
+        );
+        assert_eq!(app.entry_pitch.midi(), 60);
+        assert_eq!(app.octave, 4);
+        app.apply_entry_command(EntryCommand::Interval(3));
+        assert_eq!(
+            app.score.parts[0].measures[0].notes[0]
+                .pitches
+                .iter()
+                .map(|pitch| pitch.midi())
+                .collect::<Vec<_>>(),
+            vec![60, 64]
+        );
+        let projection = app.selected_part_projection().unwrap().unwrap();
+        assert_eq!(
+            projection.score.parts[0].measures[0].notes[0]
+                .pitches
+                .iter()
+                .map(|pitch| pitch.midi())
+                .collect::<Vec<_>>(),
+            vec![62, 66]
+        );
+        app.score.validate().unwrap();
+    }
+
+    #[test]
+    fn linked_clarinet_natural_and_diatonic_edit_apply_to_written_note_name() {
+        let mut app = clarinet();
+        app.apply_entry_command(EntryCommand::Pitch(Step::F, false));
+        assert_eq!(
+            app.score.parts[0].measures[0].notes[0].pitches[0].midi(),
+            64
+        );
+        app.apply_entry_command(EntryCommand::SetAccidental(0));
+        assert_eq!(
+            app.score.parts[0].measures[0].notes[0].pitches[0],
+            encore::model::Pitch {
+                step: Step::E,
+                octave: 4,
+                alter: -1
+            }
+        );
+        let written = app.entry_written_pitch(app.entry_pitch).unwrap();
+        assert_eq!((written.step, written.alter), (Step::F, 0));
+        app.apply_entry_command(EntryCommand::Diatonic(1));
+        assert_eq!(
+            app.score.parts[0].measures[0].notes[0].pitches[0].midi(),
+            65
+        );
+        assert_eq!(
+            app.entry_written_pitch(app.entry_pitch).unwrap().step,
+            Step::G
+        );
+        app.apply_entry_command(EntryCommand::Octave(1));
+        assert_eq!(
+            app.score.parts[0].measures[0].notes[0].pitches[0].midi(),
+            77
+        );
+        assert_eq!(app.octave, 5);
+        app.score.validate().unwrap();
+    }
+
+    #[test]
+    fn linked_speedy_caret_and_pending_accidental_convert_only_once() {
+        let mut app = clarinet();
+        app.entry_profile = EntryProfile::Speedy;
+        app.entry_pitch = encore::model::Pitch::from_midi(60);
+        app.octave = 5;
+        app.accidental = Some(1);
+        app.apply_entry_command(EntryCommand::SpeedyDuration(Duration::Quarter));
+        assert_eq!(
+            app.score.parts[0].measures[0].notes[0].pitches[0].midi(),
+            73
+        );
+        assert_eq!(app.octave, 5);
+        assert_eq!(app.accidental, Some(1));
+        app.score.validate().unwrap();
+    }
+
+    #[test]
+    fn octave_transposing_part_navigation_keeps_written_octave() {
+        let mut app = clarinet();
+        app.score.parts[0].instrument = Instrument::DoubleBass;
+        app.apply_entry_command(EntryCommand::Pitch(Step::C, false));
+        app.apply_entry_command(EntryCommand::Pitch(Step::D, false));
+        assert_eq!(
+            app.score.parts[0].measures[0].notes[0].pitches[0].midi(),
+            48
+        );
+        app.apply_entry_command(EntryCommand::Navigate(-1));
+        assert_eq!(app.entry_pitch.midi(), 48);
+        assert_eq!(app.octave, 4);
+    }
+
+    #[test]
+    fn rest_conversion_clears_anchored_lyrics_and_slurs_in_one_edit() {
+        let mut app = clarinet();
+        app.apply_entry_command(EntryCommand::Pitch(Step::D, false));
+        app.apply_entry_command(EntryCommand::Pitch(Step::E, false));
+        let start = encore::document::Anchor {
+            part: 0,
+            measure: 0,
+            tick: 0,
+            layer: 0,
+        };
+        let end = encore::document::Anchor { tick: 480, ..start };
+        encore::lyrics::assign(&mut app.score, encore::lyrics::Lyric::new(start, "Sing")).unwrap();
+        encore::slurs::add(&mut app.score, encore::slurs::Slur::new(start, end)).unwrap();
+        app.apply_entry_command(EntryCommand::Navigate(-1));
+        app.apply_entry_command(EntryCommand::ToggleRest);
+        assert!(app.score.parts[0].measures[0].notes[0].pitches.is_empty());
+        assert!(app.score.notation.lyrics.is_empty());
+        assert!(app.score.notation.slurs.is_empty());
+        app.score.validate().unwrap();
+    }
 
     #[test]
     fn simple_enter_activates_caret_without_replacing_a_selected_chord() {

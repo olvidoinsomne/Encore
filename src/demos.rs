@@ -109,6 +109,7 @@ pub fn carol_of_the_bells() -> Score {
         time_denominator: 4,
         key_fifths: 1,
         parts,
+        notation: Default::default(),
     };
     score.parts[HORN].clef = Clef::Treble;
 

@@ -837,6 +837,8 @@ pub struct Score {
     pub time_denominator: u8,
     pub key_fifths: i8,
     pub parts: Vec<Part>,
+    #[serde(default, skip_serializing_if = "crate::document::Notation::is_empty")]
+    pub notation: crate::document::Notation,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -865,6 +867,7 @@ impl Score {
             time_denominator: 4,
             key_fifths: 0,
             parts: vec![right, left],
+            notation: Default::default(),
         }
     }
     pub fn demo() -> Self {
@@ -1173,7 +1176,10 @@ impl Score {
                 }
             }
         }
-        Ok(())
+        crate::document::validate(self)
+    }
+    pub fn playback_order(&self) -> Result<Vec<usize>, String> {
+        crate::repeats::playback_order(self)
     }
     pub fn load(path: &Path) -> Result<Self, String> {
         let file = fs::File::open(path).map_err(|error| format!("Cannot open score: {error}"))?;

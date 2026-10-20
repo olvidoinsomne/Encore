@@ -6,6 +6,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 mod articulations;
+mod lyrics;
+mod repeats;
+mod slurs;
 
 const INK: [u8; 3] = [29, 34, 42];
 const STAFF: [u8; 3] = [75, 82, 92];
@@ -20,6 +23,7 @@ pub struct EngravingOptions {
     /// Absolute position measured in quarter-note beats.
     pub playhead: Option<f32>,
     pub part_filter: Option<usize>,
+    pub layout: Option<crate::parts::PartLayout>,
 }
 
 #[derive(Clone, Debug)]
@@ -137,13 +141,30 @@ fn temporal_spacing(score: &Score, parts: &[usize], measure: usize) -> Arc<[(f32
             }
         }
     }
+    let mut lyric_widths = BTreeMap::<u32, f32>::new();
+    for lyric in score
+        .notation
+        .lyrics
+        .iter()
+        .filter(|l| l.anchor.measure == measure && parts.contains(&l.anchor.part))
+    {
+        let width = lyrics::width(&lyric.text, 13.0);
+        lyric_widths
+            .entry(lyric.anchor.tick)
+            .and_modify(|w| *w = w.max(width))
+            .or_insert(width);
+    }
     let mut anchors = Vec::with_capacity(times.len());
     let mut cumulative = 0.0;
     let mut previous = 0;
     for time in times {
         if time > 0 {
             let quarters = (time - previous) as f32 / PPQ as f32;
-            cumulative += 16.0 + 12.0 * quarters.sqrt();
+            let lyric_space = (lyric_widths.get(&previous).copied().unwrap_or(0.0)
+                + lyric_widths.get(&time).copied().unwrap_or(0.0))
+                * 0.5
+                + 8.0;
+            cumulative += (16.0 + 12.0 * quarters.sqrt()).max(lyric_space);
         }
         anchors.push((time as f32, cumulative));
         previous = time;
@@ -258,18 +279,43 @@ fn bottom_step(clef: Clef) -> i32 {
 fn pitch_y(pitch: &Pitch, clef: Clef, y: f32) -> f32 {
     y + 40.0 - (pitch.staff_step() - bottom_step(clef)) as f32 * 5.0
 }
-fn centered_text(page: &mut Page, center: f32, y: f32, text: &str, size: f32, serif: bool) {
+fn music_text_face() -> ttf_parser::Face<'static> {
+    ttf_parser::Face::parse(include_bytes!("../assets/Music.ttf"), 0)
+        .expect("Encore's bundled music text font is valid")
+}
+fn text_glyph_face<'a>(
+    face: &'a ttf_parser::Face<'static>,
+    music: &'a ttf_parser::Face<'static>,
+    c: char,
+) -> &'a ttf_parser::Face<'static> {
+    if (matches!(c, '♭' | '♯' | '♮') || face.glyph_index(c).is_none())
+        && music.glyph_index(c).is_some()
+    {
+        music
+    } else {
+        face
+    }
+}
+fn text_width(text: &str, size: f32, serif: bool) -> f32 {
     let face = text_face(serif);
-    let scale = size / face.units_per_em() as f32;
-    let width = text
-        .chars()
+    let music = music_text_face();
+    text.chars()
         .map(|c| {
-            face.glyph_index(c)
-                .and_then(|g| face.glyph_hor_advance(g))
-                .unwrap_or(face.units_per_em() / 2) as f32
-                * scale
+            if c == '‿' {
+                return size * 0.55;
+            }
+            let actual = text_glyph_face(&face, &music, c);
+            actual
+                .glyph_index(c)
+                .and_then(|g| actual.glyph_hor_advance(g))
+                .unwrap_or(actual.units_per_em() / 2) as f32
+                * size
+                / actual.units_per_em() as f32
         })
-        .sum::<f32>();
+        .sum()
+}
+fn centered_text(page: &mut Page, center: f32, y: f32, text: &str, size: f32, serif: bool) {
+    let width = text_width(text, size, serif);
     page.text(center - width * 0.5, y, text, size, INK, serif);
 }
 
@@ -281,34 +327,31 @@ pub fn engrave(score: &Score, options: &EngravingOptions) -> Vec<Page> {
         Some(_) => vec![],
         None => (0..score.parts.len()).collect(),
     };
-    let mut pages = vec![Page::new()];
+    let layout = options.layout.unwrap_or_default();
+    let (page_w, page_h) = layout.dimensions();
+    let new_page = || {
+        let mut page = Page::new();
+        page.width = page_w;
+        page.height = page_h;
+        page
+    };
+    let mut pages = vec![new_page()];
     let title = if score.title.trim().is_empty() {
         "Untitled score"
     } else {
         &score.title
     };
-    centered_text(&mut pages[0], PAGE_W * 0.5, 75.0, title, 28.0, true);
+    centered_text(&mut pages[0], page_w * 0.5, 75.0, title, 28.0, true);
     if !score.composer.trim().is_empty() {
-        let face = text_face(true);
-        let width = score
-            .composer
-            .chars()
-            .map(|c| {
-                face.glyph_index(c)
-                    .and_then(|g| face.glyph_hor_advance(g))
-                    .unwrap_or(512) as f32
-            })
-            .sum::<f32>()
-            * 13.0
-            / face.units_per_em() as f32;
-        let cx = 802.0 - width;
+        let width = text_width(&score.composer, 13.0, true);
+        let cx = page_w - 48.0 - width;
         pages[0].text(cx.max(440.0), 111.0, &score.composer, 13.0, INK, true);
     }
     pages[0].text(49.0, 113.0, "ENCORE", 9.0, [116, 126, 140], false);
     if parts.is_empty() {
         centered_text(
             &mut pages[0],
-            PAGE_W * 0.5,
+            page_w * 0.5,
             240.0,
             "Add an instrument to begin your score",
             15.0,
@@ -323,14 +366,14 @@ pub fn engrave(score: &Score, options: &EngravingOptions) -> Vec<Page> {
         .collect::<Vec<_>>();
     let key = score.key_fifths.clamp(-7, 7);
     let left = if parts.len() == 1 { 94.0 } else { 133.0 };
-    let right = 802.0;
+    let right = page_w - 48.0;
     let available = right - left;
     let group_size = 8;
     let mut cursor_y = 180.0;
     let mut measure = 0;
     while measure < count {
         // Give dense passages more horizontal room instead of squeezing glyphs.
-        let mut bars = (count - measure).min(4);
+        let mut bars = (count - measure).min(usize::from(layout.measures_per_system.clamp(1, 8)));
         while bars > 1 {
             let header =
                 49.0 + key.unsigned_abs() as f32 * 7.0 + if measure == 0 { 26.0 } else { 0.0 };
@@ -345,7 +388,10 @@ pub fn engrave(score: &Score, options: &EngravingOptions) -> Vec<Page> {
                 })
                 .max()
                 .unwrap_or(0);
-            if dense as f32 * 15.0 <= cw {
+            let lyric_requirement = (measure..measure + bars)
+                .map(|m| lyrics::horizontal_requirement(score, &parts, m))
+                .fold(0.0, f32::max);
+            if (dense as f32 * 15.0).max(lyric_requirement) <= cw {
                 break;
             }
             bars -= 1;
@@ -354,15 +400,27 @@ pub fn engrave(score: &Score, options: &EngravingOptions) -> Vec<Page> {
         while chunk_start < parts.len() {
             let mut chunk_end = (chunk_start + group_size).min(parts.len());
             let (staff_offsets, system_height) = loop {
-                let result = system_layout(score, &parts[chunk_start..chunk_end], measure, bars);
-                if result.1 <= 910.0 || chunk_end == chunk_start + 1 {
+                let result = system_layout(
+                    score,
+                    &parts[chunk_start..chunk_end],
+                    measure,
+                    bars,
+                    if layout.staff_gap.is_finite() {
+                        layout.staff_gap.clamp(0.0, 80.0)
+                    } else {
+                        0.0
+                    },
+                    available,
+                    &measure_spacing,
+                );
+                if result.1 <= page_h - 190.0 || chunk_end == chunk_start + 1 {
                     break result;
                 }
                 chunk_end -= 1;
             };
             let chunk = &parts[chunk_start..chunk_end];
-            if cursor_y + system_height > 1031.0 {
-                pages.push(Page::new());
+            if cursor_y + system_height > page_h - 69.0 {
+                pages.push(new_page());
                 let last = pages.len() - 1;
                 pages[last].text(49.0, 45.0, title, 12.0, [93, 103, 117], true);
                 cursor_y = 95.0;
@@ -529,10 +587,13 @@ pub fn engrave(score: &Score, options: &EngravingOptions) -> Vec<Page> {
     }
     let page_count = pages.len();
     for (i, page) in pages.iter_mut().enumerate() {
+        slurs::draw(page, score);
+        lyrics::draw(page, score);
+        repeats::draw(page, score);
         centered_text(
             page,
-            PAGE_W * 0.5,
-            1066.0,
+            page_w * 0.5,
+            page_h - 34.0,
             &format!("{} / {}", i + 1, page_count),
             10.0,
             false,
@@ -543,7 +604,15 @@ pub fn engrave(score: &Score, options: &EngravingOptions) -> Vec<Page> {
 
 // Ledger lines and stems must have room between neighboring instruments. A
 // high flute or very low bass therefore expands its own staff, not the glyphs.
-fn system_layout(score: &Score, parts: &[usize], measure: usize, bars: usize) -> (Vec<f32>, f32) {
+fn system_layout(
+    score: &Score,
+    parts: &[usize],
+    measure: usize,
+    bars: usize,
+    staff_gap: f32,
+    available: f32,
+    measure_spacing: &[Arc<[(f32, f32)]>],
+) -> (Vec<f32>, f32) {
     let mut extents = Vec::with_capacity(parts.len());
     for &p in parts {
         let part = &score.parts[p];
@@ -610,12 +679,75 @@ fn system_layout(score: &Score, parts: &[usize], measure: usize, bars: usize) ->
                 }
             }
         }
+        let navigation_present = score
+            .notation
+            .navigation
+            .iter()
+            .any(|mark| mark.measure >= measure && mark.measure < measure + bars);
+        if navigation_present {
+            above = above.max(64.0);
+        }
+        let repeat_clearance = score
+            .notation
+            .repeats
+            .iter()
+            .flat_map(|r| &r.endings)
+            .filter(|e| e.start < measure + bars && e.end >= measure)
+            .count();
+        if repeat_clearance > 0 {
+            above = above.max(38.0 + 17.0 * (repeat_clearance - 1) as f32);
+        }
+        let slur_space = slurs::clearance(score, p, measure, bars);
+        above += slur_space.0;
+        below += slur_space.1 + lyrics::extra_below(score, p, measure, bars);
+        if score.notation.slurs.iter().any(|s| {
+            s.start.part == p && s.start.measure < measure + bars && s.end.measure >= measure
+        }) {
+            let header = 49.0
+                + score.key_fifths.unsigned_abs() as f32 * 7.0
+                + if measure == 0 { 26.0 } else { 0.0 };
+            let common = (available - header) / bars as f32;
+            let mut x = 0.0;
+            let regions = (measure..measure + bars)
+                .map(|m| {
+                    let offset = m - measure;
+                    let width = common + if offset == 0 { header } else { 0.0 };
+                    let content_x = x + if offset == 0 { header } else { 13.0 };
+                    let region = StaffRegion {
+                        part: p,
+                        measure: m,
+                        x,
+                        y: 0.0,
+                        width,
+                        spacing: SPACING,
+                        content_x,
+                        content_width: (width - (content_x - x) - 12.0).max(20.0),
+                        temporal_anchors: measure_spacing[m].clone(),
+                    };
+                    x += width;
+                    region
+                })
+                .collect::<Vec<_>>();
+            let refs = regions.iter().collect::<Vec<_>>();
+            if let Some(y) = slurs::above_envelope(score, &refs) {
+                let clearance = if navigation_present && repeat_clearance > 0 {
+                    64.0 + 17.0 * (repeat_clearance - 1) as f32
+                } else if navigation_present {
+                    32.0
+                } else if repeat_clearance > 0 {
+                    44.0 + 17.0 * (repeat_clearance - 1) as f32
+                } else {
+                    12.0
+                };
+                above = above.max(-y + clearance);
+            }
+        }
         extents.push((above, below));
     }
     let mut offsets = Vec::with_capacity(parts.len());
     offsets.push((extents[0].0 - 45.0).max(0.0));
     for i in 1..parts.len() {
-        offsets.push(offsets[i - 1] + extents[i - 1].1 + extents[i].0 + 5.0);
+        offsets.push(offsets[i - 1] + extents[i - 1].1 + extents[i].0 + 5.0 + staff_gap);
     }
     let height = offsets[parts.len() - 1] + extents[parts.len() - 1].1 + 36.0;
     (offsets, height)
@@ -2078,7 +2210,7 @@ impl ttf_parser::OutlineBuilder for PdfGlyph<'_> {
 }
 fn pdf_text(
     out: &mut String,
-    face: &ttf_parser::Face<'_>,
+    face: &ttf_parser::Face<'static>,
     text: &str,
     x: f32,
     y: f32,
@@ -2088,7 +2220,7 @@ fn pdf_text(
     use std::fmt::Write;
     out.push_str("% Encore vector text\n");
     let _ = writeln!(out, "{} rg", pdf_rgb(color));
-    let scale = size / face.units_per_em() as f32;
+    let music = music_text_face();
     let mut cursor = x;
     let mut baseline = y;
     for c in text.chars() {
@@ -2097,10 +2229,34 @@ fn pdf_text(
             baseline -= size * 1.3;
             continue;
         }
-        let glyph = face
+        if c == '‿' {
+            // Original vector undertie for lyric elisions. The bundled text and
+            // music fonts omit U+203F; keep the joining mark below the baseline.
+            let left = cursor + size * 0.03;
+            let right = cursor + size * 0.52;
+            let yy = baseline - size * 0.03;
+            let _ = writeln!(
+                out,
+                "% Encore lyric elision\nq {} RG {:.3} w {left:.3} {yy:.3} m {:.3} {:.3} {:.3} {:.3} {right:.3} {yy:.3} c S Q",
+                pdf_rgb(color),
+                size * 0.045,
+                cursor + size * 0.13,
+                baseline - size * 0.23,
+                cursor + size * 0.42,
+                baseline - size * 0.23
+            );
+            cursor += size * 0.55;
+            continue;
+        }
+        let actual = text_glyph_face(face, &music, c);
+        if std::ptr::eq(actual, &music) {
+            out.push_str("% Encore music text fallback\n");
+        }
+        let scale = size / actual.units_per_em() as f32;
+        let glyph = actual
             .glyph_index(c)
-            .or_else(|| face.glyph_index('\u{fffd}'))
-            .or_else(|| face.glyph_index('?'))
+            .or_else(|| actual.glyph_index('\u{fffd}'))
+            .or_else(|| actual.glyph_index('?'))
             .unwrap_or(ttf_parser::GlyphId(0));
         let mut builder = PdfGlyph {
             out,
@@ -2109,12 +2265,12 @@ fn pdf_text(
             scale,
             pen: (0.0, 0.0),
         };
-        if face.outline_glyph(glyph, &mut builder).is_some() {
+        if actual.outline_glyph(glyph, &mut builder).is_some() {
             out.push_str("f\n");
         }
-        cursor += face
+        cursor += actual
             .glyph_hor_advance(glyph)
-            .unwrap_or(face.units_per_em() / 2) as f32
+            .unwrap_or(actual.units_per_em() / 2) as f32
             * scale;
     }
 }
@@ -2160,11 +2316,13 @@ pub fn pdf(pages: &[Page]) -> Vec<u8> {
     );
     for (i, page) in pages.iter().enumerate() {
         let content_id = 6 + i * 2;
-        objects.push(format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R /F2 4 0 R >> >> /Contents {content_id} 0 R >>").into_bytes());
+        let paper_width = page.width * 0.72;
+        let paper_height = page.height * 0.72;
+        objects.push(format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {paper_width:.3} {paper_height:.3}] /Resources << /Font << /F1 3 0 R /F2 4 0 R >> >> /Contents {content_id} 0 R >>").into_bytes());
         let mut out = format!(
             "q {:.6} 0 0 {:.6} 0 0 cm\n1 J 1 j\n",
-            612.0 / page.width,
-            792.0 / page.height
+            paper_width / page.width,
+            paper_height / page.height
         );
         let py = |y: f32| page.height - y;
         for item in &page.items {
@@ -2676,6 +2834,96 @@ mod tests {
         assert_eq!(
             staff.x_at_tick(5000.0),
             staff.content_x + staff.content_width
+        );
+    }
+}
+
+#[cfg(test)]
+mod paper_layout_tests {
+    use super::*;
+    use crate::parts::{PageSize, PartLayout};
+    #[test]
+    fn independent_landscape_paper_reaches_pdf_without_stretching() {
+        let layout = PartLayout {
+            page_size: PageSize::A4,
+            landscape: true,
+            ..Default::default()
+        };
+        let pages = engrave(
+            &Score::blank(),
+            &EngravingOptions {
+                layout: Some(layout),
+                ..Default::default()
+            },
+        );
+        assert_eq!((pages[0].width, pages[0].height), (1169.0, 827.0));
+        let bytes = pdf(&pages);
+        let data = String::from_utf8_lossy(&bytes);
+        assert!(data.contains("/MediaBox [0 0 841.680 595.440]"));
+        assert!(data.contains("q 0.720000 0 0 0.720000 0 0 cm"));
+    }
+    #[test]
+    fn malformed_public_layout_options_cannot_stall_or_emit_nan_coordinates() {
+        let layout = PartLayout {
+            measures_per_system: 0,
+            staff_gap: f32::NAN,
+            ..Default::default()
+        };
+        let pages = engrave(
+            &Score::blank(),
+            &EngravingOptions {
+                layout: Some(layout),
+                ..Default::default()
+            },
+        );
+        assert_eq!(pages.iter().map(|p| p.staves.len()).sum::<usize>(), 8);
+        assert!(
+            pages
+                .iter()
+                .flat_map(|p| &p.staves)
+                .all(|r| r.y.is_finite() && r.width.is_finite())
+        );
+    }
+}
+
+#[cfg(test)]
+mod music_text_tests {
+    use super::*;
+    #[test]
+    fn accidentals_use_bundled_music_outlines_and_matching_advances() {
+        let base = text_face(true);
+        let music = music_text_face();
+        for c in ['♭', '♯', '♮'] {
+            let actual = text_glyph_face(&base, &music, c);
+            assert!(std::ptr::eq(actual, &music));
+            let glyph = actual.glyph_index(c).unwrap();
+            let mut builder = PdfGlyph {
+                out: &mut String::new(),
+                x: 0.0,
+                y: 0.0,
+                scale: 1.0,
+                pen: (0.0, 0.0),
+            };
+            assert!(actual.outline_glyph(glyph, &mut builder).is_some());
+        }
+        let mut flat = String::new();
+        pdf_text(&mut flat, &base, "B♭", 10.0, 20.0, 13.0, INK);
+        let mut question = String::new();
+        pdf_text(&mut question, &base, "B?", 10.0, 20.0, 13.0, INK);
+        assert!(flat.contains("% Encore music text fallback"));
+        assert!(!question.contains("% Encore music text fallback"));
+        assert_ne!(flat, question);
+        assert!(text_width("B♭", 13.0, true) > text_width("B", 13.0, true));
+    }
+    #[test]
+    fn lyric_elision_is_a_vector_undertie_in_pdf() {
+        let base = text_face(true);
+        let mut output = String::new();
+        pdf_text(&mut output, &base, "Shine‿on", 0.0, 0.0, 13.0, INK);
+        assert!(output.contains("% Encore lyric elision"));
+        assert!(
+            (text_width("a‿b", 13.0, true) - text_width("ab", 13.0, true) - 13.0 * 0.55).abs()
+                < 0.0001
         );
     }
 }

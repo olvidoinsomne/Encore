@@ -232,7 +232,7 @@ fn parse_enigma(xml: &str, metadata: Option<&[u8]>) -> Result<ImportResult, Stri
     let details = child(root, "details").ok_or("Finale score is missing its details pool.")?;
     let entry_pool = child(root, "entries").ok_or("Finale score is missing its entries pool.")?;
     let mut warnings = vec![
-        "Finale import preserves basic notes, chords, rests, and whole-chord ties. Page layout, lyrics, expressions, articulations, repeats, plug-ins, and mixer settings are not retained; repeat playback is not expanded.".into(),
+        "Finale import preserves basic notes, chords, rests, and whole-chord ties. Page layout, lyrics, slurs, expressions, articulations, repeats, plug-ins, and mixer settings are not retained; repeat playback is not expanded.".into(),
     ];
 
     let mut measures = records(others, "measSpec");
@@ -383,6 +383,7 @@ fn parse_enigma(xml: &str, metadata: Option<&[u8]>) -> Result<ImportResult, Stri
         time_denominator: meter.1,
         key_fifths: key.fifths,
         parts: Vec::new(),
+        notation: Default::default(),
     };
     if let Some(metadata) = metadata {
         if let Ok(text) = std::str::from_utf8(metadata) {

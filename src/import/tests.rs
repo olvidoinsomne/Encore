@@ -490,7 +490,7 @@ fn optional_upstream_musescore_fixture_preserves_every_sounding_pitch() {
 }
 
 #[test]
-fn transparent_warnings_cover_layout_expression_and_repeat_losses() {
+fn transparent_warnings_cover_expression_losses_while_repeats_are_retained() {
     let xml = MUSICXML.replace("<measure number=\"2\">", "<measure number=\"2\"><direction><sound tempo='120'/></direction><attributes><key><fifths>-2</fifths></key></attributes><barline><repeat direction='backward'/></barline>");
     let imported = musicxml(&xml).unwrap();
     assert_eq!(imported.score.tempo, 96);
@@ -507,7 +507,9 @@ fn transparent_warnings_cover_layout_expression_and_repeat_losses() {
             .iter()
             .any(|w| w.contains("Key signature changes"))
     );
-    assert!(imported.warnings.iter().any(|w| w.contains("play once")));
+    assert_eq!(imported.score.notation.repeats.len(), 1);
+    assert_eq!(imported.score.playback_order().unwrap(), vec![0, 1, 0, 1]);
+    assert!(!imported.warnings.iter().any(|w| w.contains("play once")));
 }
 
 #[test]

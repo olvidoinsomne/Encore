@@ -1,3 +1,4 @@
+use super::annotations::{Annotations, SourceAnchor};
 use super::{
     ImportResult, Warnings, child, finish_parts, initial_score, number, push_event,
     push_rhythmic_event, text, value,
@@ -131,6 +132,7 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
         }
     }
     let mut parts = Vec::new();
+    let mut annotation_sets = Vec::new();
     let mut initial_meter = None;
     let mut initial_key = None;
     let mut initial_tempo = None;
@@ -161,6 +163,22 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
             return Err(format!(
                 "MusicXML part {id} must contain 1–{MAX_MEASURES} measures."
             ));
+        }
+        let mut annotations = Annotations::default();
+        let mut annotation_mapping = BTreeMap::new();
+        let repeat_map = crate::repeats::parse_musicxml(source, measures.len())?;
+        if !repeat_map.is_empty() {
+            if !score.notation.repeats.is_empty() && score.notation.repeats != repeat_map {
+                return Err("MusicXML parts disagree on repeat navigation.".into());
+            }
+            score.notation.repeats = repeat_map;
+        }
+        let navigation = crate::repeats::parse_musicxml_navigation(source, measures.len())?;
+        if !navigation.is_empty() {
+            if !score.notation.navigation.is_empty() && score.notation.navigation != navigation {
+                return Err("MusicXML parts disagree on navigation instructions.".into());
+            }
+            score.notation.navigation = navigation;
         }
         // Preserve source staves and map their independent voices into four layers.
         let mut lanes: BTreeMap<(u32, String), Vec<Measure>> = BTreeMap::new();
@@ -399,6 +417,16 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
                             || item.descendants().any(|n| {
                                 n.has_tag_name("tied") && n.attribute("type") == Some("start")
                             });
+                        annotations.xml(
+                            item,
+                            SourceAnchor {
+                                staff,
+                                voice: voice.clone(),
+                                measure: measure_index,
+                                tick: start,
+                            },
+                            &mut warnings,
+                        )?;
                         let key = (staff, voice);
                         if !events.contains_key(&key)
                             && events
@@ -458,23 +486,14 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
                                 rhythm,
                             });
                         }
-                        if item.descendants().any(|n| {
-                            n.has_tag_name("lyric")
-                                || n.has_tag_name("slur")
-                                || n.has_tag_name("ornaments")
-                                || n.has_tag_name("technical")
-                        }) {
-                            warnings.add("Lyrics, slurs, ornaments, and playing instructions are not retained in the editable score.");
-                        }
-                    }
-                    "barline" => {
                         if item
                             .descendants()
-                            .any(|n| n.has_tag_name("repeat") || n.has_tag_name("ending"))
+                            .any(|n| n.has_tag_name("ornaments") || n.has_tag_name("technical"))
                         {
-                            warnings.add("Repeats and alternate endings are imported in written order and play once.");
+                            warnings.add("Ornaments and playing instructions are not retained in the editable score.");
                         }
                     }
+                    "barline" => (),
                     "harmony" | "figured-bass" => warnings.add(
                         "Chord symbols and figured bass are not retained in the editable score.",
                     ),
@@ -501,6 +520,7 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
             } else {
                 0
             };
+            annotations.shift(measure_index, pickup_shift);
             if extent > measure_ticks {
                 return Err(format!(
                     "{context}: music extends beyond the fixed time signature."
@@ -579,6 +599,12 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
             .collect::<std::collections::BTreeSet<_>>()
             .len()
             > 1;
+        let staff_order = lanes
+            .keys()
+            .map(|(staff, _)| *staff)
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
         let mut staff_layers: BTreeMap<u32, (Vec<Measure>, usize)> = BTreeMap::new();
         for ((staff, voice), measures) in lanes {
             let (combined, layer_count) = staff_layers
@@ -601,6 +627,13 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
                         .find(|layer| *layer_count & (1 << layer) == 0)
                         .unwrap_or(0)
                 });
+            annotation_mapping.insert(
+                (staff, voice),
+                (
+                    parts.len() + staff_order.iter().position(|s| *s == staff).unwrap(),
+                    layer,
+                ),
+            );
             *layer_count |= 1 << layer;
             for (destination, source) in combined.iter_mut().zip(measures) {
                 destination
@@ -634,10 +667,16 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
                 solo: false,
             });
         }
+        annotation_sets.push((annotations, annotation_mapping));
     }
     if initial_tempo.is_none() {
         warnings.add("No explicit tempo was found; playback uses 120 quarter notes per minute. Set the tempo to match your intended performance.");
     }
+    score.parts = parts;
+    for (annotations, mapping) in annotation_sets {
+        annotations.finish(&mut score, &mapping, &mut warnings)?;
+    }
+    let parts = std::mem::take(&mut score.parts);
     finish_parts(score, parts, warnings)
 }
 
