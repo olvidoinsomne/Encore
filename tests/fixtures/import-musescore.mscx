@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<museScore version="4.30">
+  <programVersion>4.3.2</programVersion>
+  <Score>
+    <Division>480</Division><Style><concertPitch>1</concertPitch></Style>
+    <metaTag name="workTitle">Native MuseScore fixture</metaTag><metaTag name="composer">Encore import fixture</metaTag>
+    <Part><Staff id="1"><StaffType group="pitched"><name>stdNormal</name></StaffType></Staff><Staff id="2"><StaffType group="pitched"/><defaultClef>F</defaultClef></Staff><trackName>Piano</trackName><Instrument id="piano"><longName>Piano</longName><instrumentId>keyboard.piano</instrumentId><clef staff="2">F</clef><Channel><program value="0"/><controller ctrl="7" value="100"/><controller ctrl="10" value="48"/></Channel></Instrument></Part>
+    <Staff id="1">
+      <Measure>
+        <voice>
+          <TimeSig><sigN>4</sigN><sigD>4</sigD></TimeSig><KeySig><accidental>-1</accidental></KeySig><Tempo><tempo>1.5</tempo></Tempo><Dynamic><subtype>p</subtype></Dynamic>
+          <Chord><durationType>quarter</durationType><Articulation><subtype>articStaccatoAbove</subtype></Articulation><Note><pitch>60</pitch><tpc>14</tpc><Spanner type="Tie"><next><location><fractions>1/4</fractions></location></next></Spanner></Note><Note><pitch>63</pitch><tpc>11</tpc><Spanner type="Tie"><next><location><fractions>1/4</fractions></location></next></Spanner></Note></Chord>
+          <Chord><durationType>half</durationType><dots>1</dots><Note><pitch>60</pitch><tpc>14</tpc><Spanner type="Tie"><prev/></Spanner></Note><Note><pitch>63</pitch><tpc>11</tpc><Spanner type="Tie"><prev/></Spanner></Note></Chord>
+        </voice>
+        <voice><Chord><durationType>whole</durationType><Note><pitch>48</pitch><tpc>14</tpc></Note></Chord></voice>
+      </Measure>
+      <Measure><voice><Rest><durationType>measure</durationType><duration>4/4</duration></Rest></voice></Measure>
+    </Staff>
+    <Staff id="2">
+      <Measure><voice><Rest><durationType>measure</durationType><duration>4/4</duration></Rest></voice></Measure>
+      <Measure><voice><Chord><durationType>whole</durationType><Note><pitch>36</pitch><tpc>14</tpc></Note></Chord></voice></Measure>
+    </Staff>
+  </Score>
+</museScore>

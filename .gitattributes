@@ -1,0 +1,23 @@
+* text=auto
+*.rs text eol=lf
+*.sh text eol=lf
+*.ps1 text eol=lf
+*.toml text eol=lf
+*.yml text eol=lf
+*.md text eol=lf
+run-encore text eol=lf
+*.musx binary
+*.mscz binary
+*.mxl binary
+*.sf2 binary
+*.wav binary
+*.png binary
+*.pdf binary
+*.ttf binary
+*.crate binary
+# Preserve upstream notices and documentation byte for byte.
+assets/*LICENSE* -text -whitespace
+assets/soundfonts/GeneralUser-GS-LICENSE.txt -text -whitespace
+assets/soundfonts/GeneralUser-GS-README.md -text -whitespace
+assets/third-party/*.txt -text -whitespace
+tests/fixtures/musxdom-LICENSE.txt -text -whitespace

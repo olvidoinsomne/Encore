@@ -1,0 +1,82 @@
+stages:
+  - verify
+  - package
+
+variables:
+  CARGO_HOME: "$CI_PROJECT_DIR/.cargo-ci"
+  CARGO_TERM_COLOR: "always"
+
+.linux:
+  image: rust:1.90-bookworm
+  before_script:
+    - apt-get update -qq
+    - apt-get install -y --no-install-recommends build-essential pkg-config libasound2-dev libudev-dev libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev libxi-dev libxrandr-dev libgl1-mesa-dev
+  cache:
+    key:
+      files:
+        - Cargo.lock
+    paths:
+      - .cargo-ci/registry/
+      - .cargo-ci/git/
+      - target/
+
+linux:verify:
+  extends: .linux
+  stage: verify
+  script:
+    - rustup component add rustfmt clippy
+    - cargo fmt --all -- --check
+    - cargo clippy --locked --all-targets -- -D warnings
+    - cargo test --locked --all-targets
+
+linux:package:
+  extends: .linux
+  stage: package
+  script:
+    - cargo build --release --locked
+    - sh scripts/package-linux.sh
+  artifacts:
+    name: "Encore-linux-$CI_COMMIT_SHORT_SHA"
+    paths:
+      - dist/*.tar.gz
+
+# These jobs require registered native shell runners with the exact tags below.
+# Run them manually once those runners are available; Linux cannot validate an
+# Apple SDK or the Windows MSVC environment. See BUILDING.md.
+windows:package:
+  stage: package
+  tags:
+    - windows
+    - encore-native
+  rules:
+    - when: manual
+      allow_failure: true
+  script:
+    - cargo fmt --all -- --check
+    - cargo clippy --locked --all-targets -- -D warnings
+    - cargo test --locked --all-targets
+    - cargo build --release --locked
+    - pwsh -NoProfile -File scripts/package-windows.ps1
+  artifacts:
+    name: "Encore-windows-$CI_COMMIT_SHORT_SHA"
+    paths:
+      - dist/*.zip
+
+macos:package:
+  stage: package
+  tags:
+    - macos
+    - encore-native
+  rules:
+    - when: manual
+      allow_failure: true
+  script:
+    - cargo fmt --all -- --check
+    - cargo clippy --locked --all-targets -- -D warnings
+    - cargo test --locked --all-targets
+    - cargo build --release --locked
+    - sh scripts/package-macos.sh
+  artifacts:
+    name: "Encore-macos-$CI_COMMIT_SHORT_SHA"
+    paths:
+      - dist/*.zip

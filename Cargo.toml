@@ -1,0 +1,23 @@
+[package]
+name = "encore"
+version = "0.5.0"
+edition = "2024"
+rust-version = "1.88"
+description = "An original Rust score editor with engraving and orchestral synthesis"
+license = "MIT"
+
+[dependencies]
+eframe = { version = "0.33.3", default-features = false, features = ["default_fonts", "glow", "wayland", "x11", "persistence"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rodio = { version = "0.21.1", default-features = false, features = ["playback"] }
+rfd = "0.15"
+ttf-parser = "0.25.1"
+oxisynth = { version = "0.1", default-features = false }
+roxmltree = "0.20"
+zip = { version = "2.4", default-features = false, features = ["deflate"] }
+flate2 = "1"
+
+[profile.release]
+opt-level = 3
+lto = "thin"

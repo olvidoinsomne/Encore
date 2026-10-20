@@ -1,0 +1,11 @@
+#!/bin/sh
+set -eu
+encore_root=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+cd "$encore_root"
+if [ -x "$encore_root/target/release/encore" ]; then
+    exec "$encore_root/target/release/encore" "$@"
+fi
+if [ -d "$encore_root/.build/cargo/registry" ]; then
+    export CARGO_HOME="$encore_root/.build/cargo"
+fi
+exec cargo run --release --locked -- "$@"

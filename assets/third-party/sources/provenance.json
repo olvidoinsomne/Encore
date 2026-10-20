@@ -1,0 +1,45 @@
+{
+  "description": "Unmodified published crate source archives, verified against the Encore Cargo.lock registry checksums.",
+  "packages": [
+    {
+      "crate": "oxisynth",
+      "version": "0.1.0",
+      "filename": "oxisynth-0.1.0.crate",
+      "sha256": "68d089fc07e074f57ac6698292ce3da05eac1d282b821eb4156d4c7d8e36c6ec",
+      "bytes": 67307,
+      "source_url": "https://static.crates.io/crates/oxisynth/oxisynth-0.1.0.crate",
+      "registry_url": "https://crates.io/crates/oxisynth/0.1.0",
+      "source_files": 39
+    },
+    {
+      "crate": "oxisynth-chorus",
+      "version": "0.1.0",
+      "filename": "oxisynth-chorus-0.1.0.crate",
+      "sha256": "755d6ea336fc37043b00a1b54198e24cb4537c509435c7aca2d837d36185703b",
+      "bytes": 3926,
+      "source_url": "https://static.crates.io/crates/oxisynth-chorus/oxisynth-chorus-0.1.0.crate",
+      "registry_url": "https://crates.io/crates/oxisynth-chorus/0.1.0",
+      "source_files": 5
+    },
+    {
+      "crate": "oxisynth-reverb",
+      "version": "0.1.0",
+      "filename": "oxisynth-reverb-0.1.0.crate",
+      "sha256": "bdbb2d72d399b03dc7546c1087fabcdba68402f987bea903fe284c946fcca7aa",
+      "bytes": 2826,
+      "source_url": "https://static.crates.io/crates/oxisynth-reverb/oxisynth-reverb-0.1.0.crate",
+      "registry_url": "https://crates.io/crates/oxisynth-reverb/0.1.0",
+      "source_files": 5
+    },
+    {
+      "crate": "soundfont",
+      "version": "0.1.0",
+      "filename": "soundfont-0.1.0.crate",
+      "sha256": "2a7f4cb358863e55f8f1a3882f68601360cf6c42fc53ff2fe9aea41c33e24489",
+      "bytes": 16452,
+      "source_url": "https://static.crates.io/crates/soundfont/soundfont-0.1.0.crate",
+      "registry_url": "https://crates.io/crates/soundfont/0.1.0",
+      "source_files": 21
+    }
+  ]
+}

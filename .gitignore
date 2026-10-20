@@ -1,0 +1,8 @@
+/target/
+/.build/
+/exports/
+/dist/
+/.cargo-ci/
+# This checkout's desktop shortcut contains an absolute local installation path.
+/Encore.desktop
+*.tmp
