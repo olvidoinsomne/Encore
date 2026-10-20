@@ -133,15 +133,15 @@ impl SampleBank {
         let mut output = vec![0.0; frames * 2];
         let any_solo = score.parts.iter().any(|part| part.solo && !part.muted);
         let order = crate::repeats::playback_order(score)?;
-        let performance = Performance::new(score);
         let decorated = crate::performance::needed(score)
             .then(|| crate::performance::Timeline::new(score))
             .transpose()?;
+        let performance = decorated.is_none().then(|| Performance::new(score));
         for (part_index, part) in score.parts.iter().enumerate() {
             if part.muted || part.volume <= 0.0 || (any_solo && !part.solo) {
                 continue;
             }
-            for layer in 0..if decorated.is_some() { 12 } else { 4 } {
+            for layer in 0..if decorated.is_some() { 16 } else { 4 } {
                 let events = if let Some(timeline) = &decorated {
                     decorated_commands(timeline, part_index, layer)
                 } else {
@@ -152,7 +152,7 @@ impl SampleBank {
                         layer,
                         &order,
                         part_index,
-                        Some(&performance),
+                        performance.as_ref(),
                     )
                 };
                 if events.is_empty() {
@@ -520,7 +520,7 @@ fn timeline_performance(
     let score = performance.map(|performance| (performance.score, part_index));
     let notes: Vec<_> = crate::repeats::events(part, measure_ticks, order)
         .into_iter()
-        .filter(|event| event.note.layer == layer)
+        .filter(|event| event.note.lane() == layer)
         .collect();
     let frames_per_tick = 60.0_f64 * SAMPLE_RATE as f64 / (tempo.max(1) as f64 * PPQ as f64);
     let tempo_map = performance.and_then(|performance| performance.tempo.as_ref());
@@ -542,6 +542,7 @@ fn timeline_performance(
             while performance.map_or(last.tied, |performance| {
                 performance.styles.ties_forward(
                     &crate::document::Anchor {
+                        voice: last.voice,
                         part: part_index,
                         measure: notes[current].measure,
                         tick: last.start,
@@ -607,6 +608,7 @@ fn timeline_performance(
                     |(_score, part)| {
                         expression_map.as_ref().unwrap().velocity(
                             crate::document::Anchor {
+                                voice: event.note.voice,
                                 part,
                                 measure: event.measure,
                                 tick: event.note.start,
@@ -639,6 +641,13 @@ fn decorated_commands(
     part: usize,
     layer: u8,
 ) -> Vec<Command> {
+    if !timeline
+        .notes
+        .iter()
+        .any(|note| note.anchor.part == part && note.layer == layer)
+    {
+        return Vec::new();
+    }
     let frame = |tick: f64| (timeline.seconds(tick) * f64::from(SAMPLE_RATE)).round() as usize;
     let mut events = Vec::<(u8, Command)>::new();
     let mut program = None;
@@ -785,6 +794,8 @@ mod tests {
 
     fn note(start: u32, pitches: &[u8]) -> Note {
         Note {
+            voice: 0,
+            voice_launch: None,
             articulations: Vec::new(),
             start,
             duration: Duration::Quarter,
@@ -1254,6 +1265,7 @@ mod tests {
         let mut score = score();
         score.parts[0].measures[0].notes = vec![note(0, &[60]), note(480, &[62])];
         let start = Anchor {
+            voice: 0,
             part: 0,
             measure: 0,
             tick: 0,
@@ -1292,6 +1304,7 @@ mod tests {
         score.parts[0].measures[0].notes = (0..4).map(|index| note(index * 480, &[60])).collect();
         score.parts[0].measures[1].notes = vec![note(0, &[62])];
         let start = Anchor {
+            voice: 0,
             part: 0,
             measure: 0,
             tick: 0,
@@ -1368,6 +1381,8 @@ mod decorated_tests {
         score.parts[0].instrument = Instrument::Violin;
         score.parts[0].measures.truncate(1);
         score.parts[0].measures[0].notes = vec![Note {
+            voice: 0,
+            voice_launch: None,
             start: 0,
             duration: Duration::Whole,
             dotted: false,
@@ -1380,6 +1395,7 @@ mod decorated_tests {
             articulations: vec![],
         }];
         let a = Anchor {
+            voice: 0,
             part: 0,
             measure: 0,
             tick: 0,
@@ -1435,5 +1451,69 @@ mod decorated_tests {
                 .any(|e| e.frame == 0 && e.midi == 66 && e.kind == Kind::Control(127))
         );
         assert!(events.windows(2).all(|w| w[0].frame <= w[1].frame));
+    }
+}
+
+#[cfg(test)]
+mod voice_two_tests {
+    use super::*;
+    use crate::model::{Duration, Note, Pitch};
+    #[test]
+    fn identical_keys_in_two_voices_receive_independent_sampler_note_offs() {
+        let mut score = Score::blank();
+        score.tempo = 120;
+        score.parts.truncate(1);
+        score.parts[0].measures.truncate(1);
+        let first = Note {
+            layer: 0,
+            voice: 0,
+            voice_launch: None,
+            start: 0,
+            duration: Duration::Whole,
+            dotted: false,
+            tuplet: None,
+            pitches: vec![Pitch::from_midi(60)],
+            velocity: 80,
+            staccato: false,
+            tied: false,
+            articulations: vec![],
+        };
+        let mut second = first.clone();
+        second.voice = 1;
+        second.voice_launch = Some(0);
+        second.duration = Duration::Quarter;
+        second.tied = true;
+        let mut last = second.clone();
+        last.start = 480;
+        last.tied = false;
+        score.parts[0].measures[0].notes = vec![first, second, last];
+        let timeline = crate::performance::Timeline::new(&score).unwrap();
+        let primary = decorated_commands(&timeline, 0, 0);
+        let secondary = decorated_commands(&timeline, 0, 4);
+        assert!(
+            primary
+                .iter()
+                .any(|c| c.midi == 60 && c.kind == Kind::Off && c.frame == 88200)
+        );
+        assert!(
+            secondary
+                .iter()
+                .any(|c| c.midi == 60 && c.kind == Kind::Off && c.frame == 44100)
+        );
+        assert_eq!(
+            primary
+                .iter()
+                .filter(|c| matches!(c.kind, Kind::On(_)))
+                .count(),
+            1
+        );
+        assert_eq!(
+            secondary
+                .iter()
+                .filter(|c| matches!(c.kind, Kind::On(_)))
+                .count(),
+            1
+        );
+        assert!(decorated_commands(&timeline, 0, 8).is_empty());
     }
 }

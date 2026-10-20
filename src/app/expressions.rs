@@ -64,14 +64,18 @@ impl EncoreApp {
     }
 
     fn expression_anchor(&self) -> Anchor {
-        self.selected
+        let mut anchor = self
+            .selected
             .and_then(|selection| Anchor::from_selection(&self.score, selection))
             .unwrap_or(Anchor {
+                voice: 0,
                 part: self.active_part,
                 measure: self.cursor_measure,
                 tick: self.cursor_tick.min(self.score.measure_ticks() - 1),
                 layer: self.active_layer,
-            })
+            });
+        anchor.voice = 0;
+        anchor
     }
 
     fn apply_expressive_score(&mut self, score: Score) -> bool {

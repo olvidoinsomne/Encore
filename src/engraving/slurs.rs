@@ -11,7 +11,7 @@ pub(super) fn clearance(score: &Score, part: usize, measure: usize, bars: usize)
     }) {
         let size = s.height + 15.0 + s.start_offset[1].abs().max(s.end_offset[1].abs());
         if s.direction == SlurDirection::Below
-            || (s.direction == SlurDirection::Auto && !s.start.layer.is_multiple_of(2))
+            || (s.direction == SlurDirection::Auto && !automatic_slur_above(score, s.start))
         {
             below = below.max(size);
         } else {
@@ -102,7 +102,7 @@ fn draw_internal(page: &mut Page, score: &Score, above_only: bool) {
             let above = match s.direction {
                 SlurDirection::Above => true,
                 SlurDirection::Below => false,
-                SlurDirection::Auto => s.start.layer.is_multiple_of(2),
+                SlurDirection::Auto => automatic_slur_above(score, s.start),
             };
             if above_only && !above {
                 continue;
@@ -111,7 +111,7 @@ fn draw_internal(page: &mut Page, score: &Score, above_only: bool) {
             let end_region = regions.iter().find(|r| r.measure == s.end.measure);
             let a = if let Some(r) = start_region {
                 (
-                    r.x_at_tick(s.start.tick as f32) + s.start_offset[0],
+                    r.x_at_anchor(&s.start) + s.start_offset[0],
                     endpoint(score, &pitch_index, &s.start, r, above) + s.start_offset[1],
                 )
             } else {
@@ -122,7 +122,7 @@ fn draw_internal(page: &mut Page, score: &Score, above_only: bool) {
             };
             let b = if let Some(r) = end_region {
                 (
-                    r.x_at_tick(s.end.tick as f32) + s.end_offset[0],
+                    r.x_at_anchor(&s.end) + s.end_offset[0],
                     endpoint(score, &pitch_index, &s.end, r, above) + s.end_offset[1],
                 )
             } else {
@@ -141,18 +141,19 @@ fn draw_internal(page: &mut Page, score: &Score, above_only: bool) {
                 if let Some(m) = score.parts[part].measures.get(r.measure) {
                     for n in &m.notes {
                         let anchor = Anchor {
+                            voice: n.voice,
                             part,
                             measure: r.measure,
                             tick: n.start,
                             layer: n.layer,
                         };
-                        if n.layer != s.start.layer
+                        if n.lane() != s.start.lane()
                             || position(&anchor) <= position(&s.start)
                             || position(&anchor) >= position(&s.end)
                         {
                             continue;
                         }
-                        let x = r.x_at_tick(n.start as f32);
+                        let x = r.x_at_anchor(&anchor);
                         let t = ((x - a.0) / (b.0 - a.0)).clamp(0.0, 1.0);
                         let weight = 3.0 * t * (1.0 - t);
                         if weight < 0.1 {
@@ -200,12 +201,14 @@ mod tests {
             &mut s,
             Slur::new(
                 Anchor {
+                    voice: 0,
                     part: 0,
                     measure: 0,
                     tick: 0,
                     layer: 0,
                 },
                 Anchor {
+                    voice: 0,
                     part: 0,
                     measure: 5,
                     tick: 0,

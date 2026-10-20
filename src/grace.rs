@@ -200,6 +200,7 @@ fn pitched_anchors(score: &Score) -> BTreeSet<Anchor> {
                         measure,
                         tick: n.start,
                         layer: n.layer,
+                        voice: n.voice,
                     })
             })
         })
@@ -475,7 +476,7 @@ fn write_musicxml_group(group: &GraceGroup, number: Option<usize>) -> String {
                 pitch.step.name(),
                 pitch.alter,
                 pitch.octave,
-                anchor.layer + 1,
+                anchor.lane() + 1,
                 note.duration.musicxml_type()
             );
             if note.dotted {
@@ -564,6 +565,7 @@ mod tests {
             measure: 0,
             tick: note.start,
             layer: note.layer,
+            voice: note.voice,
         };
         (score, anchor)
     }

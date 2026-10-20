@@ -57,12 +57,14 @@ impl EncoreApp {
             .selected
             .and_then(|selection| Anchor::from_selection(&self.score, selection))
             .unwrap_or(Anchor {
+                voice: 0,
                 part: self.active_part,
                 measure: self.cursor_measure,
                 tick: self.cursor_tick.min(self.score.measure_ticks() - 1),
                 layer: 0,
             });
         anchor.layer = 0;
+        anchor.voice = 0;
         anchor
     }
     fn load_chord_draft(&mut self) {
@@ -426,6 +428,7 @@ mod tests {
         chord.suffix_text = Some("custom seventh".into());
         let symbol = ChordSymbol::new(
             Anchor {
+                voice: 0,
                 part: 0,
                 measure: 0,
                 tick: 0,

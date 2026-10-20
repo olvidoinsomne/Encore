@@ -1,6 +1,6 @@
 # Platforms and score compatibility
 
-Encore 0.9 targets Linux, macOS and Windows. Linux builds and packaging are
+Encore 0.10 targets Linux, macOS and Windows. Linux builds and packaging are
 verified on the development machine. Native macOS and Windows validation is
 still required; their build commands, packaging scripts and manual GitLab CI
 jobs are in [BUILDING.md](BUILDING.md). A Rust target alone does not supply the
@@ -20,7 +20,7 @@ Use **File → Open**, pass a score path to the executable, or run:
 | Input | Current support |
 | --- | --- |
 | Encore `.encore`, native JSON | Native opening and saving, including earlier Encore projects. |
-| MusicXML `.musicxml`, `.xml`, compressed `.mxl` | Partwise MusicXML. Staves retain up to four independent voices as layers on the original staff. |
+| MusicXML `.musicxml`, `.xml`, compressed `.mxl` | Partwise MusicXML. Staves retain up to eight independent voices as four layers with primary/secondary voices on the original staff. Encore voice IDs 1–4 map primary layers and 5–8 map secondary layers; other labels are assigned deterministically without flattening. |
 | MuseScore `.mscx`, `.mscz` | Native XML scores from MuseScore 2, 3 and 4, including their compressed containers. |
 | Finale `.musx` | Initial direct reader for the modern EnigmaXML format, tested against a real Finale 27.4.1.146 document. The supported subset is described below. |
 | MIDI `.mid`, `.midi` | Standard MIDI File type 0/1 with PPQ timing. Exact notation is inferred from performance events; unsupported timing is rejected in exact mode. |
@@ -160,13 +160,13 @@ The editor's note entry and written linked parts apply that display relationship
 Choose a separate transposition to change the sound. One, two and three octave
 lines in either direction are supported.
 
-Damper holds notes released during its span across all four notation layers;
+Damper holds notes released during its span across all eight notation voices;
 sostenuto captures notes sounding at its start. MIDI exports CC64/66, and both
 audio engines share the same held-note plan (including an explicit sostenuto
 hold for the sampler). Release state resets at repeat/navigation jumps.
 Overlapping pedal types and reattacking a captured sostenuto pitch in the same
 layer before release are currently rejected: the sampler has no native CC66
-voice capture. Separate layers can sustain independent equal pitches. Partial
+voice capture. Separate rhythmic voices can sustain independent equal pitches. Partial
 pedaling, soft pedal and arbitrary controller curves remain pending. The public
 [MusicXML pedal format](https://www.w3.org/2021/06/musicxml40/musicxml-reference/elements/pedal/)
 provides the portable notation and sound attributes.
@@ -185,7 +185,7 @@ backends use that plan. Sampled/procedural timing preserves fractional ticks;
 MIDI rounds to its 480 PPQ grid. Optional chord accompaniment uses the staff's
 instrument at velocity 80 in independent stack-slot lanes and ends at the next
 chord or current bar end. N.C. stops that slot. Accompaniment lanes currently
-keep independent pedal/expression state from the four notation layers. Source
+keep independent pedal/expression state from the eight notation voices. Source
 notes are unchanged.
 Bounds are 10,000 lines, two million expanded pitch notes/grace events and one
 million controller events; audio remains limited to ten performed minutes.
@@ -223,10 +223,10 @@ syllable onsets. Multiple named targets, arbitrary conditional jump programs,
 within-measure navigation and direct Finale MUSX repeat import remain pending.
 
 The direct Finale reader targets the **Finale 27 era** at the product's sunset.
-It handles up to four layers per staff with supported ordinary rhythms, chords, rests,
+It handles up to four layers per staff, including documented primary controller/secondary v2 branches, with supported ordinary rhythms, chords, rests,
 complete chord ties, standard constant keys/meters, staff order, initial tempo
 and available instrument identifiers. It recreates notation in Encore's layout.
-It currently rejects multiple voices within one layer, tuplets, grace notes, partial chord ties, staff styles and custom/nonlinear keys. Its import notes also identify
+It rejects orphan/nested/overlapping secondary branches, tuplets, grace notes, partial chord ties, staff styles and custom/nonlinear keys. Its import notes also identify
 losses of expressions, articulations, original mixer settings and plug-in setup.
 Direct MUSX does not yet decode lyric underlay or slur/Smart Shape objects;
 export MusicXML from Finale to migrate those supported Encore features.
@@ -358,3 +358,17 @@ Original guitar-shape suggestions use standard six-string tuning. Custom diagram
 MusicXML exports/imports standard `harmony`, root/kind/bass/degree, stack positions, rhythmic offsets and `frame` geometry. Cursor-relative offsets and transposing instruments are converted into source positions/pitches. MuseScore imports readable standard Harmony suffixes and tonal pitch classes, reporting unsupported functional harmony and private suffix-library references. Standard MusicXML does not preserve Encore's per-symbol harmony-play switch, bass-layout preference or diagram tuning; native Encore files preserve all fields.
 
 Finale `.lib` chord/fretboard libraries, arbitrary suffix glyph typography, learned/MIDI-derived chord analysis, Roman/Nashville names, fretboard library groups and tablature conversion remain unimplemented.
+
+
+Eight-voice note identity includes staff, bar, tick, layer and voice. Legacy native
+notes omit primary-voice defaults and retain their original sound. Secondary
+branches optionally store a primary launch onset; imported independent MusicXML
+voices can remain unlaunched rather than inventing a connection. Native files
+and Encore MusicXML metadata retain launch points, while ordinary MusicXML
+consumers can preserve independent rhythms without interpreting those points.
+MIDI and sample playback route the eight notation voices independently to avoid
+equal-pitch note-off collisions; optional chord stacks use eight additional lanes.
+Dynamics, techniques, hairpins and octave-display lines remain layer-scoped.
+Event clipboard v5 and region clipboard v2 carry secondary voice identity, accept earlier versions and
+warn when pasting an isolated secondary entry detaches its launch. Complete
+measure-region paste retains validated branch relationships.

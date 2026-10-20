@@ -825,6 +825,8 @@ fn push(
     staccato: bool,
 ) {
     score.parts[part].measures[bar].notes.push(Note {
+        voice: 0,
+        voice_launch: None,
         articulations: Vec::new(),
         start,
         duration,

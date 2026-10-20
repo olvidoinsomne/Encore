@@ -14,6 +14,8 @@ mod lines;
 mod lyrics;
 mod repeats;
 mod slurs;
+#[cfg(test)]
+mod voices;
 
 const INK: [u8; 3] = [29, 34, 42];
 const STAFF: [u8; 3] = [75, 82, 92];
@@ -80,9 +82,19 @@ pub struct StaffRegion {
     pub content_width: f32,
     // Shared piecewise-linear measure time map: (tick, normalized x position).
     temporal_anchors: Arc<[(f32, f32)]>,
+    anchor_offsets: Arc<BTreeMap<(u32, u8), f32>>,
 }
 
 impl StaffRegion {
+    /// Voice collisions may move a head horizontally without moving its beat.
+    pub fn x_at_anchor(&self, anchor: &crate::document::Anchor) -> f32 {
+        self.x_at_tick(anchor.tick as f32)
+            + self
+                .anchor_offsets
+                .get(&(anchor.tick, anchor.lane()))
+                .copied()
+                .unwrap_or(0.0)
+    }
     /// Convert a measure-relative tick to a page x coordinate. All displayed
     /// staves in this measure share the same temporal spacing.
     pub fn x_at_tick(&self, tick: f32) -> f32 {
@@ -131,7 +143,12 @@ fn interpolate_anchors(anchors: &[(f32, f32)], value: f32, inverse: bool) -> f32
 /// Onsets, ends, and beats from every visible staff form shared spacing anchors.
 /// A minimum glyph allowance plus square-root time gives short-note bursts room
 /// while sustained notes consume less space than a linear tick scale would.
-fn temporal_spacing(score: &Score, parts: &[usize], measure: usize) -> Arc<[(f32, f32)]> {
+fn temporal_spacing(
+    score: &Score,
+    parts: &[usize],
+    measure: usize,
+    offsets: &VoiceOffsets,
+) -> Arc<[(f32, f32)]> {
     let ticks = score.measure_ticks().max(1);
     let mut times = BTreeSet::from([0, ticks]);
     let beat = (PPQ * 4 / u32::from(score.time_denominator.max(1))).max(1);
@@ -149,6 +166,17 @@ fn temporal_spacing(score: &Score, parts: &[usize], measure: usize) -> Arc<[(f32
     let mut lyric_widths = BTreeMap::<u32, f32>::new();
     let grace_widths = grace::widths(score, parts, measure);
     let chord_widths = chords::widths(score, parts, measure);
+    let mut collision_widths = BTreeMap::<u32, f32>::new();
+    for &part in parts {
+        if let Some(map) = offsets.get(&(part, measure)) {
+            for (&(tick, _), &offset) in map.iter() {
+                collision_widths
+                    .entry(tick)
+                    .and_modify(|v| *v = v.max(offset))
+                    .or_insert(offset);
+            }
+        }
+    }
     times.extend(chord_widths.keys().copied());
     for lyric in score
         .notation
@@ -180,6 +208,7 @@ fn temporal_spacing(score: &Score, parts: &[usize], measure: usize) -> Arc<[(f32
             cumulative += (16.0 + 12.0 * quarters.sqrt())
                 .max(lyric_space)
                 .max(chord_space);
+            cumulative += collision_widths.get(&previous).copied().unwrap_or(0.0);
             let grace_space = grace_widths.get(&previous).map_or(0.0, |w| w.1)
                 + grace_widths.get(&time).map_or(0.0, |w| w.0);
             if grace_space > 0.0 {
@@ -359,10 +388,142 @@ fn centered_text(page: &mut Page, center: f32, y: f32, text: &str, size: f32, se
 }
 
 type EntryStyles<'a> = BTreeMap<crate::document::Anchor, &'a crate::entry_style::EntryStyle>;
+type MeasureOffsets = Arc<BTreeMap<(u32, u8), f32>>;
+type VoiceOffsets = BTreeMap<(usize, usize), MeasureOffsets>;
 struct RenderContext<'a> {
     spacing: Vec<Arc<[(f32, f32)]>>,
     styles: EntryStyles<'a>,
     pitches: crate::lines::PitchIndex,
+    offsets: VoiceOffsets,
+}
+fn paired_layers(notes: &[Note]) -> u8 {
+    let mut layers = [0u8; 4];
+    for n in notes {
+        if n.layer < 4 && n.voice < 2 {
+            layers[n.layer as usize] |= 1 << n.voice;
+        }
+    }
+    layers
+        .iter()
+        .enumerate()
+        .fold(0, |mask, (i, v)| mask | if *v == 3 { 1 << i } else { 0 })
+}
+fn default_stem_up(paired: u8, note: &Note, mid: f32, multiple: bool) -> bool {
+    if paired & (1 << note.layer) != 0 {
+        note.voice == 0
+    } else if note.voice == 1 {
+        false
+    } else if multiple {
+        note.layer.is_multiple_of(2)
+    } else {
+        mid >= 20.0
+    }
+}
+fn automatic_slur_above(score: &Score, anchor: crate::document::Anchor) -> bool {
+    let notes = score
+        .parts
+        .get(anchor.part)
+        .and_then(|p| p.measures.get(anchor.measure))
+        .map_or(&[][..], |m| m.notes.as_slice());
+    if anchor.voice == 1 {
+        false
+    } else if notes
+        .iter()
+        .any(|n| n.layer == anchor.layer && n.voice == 1)
+    {
+        true
+    } else {
+        anchor.layer.is_multiple_of(2)
+    }
+}
+fn collision_offsets(
+    score: &Score,
+    parts: &[usize],
+    pitches: &crate::lines::PitchIndex,
+    styles: &EntryStyles<'_>,
+) -> VoiceOffsets {
+    let mut result = BTreeMap::new();
+    let mut ornaments = BTreeMap::<crate::document::Anchor, (f32, f32)>::new();
+    for group in &score.notation.grace {
+        let span = ornaments.entry(group.anchor).or_default();
+        if group.placement == crate::grace::GracePlacement::Before {
+            span.0 = grace::width(group) + 6.0;
+        } else {
+            span.1 = grace::width(group) + 18.0;
+        }
+    }
+    for &part in parts {
+        for (measure, bar) in score.parts[part].measures.iter().enumerate() {
+            if !bar.notes.iter().any(|n| n.voice == 1) {
+                continue;
+            }
+            let mut onsets = BTreeMap::<u32, Vec<&Note>>::new();
+            for n in &bar.notes {
+                if !n.pitches.is_empty() {
+                    onsets.entry(n.start).or_default().push(n);
+                }
+            }
+            let mut offsets = BTreeMap::new();
+            for (tick, mut notes) in onsets {
+                notes.sort_by_key(|n| n.lane());
+                let mut prior = Vec::<(Vec<i32>, f32, f32, bool)>::new();
+                for n in notes {
+                    let a = crate::document::Anchor {
+                        part,
+                        measure,
+                        tick,
+                        layer: n.layer,
+                        voice: n.voice,
+                    };
+                    let positions = n
+                        .pitches
+                        .iter()
+                        .map(|p| pitches.written_pitch(a, *p).staff_step())
+                        .collect::<Vec<_>>();
+                    let style = styles.get(&a);
+                    if style.is_some_and(|s| !s.visible) {
+                        continue;
+                    }
+                    let scale = style.map_or(1.0, |s| s.scale);
+                    let chord_seconds = positions.windows(2).any(|p| (p[1] - p[0]).abs() == 1);
+                    let accidental = if style.is_some_and(|s| !s.accidentals.is_empty()) {
+                        30.0
+                    } else if n
+                        .pitches
+                        .iter()
+                        .any(|p| p.alter != key_alter(p.step, score.key_fifths))
+                    {
+                        17.0
+                    } else {
+                        0.0
+                    };
+                    let ornament = ornaments.get(&a).copied().unwrap_or_default();
+                    let has_ornament = ornament.0 > 0.0 || ornament.1 > 0.0;
+                    let left = 6.0 * scale
+                        + if chord_seconds { 10.0 * scale } else { 0.0 }
+                        + accidental
+                        + ornament.0;
+                    let right =
+                        7.0 * scale + if chord_seconds { 10.0 * scale } else { 0.0 } + ornament.1;
+                    let mut offset = 0.0f32;
+                    for (other, x, prior_right, prior_ornament) in &prior {
+                        if has_ornament
+                            || *prior_ornament
+                            || positions
+                                .iter()
+                                .any(|p| other.iter().any(|q| (p - q).abs() <= 1))
+                        {
+                            offset = offset.max(x + prior_right + left + 2.0);
+                        }
+                    }
+                    offsets.insert((tick, n.lane()), offset);
+                    prior.push((positions, offset, right, has_ornament));
+                }
+            }
+            result.insert((part, measure), Arc::new(offsets));
+        }
+    }
+    result
 }
 fn render_ties(note: &Note, style: Option<&&crate::entry_style::EntryStyle>, midi: u8) -> bool {
     style.and_then(|s| s.tie_pitches.as_ref()).map_or_else(
@@ -411,18 +572,22 @@ pub fn engrave(score: &Score, options: &EngravingOptions) -> Vec<Page> {
     }
     let count = score.measure_count().max(1);
     let ticks = score.measure_ticks().max(1);
+    let pitches = crate::lines::PitchIndex::new(score);
+    let styles = score
+        .notation
+        .entries
+        .iter()
+        .map(|style| (style.anchor, style))
+        .collect();
+    let offsets = collision_offsets(score, &parts, &pitches, &styles);
     let measure_spacing = (0..count)
-        .map(|measure| temporal_spacing(score, &parts, measure))
+        .map(|measure| temporal_spacing(score, &parts, measure, &offsets))
         .collect::<Vec<_>>();
     let context = RenderContext {
-        pitches: crate::lines::PitchIndex::new(score),
+        pitches,
+        offsets,
         spacing: measure_spacing,
-        styles: score
-            .notation
-            .entries
-            .iter()
-            .map(|style| (style.anchor, style))
-            .collect(),
+        styles,
     };
     let key = score.key_fifths.clamp(-7, 7);
     let label_x = layout.margins.left / scale;
@@ -455,6 +620,18 @@ pub fn engrave(score: &Score, options: &EngravingOptions) -> Vec<Page> {
                     .max(lyrics::horizontal_requirement(score, &parts, m))
                     .max(chords::widths(score, &parts, m).values().sum())
                     + grace::horizontal_requirement(score, &parts, m);
+                let mut collisions = BTreeMap::<u32, f32>::new();
+                for &part in &parts {
+                    if let Some(map) = context.offsets.get(&(part, m)) {
+                        for (&(tick, _), &offset) in map.iter() {
+                            collisions
+                                .entry(tick)
+                                .and_modify(|v| *v = v.max(offset))
+                                .or_insert(offset);
+                        }
+                    }
+                }
+                let need = need + collisions.values().sum::<f32>();
                 let content = widths[offset] - if offset == 0 { header } else { 13.0 } - 12.0;
                 need <= content
             });
@@ -625,6 +802,11 @@ pub fn engrave(score: &Score, options: &EngravingOptions) -> Vec<Page> {
                         content_x,
                         content_width,
                         temporal_anchors: context.spacing[m].clone(),
+                        anchor_offsets: context
+                            .offsets
+                            .get(&(part_index, m))
+                            .cloned()
+                            .unwrap_or_default(),
                     };
                     if staff == 0 {
                         page.text(
@@ -755,6 +937,13 @@ fn scale_page(page: &mut Page, scale: f32) {
         staff.spacing *= scale;
         staff.content_x *= scale;
         staff.content_width *= scale;
+        staff.anchor_offsets = Arc::new(
+            staff
+                .anchor_offsets
+                .iter()
+                .map(|(k, v)| (*k, *v * scale))
+                .collect(),
+        );
     }
     for hit in &mut page.hits {
         hit.x *= scale;
@@ -889,10 +1078,11 @@ fn system_layout(
         let (mut above, mut below) = (25.0_f32, 66.0_f32);
         for m in measure..measure + bars {
             if let Some(bar) = part.measures.get(m) {
+                let paired = paired_layers(&bar.notes);
                 let multiple_layers = bar
                     .notes
                     .first()
-                    .is_some_and(|first| bar.notes.iter().any(|note| note.layer != first.layer));
+                    .is_some_and(|first| bar.notes.iter().any(|note| note.lane() != first.lane()));
                 if bar
                     .notes
                     .iter()
@@ -904,6 +1094,7 @@ fn system_layout(
                 }
                 for note in &bar.notes {
                     let anchor = crate::document::Anchor {
+                        voice: note.voice,
                         part: p,
                         measure: m,
                         tick: note.start,
@@ -915,6 +1106,13 @@ fn system_layout(
                     }
                     let entry_scale = style.map_or(1.0, |s| s.scale);
                     if note.pitches.is_empty() {
+                        if bar.notes.iter().any(|n| n.voice == 1) {
+                            let shift = 10.0
+                                * (f32::from(note.layer) + 1.0)
+                                * if note.voice == 0 { -1.0 } else { 1.0 };
+                            above = above.max(-shift + 10.0);
+                            below = below.max(shift + 45.0);
+                        }
                         continue;
                     }
                     let ys: Vec<f32> = note
@@ -924,11 +1122,12 @@ fn system_layout(
                             pitch_y(&context.pitches.written_pitch(anchor, *p), part.clef, 0.0)
                         })
                         .collect();
-                    let automatic = if multiple_layers {
-                        note.layer.is_multiple_of(2)
-                    } else {
-                        ys.iter().sum::<f32>() / ys.len() as f32 >= 20.0
-                    };
+                    let automatic = default_stem_up(
+                        paired,
+                        note,
+                        ys.iter().sum::<f32>() / ys.len() as f32,
+                        multiple_layers,
+                    );
                     let up = style.map_or(automatic, |s| entry_style::stem_up(s, automatic));
                     let stem = note.duration.has_stem()
                         && style.is_none_or(|s| s.stem != crate::entry_style::StemDirection::None);
@@ -1013,6 +1212,7 @@ fn system_layout(
                         content_x,
                         content_width: (width - (content_x - x) - 12.0).max(20.0),
                         temporal_anchors: context.spacing[m].clone(),
+                        anchor_offsets: context.offsets.get(&(p, m)).cloned().unwrap_or_default(),
                     };
                     x += width;
                     region
@@ -1081,6 +1281,7 @@ fn wrap_label(text: &str, limit: usize) -> (String, String) {
 
 #[derive(Clone)]
 struct NoteLayout {
+    voice_launch: Option<u32>,
     x: f32,
     top: f32,
     bottom: f32,
@@ -1113,8 +1314,8 @@ fn draw_measure(
         );
         return;
     }
-    let layers = (0..4)
-        .filter(|layer| measure.notes.iter().any(|note| note.layer == *layer))
+    let layers = (0..8)
+        .filter(|lane| measure.notes.iter().any(|note| note.lane() == *lane))
         .collect::<Vec<_>>();
     for &layer in &layers {
         draw_measure_layer(
@@ -1159,6 +1360,8 @@ fn draw_measure_layer(
     multiple_layers: bool,
     context: &RenderContext<'_>,
 ) {
+    let voice = layer / 4;
+    let layer = layer % 4;
     let styles = &context.styles;
     let part = &score.parts[region.part];
     let notes = part
@@ -1166,6 +1369,7 @@ fn draw_measure_layer(
         .get(region.measure)
         .map(|m| m.notes.as_slice())
         .unwrap_or(&[]);
+    let paired = paired_layers(notes);
     let ticks = score.measure_ticks().max(1);
     if notes.is_empty() {
         whole_rest(
@@ -1177,23 +1381,34 @@ fn draw_measure_layer(
     }
     let mut rest_region = region.clone();
     if multiple_layers {
-        rest_region.y += match layer {
-            0 => -10.0,
-            1 => 10.0,
-            2 => -20.0,
-            _ => 20.0,
+        rest_region.y += if notes.iter().any(|n| n.voice == 1) {
+            if voice == 1 {
+                10.0 * (f32::from(layer) + 1.0)
+            } else {
+                -10.0 * (f32::from(layer) + 1.0)
+            }
+        } else {
+            match layer {
+                0 => -10.0,
+                1 => 10.0,
+                2 => -20.0,
+                _ => 20.0,
+            }
         };
     }
     let mut order: Vec<usize> = (0..notes.len())
-        .filter(|index| notes[*index].layer == layer)
+        .filter(|index| notes[*index].layer == layer && notes[*index].voice == voice)
         .collect();
     order.sort_by_key(|&n| notes[n].start);
     let mut layouts = vec![];
     let mut accidental_state: BTreeMap<(i32, i8), i8> = BTreeMap::new();
     let mut previous_end = 0;
+    let mut previous_launch = None;
+    let mut seen = false;
     for &n in &order {
         let note = &notes[n];
         let anchor = crate::document::Anchor {
+            voice: note.voice,
             part: region.part,
             measure: region.measure,
             tick: note.start,
@@ -1205,10 +1420,11 @@ fn draw_measure_layer(
             previous_end = previous_end.max(note.start.saturating_add(note.ticks()));
             continue;
         }
-        if note.start > previous_end {
+        if note.start > previous_end && (voice == 0 || seen && previous_launch == note.voice_launch)
+        {
             gap_rests(page, &rest_region, previous_end, note.start.min(ticks));
         }
-        let x = region.x_at_tick(note.start as f32);
+        let x = region.x_at_anchor(&anchor);
         let selection = Selection {
             part: region.part,
             measure: region.measure,
@@ -1226,7 +1442,7 @@ fn draw_measure_layer(
             })
             .collect();
         let mid = if ys.is_empty() {
-            region.y + 20.0
+            rest_region.y + 20.0
         } else {
             ys.iter().sum::<f32>() / ys.len() as f32
         };
@@ -1254,11 +1470,7 @@ fn draw_measure_layer(
         } else {
             let top = ys.iter().copied().fold(f32::INFINITY, f32::min);
             let bottom = ys.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-            let automatic = if multiple_layers {
-                layer.is_multiple_of(2)
-            } else {
-                mid >= region.y + 20.0
-            };
+            let automatic = default_stem_up(paired, note, mid - region.y, multiple_layers);
             let up = entry_style::stem_up(style, automatic);
             let mut sorted: Vec<usize> = (0..note.pitches.len()).collect();
             sorted.sort_by_key(|&i| note.pitches[i].staff_step());
@@ -1376,11 +1588,13 @@ fn draw_measure_layer(
                 let previous = part.measures.get(region.measure - 1).and_then(|m| {
                     m.notes.iter().find(|p| {
                         p.layer == layer
+                            && p.voice == voice
                             && p.start.saturating_add(p.ticks()) == ticks
                             && note.pitches.iter().any(|pitch| {
                                 render_ties(
                                     p,
                                     styles.get(&crate::document::Anchor {
+                                        voice,
                                         part: region.part,
                                         measure: region.measure - 1,
                                         tick: p.start,
@@ -1393,6 +1607,7 @@ fn draw_measure_layer(
                 });
                 if let Some(previous) = previous {
                     let prior_anchor = crate::document::Anchor {
+                        voice,
                         part: region.part,
                         measure: region.measure - 1,
                         tick: previous.start,
@@ -1423,6 +1638,7 @@ fn draw_measure_layer(
                 }
             }
             layouts.push(NoteLayout {
+                voice_launch: note.voice_launch,
                 x,
                 top,
                 bottom,
@@ -1442,8 +1658,10 @@ fn draw_measure_layer(
             });
         }
         previous_end = previous_end.max(note.start.saturating_add(note.ticks()));
+        previous_launch = note.voice_launch;
+        seen = true;
     }
-    if previous_end < ticks {
+    if voice == 0 && previous_end < ticks {
         gap_rests(page, &rest_region, previous_end, ticks);
     }
     // Beam within beats. A rest or duration boundary always breaks a group.
@@ -1468,6 +1686,7 @@ fn draw_measure_layer(
                 && layouts[end].beam != crate::entry_style::BeamStyle::Break
                 && layouts[end].duration.flags() > 0
                 && layouts[end - 1].end == layouts[end].start
+                && (voice == 0 || layouts[end - 1].voice_launch == layouts[end].voice_launch)
                 && (layouts[end].beam == crate::entry_style::BeamStyle::Join
                     || layouts[end].start / beat == layouts[i].start / beat)
                 && !matches!((layouts[i].forced_up,layouts[end].forced_up),(Some(a),Some(b))if a!=b)
@@ -1487,20 +1706,38 @@ fn draw_measure_layer(
     }
     let layer_notes = notes
         .iter()
-        .filter(|note| note.layer == layer)
+        .filter(|note| note.layer == layer && note.voice == voice)
         .collect::<Vec<_>>();
     draw_tuplets(
         page,
         region,
         part.clef,
         &layer_notes,
-        multiple_layers && !layer.is_multiple_of(2),
+        voice == 1
+            || (multiple_layers
+                && !layer.is_multiple_of(2)
+                && !notes.iter().any(|n| n.layer == layer && n.voice == 1)),
+        &context.pitches,
     );
 }
 
 /// Tuplet ratios are event metadata. Consecutive equal ratios form groups of
 /// `actual` written notes; rests remain inside the visible bracket.
-fn draw_tuplets(page: &mut Page, region: &StaffRegion, clef: Clef, notes: &[&Note], below: bool) {
+fn draw_tuplets(
+    page: &mut Page,
+    region: &StaffRegion,
+    clef: Clef,
+    notes: &[&Note],
+    below: bool,
+    pitches: &crate::lines::PitchIndex,
+) {
+    let anchor = |n: &Note| crate::document::Anchor {
+        part: region.part,
+        measure: region.measure,
+        tick: n.start,
+        layer: n.layer,
+        voice: n.voice,
+    };
     let mut index = 0;
     while index < notes.len() {
         let Some(ratio) = notes[index].tuplet else {
@@ -1513,18 +1750,24 @@ fn draw_tuplets(page: &mut Page, region: &StaffRegion, clef: Clef, notes: &[&Not
             && index - first < usize::from(ratio.actual)
             && notes[index].tuplet == Some(ratio)
             && notes[index - 1].start + notes[index - 1].ticks() == notes[index].start
+            && (notes[index].voice == 0
+                || notes[index - 1].voice_launch == notes[index].voice_launch)
         {
             index += 1;
         }
         let first_note = &notes[first];
         let last_note = &notes[index - 1];
-        let x1 = region.x_at_tick(first_note.start as f32) - 7.0;
-        let last_x = region.x_at_tick(last_note.start as f32);
+        let x1 = region.x_at_anchor(&anchor(first_note)) - 7.0;
+        let last_x = region.x_at_anchor(&anchor(last_note));
         let x2 = (last_x + 10.0).max(x1 + 28.0);
         let highest = notes[first..index]
             .iter()
-            .flat_map(|note| note.pitches.iter())
-            .map(|pitch| pitch_y(pitch, clef, region.y))
+            .flat_map(|note| {
+                note.pitches
+                    .iter()
+                    .map(|p| pitches.written_pitch(anchor(note), *p))
+            })
+            .map(|pitch| pitch_y(&pitch, clef, region.y))
             .fold(region.y, f32::min);
         let max_flags = notes[first..index]
             .iter()
@@ -1533,8 +1776,12 @@ fn draw_tuplets(page: &mut Page, region: &StaffRegion, clef: Clef, notes: &[&Not
             .unwrap_or(0);
         let lowest = notes[first..index]
             .iter()
-            .flat_map(|note| note.pitches.iter())
-            .map(|pitch| pitch_y(pitch, clef, region.y))
+            .flat_map(|note| {
+                note.pitches
+                    .iter()
+                    .map(|p| pitches.written_pitch(anchor(note), *p))
+            })
+            .map(|pitch| pitch_y(&pitch, clef, region.y))
             .fold(region.y + 40.0, f32::max);
         let y = if below {
             lowest + 46.0 + max_flags.saturating_sub(2) as f32 * 7.0
@@ -1604,6 +1851,7 @@ fn articulation_clearance(note: &Note) -> Option<f32> {
 }
 
 fn staff_dynamic_baseline(notes: &[Note], clef: Clef, y: f32, multiple_layers: bool) -> f32 {
+    let paired = paired_layers(notes);
     notes
         .iter()
         .filter(|note| !note.pitches.is_empty())
@@ -1615,11 +1863,12 @@ fn staff_dynamic_baseline(notes: &[Note], clef: Clef, y: f32, multiple_layers: b
                 .fold((f32::NEG_INFINITY, 0.0), |(bottom, sum), position| {
                     (bottom.max(position), sum + position)
                 });
-            let up = if multiple_layers {
-                note.layer.is_multiple_of(2)
-            } else {
-                sum / note.pitches.len() as f32 >= y + 20.0
-            };
+            let up = default_stem_up(
+                paired,
+                note,
+                sum / note.pitches.len() as f32 - y,
+                multiple_layers,
+            );
             let stem_clearance = if !up && note.duration.has_stem() {
                 stem_length(note.duration) + 19.0
             } else {
@@ -2000,10 +2249,18 @@ fn draw_pitch_tie(
     let next = score.parts[r.part].measures.get(r.measure).and_then(|m| {
         m.notes
             .iter()
-            .find(|v| v.layer == n.layer && v.start >= end)
+            .find(|v| v.lane() == n.lane() && v.start >= end)
     });
     let x2 = next
-        .map(|next| r.x_at_tick(next.start as f32) - 8.0)
+        .map(|next| {
+            r.x_at_anchor(&crate::document::Anchor {
+                part: r.part,
+                measure: r.measure,
+                tick: next.start,
+                layer: next.layer,
+                voice: next.voice,
+            }) - 8.0
+        })
         .unwrap_or(r.x + r.width - 8.0)
         .max(x + 13.0);
     tie_arc(page, x + 8.0, x2, y, below);
@@ -2022,10 +2279,18 @@ fn draw_tie(
     let next = score.parts[r.part].measures.get(r.measure).and_then(|m| {
         m.notes
             .iter()
-            .find(|v| v.layer == n.layer && v.start >= end)
+            .find(|v| v.lane() == n.lane() && v.start >= end)
     });
     let x2 = next
-        .map(|next| r.x_at_tick(next.start as f32) - 4.0)
+        .map(|next| {
+            r.x_at_anchor(&crate::document::Anchor {
+                part: r.part,
+                measure: r.measure,
+                tick: next.start,
+                layer: next.layer,
+                voice: next.voice,
+            }) - 4.0
+        })
         .unwrap_or(r.x + r.width - 8.0)
         .max(x + 11.0);
     tie_arc(page, x + 3.0, x2, y, below);
@@ -2996,6 +3261,8 @@ mod tests {
     #[test]
     fn dynamic_changes_are_not_repeated_and_rests_do_not_reset_them() {
         let mut note = Note {
+            voice: 0,
+            voice_launch: None,
             articulations: Vec::new(),
             start: 0,
             duration: Duration::Quarter,
@@ -3059,6 +3326,8 @@ mod tests {
         score.parts.truncate(1);
         score.parts[0].measures.truncate(1);
         let make_note = |start, duration, tuplet| Note {
+            voice: 0,
+            voice_launch: None,
             articulations: Vec::new(),
             start,
             duration,
@@ -3089,6 +3358,7 @@ mod tests {
         assert!(pdf(&pages).starts_with(b"%PDF"));
         let mut page = Page::new();
         let layout = |x, start| NoteLayout {
+            voice_launch: None,
             x,
             top: 20.0,
             bottom: 20.0,
@@ -3119,6 +3389,8 @@ mod tests {
         score.parts[0].measures.truncate(1);
         score.parts[0].measures[0].notes = (0..2)
             .map(|layer| Note {
+                voice: 0,
+                voice_launch: None,
                 articulations: Vec::new(),
                 layer,
                 start: 0,
@@ -3149,6 +3421,8 @@ mod tests {
         score.parts[0].measures.truncate(2);
         let notes = (0..4)
             .map(|layer| Note {
+                voice: 0,
+                voice_launch: None,
                 articulations: Vec::new(),
                 layer,
                 start: 0,
@@ -3199,6 +3473,8 @@ mod tests {
     fn staff_dynamics_group_conflicting_attacks_and_retain_later_changes() {
         let mut notes = (0..4)
             .map(|layer| Note {
+                voice: 0,
+                voice_launch: None,
                 articulations: Vec::new(),
                 layer,
                 start: 0,
@@ -3225,6 +3501,8 @@ mod tests {
     fn burst_score() -> Score {
         let mut score = Score::blank();
         let make_note = |start, duration, layer| Note {
+            voice: 0,
+            voice_launch: None,
             articulations: Vec::new(),
             layer,
             start,
@@ -3571,6 +3849,8 @@ mod entry_override_tests {
         s.parts[0].measures.truncate(1);
         for start in [0, 240] {
             s.parts[0].measures[0].notes.push(Note {
+                voice: 0,
+                voice_launch: None,
                 start,
                 layer: 0,
                 duration: Duration::Eighth,
@@ -3587,6 +3867,7 @@ mod entry_override_tests {
     }
     fn at(tick: u32) -> Anchor {
         Anchor {
+            voice: 0,
             part: 0,
             measure: 0,
             tick,

@@ -132,6 +132,8 @@ pub struct EncoreApp {
     selected: Option<Selection>,
     active_part: usize,
     active_layer: u8,
+    active_voice: u8,
+    active_voice_launch: Option<encore::document::Anchor>,
     cursor_measure: usize,
     cursor_tick: u32,
     duration: Duration,
@@ -241,6 +243,8 @@ impl EncoreApp {
             selected: None,
             active_part: 0,
             active_layer: 0,
+            active_voice: 0,
+            active_voice_launch: None,
             cursor_measure: 0,
             cursor_tick: 0,
             duration: Duration::Quarter,
@@ -382,6 +386,8 @@ impl EncoreApp {
         self.selected = None;
         self.active_part = 0;
         self.active_layer = 0;
+        self.active_voice = 0;
+        self.active_voice_launch = None;
         self.duration = Duration::Quarter;
         self.dotted = false;
         self.rest = false;
@@ -801,25 +807,28 @@ impl EncoreApp {
     }
 
     fn delete_selected(&mut self) {
-        if let Some(anchor) = self
-            .selected
-            .and_then(|selection| encore::document::Anchor::from_selection(&self.score, selection))
-        {
-            encore::document::remove_anchor(&mut self.score, &anchor);
+        let Some(sel) = self.selected else {
+            return;
+        };
+        let Some(anchor) = encore::document::Anchor::from_selection(&self.score, sel) else {
+            return;
+        };
+        let mut candidate = self.score.clone();
+        encore::document::remove_anchor(&mut candidate, &anchor);
+        candidate.parts[sel.part].measures[sel.measure]
+            .notes
+            .remove(sel.note);
+        if let Err(error) = candidate.validate() {
+            self.status = format!(
+                "Cannot delete this entry: {error} Remove or relocate its secondary branch first, or convert the primary entry to a rest."
+            );
+            return;
         }
-        if let Some(sel) = self.selected.take()
-            && let Some(m) = self
-                .score
-                .parts
-                .get_mut(sel.part)
-                .and_then(|p| p.measures.get_mut(sel.measure))
-            && sel.note < m.notes.len()
-        {
-            let n = m.notes.remove(sel.note);
-            self.cursor_measure = sel.measure;
-            self.cursor_tick = n.start;
-            self.status = "Note removed".into();
-        }
+        self.score = candidate;
+        self.selected = None;
+        self.cursor_measure = sel.measure;
+        self.cursor_tick = anchor.tick;
+        self.status = "Note removed".into();
     }
 
     fn trim_last_empty_bar(&mut self) -> Result<(), String> {
@@ -868,7 +877,36 @@ impl EncoreApp {
         self.selected = None;
     }
 
-    fn enter_note(
+    fn enter_note(&mut self, part: usize, measure: usize, start: u32, pitch: Pitch, chord: bool) {
+        let original = self.score.clone();
+        let location = (
+            self.selected,
+            self.active_part,
+            self.cursor_measure,
+            self.cursor_tick,
+            self.entry_pitch,
+            self.octave,
+            self.tuplet,
+            self.tuplet_remaining,
+        );
+        self.enter_note_candidate(part, measure, start, pitch, chord);
+        if let Err(error) = self.score.validate() {
+            self.score = original;
+            (
+                self.selected,
+                self.active_part,
+                self.cursor_measure,
+                self.cursor_tick,
+                self.entry_pitch,
+                self.octave,
+                self.tuplet,
+                self.tuplet_remaining,
+            ) = location;
+            self.status = format!("Cannot enter this note: {error}");
+        }
+    }
+
+    fn enter_note_candidate(
         &mut self,
         part: usize,
         measure: usize,
@@ -887,7 +925,16 @@ impl EncoreApp {
             self.status = "Pitch is outside the supported MIDI range (C−1 to G9).".into();
             return;
         }
+        let voice_launch = match self.entry_voice_launch(part, measure, start) {
+            Ok(value) => value,
+            Err(error) => {
+                self.status = error;
+                return;
+            }
+        };
         let proposed = Note {
+            voice: self.active_voice,
+            voice_launch,
             start,
             duration: self.duration,
             dotted: self.dotted,
@@ -910,10 +957,9 @@ impl EncoreApp {
         let m = &mut self.score.parts[part].measures[measure];
         if chord
             && !self.rest
-            && let Some(i) = m
-                .notes
-                .iter()
-                .position(|n| n.start == start && n.layer == self.active_layer)
+            && let Some(i) = m.notes.iter().position(|n| {
+                n.start == start && n.layer == self.active_layer && n.voice == self.active_voice
+            })
         {
             if !m.notes[i].pitches.iter().any(|p| p.midi() == pitch.midi())
                 && m.notes[i].pitches.len() < 16
@@ -934,6 +980,7 @@ impl EncoreApp {
         }
         if m.notes.iter().any(|n| {
             n.layer == self.active_layer
+                && n.voice == self.active_voice
                 && n.start != start
                 && start < n.start + n.ticks()
                 && start + ticks > n.start
@@ -946,16 +993,21 @@ impl EncoreApp {
         let previous_note = m
             .notes
             .iter()
-            .find(|n| n.start == start && n.layer == self.active_layer)
+            .find(|n| {
+                n.start == start && n.layer == self.active_layer && n.voice == self.active_voice
+            })
             .cloned();
-        m.notes
-            .retain(|n| n.start != start || n.layer != self.active_layer);
+        m.notes.retain(|n| {
+            n.start != start || n.layer != self.active_layer || n.voice != self.active_voice
+        });
         m.notes.push(proposed);
-        m.notes.sort_by_key(|n| n.start);
+        m.notes.sort_by_key(|n| (n.start, n.layer, n.voice));
         let i = m
             .notes
             .iter()
-            .position(|n| n.start == start && n.layer == self.active_layer)
+            .position(|n| {
+                n.start == start && n.layer == self.active_layer && n.voice == self.active_voice
+            })
             .unwrap();
         self.selected = Some(Selection {
             part,
@@ -970,6 +1022,7 @@ impl EncoreApp {
                     measure,
                     tick: start,
                     layer: self.active_layer,
+                    voice: self.active_voice,
                 },
                 &old,
             );
@@ -1008,6 +1061,7 @@ impl EncoreApp {
                     measure,
                     tick: start,
                     layer: self.active_layer,
+                    voice: self.active_voice,
                 },
             );
         }
@@ -1869,6 +1923,11 @@ impl EncoreApp {
                                 }
                             }
                         });
+                    for voice in 0..=1 {
+                        if ui.selectable_label(self.active_voice==voice,format!("V{}",voice+1))
+                            .on_hover_text("Two independent rhythmic voices in each layer; Speedy Entry: apostrophe")
+                            .clicked() { self.set_entry_voice(voice); }
+                    }
                     for d in Duration::ALL {
                         ui.selectable_value(
                             &mut self.duration,
@@ -2082,6 +2141,7 @@ impl EncoreApp {
                     let original = n.clone();
                     if n.pitches.len()>1 {egui::ComboBox::from_id_salt("chord-pitch").selected_text(format!("Edit pitch: {}",self.entry_pitch.name())).show_ui(ui,|ui|{for pitch in &n.pitches{if ui.selectable_value(&mut self.entry_pitch,*pitch,pitch.name()).changed(){self.octave=written_interval.written_pitch(*pitch).map_or(pitch.octave,|written|written.octave);}}});}
                     egui::ComboBox::from_label("Duration").selected_text(n.duration.name()).show_ui(ui, |ui| { for &d in Duration::ALL { ui.selectable_value(&mut n.duration, d, d.name()); } });
+                    ui.label(format!("Voice {}", n.voice+1));
                     egui::ComboBox::from_id_salt("note-layer").selected_text(format!("Layer {}",n.layer+1)).show_ui(ui,|ui|{for layer in 0..4{ui.selectable_value(&mut n.layer,layer,format!("Layer {}",layer+1));}});
                     ui.checkbox(&mut n.dotted, "Dotted");
                     let mut is_tuplet=n.tuplet.is_some();
@@ -2103,7 +2163,7 @@ impl EncoreApp {
                     if n.ticks() + n.start > self.score.measure_ticks() { self.score.parts[s.part].measures[s.measure].notes[s.note] = original.clone(); self.status = "That duration extends past the barline.".into(); }
                     let m = &self.score.parts[s.part].measures[s.measure];
                     let n = &m.notes[s.note];
-                    if m.notes.iter().enumerate().any(|(i,x)| i!=s.note && n.layer==x.layer && n.start < x.start+x.ticks() && n.start+n.ticks()>x.start) { self.score.parts[s.part].measures[s.measure].notes[s.note] = original; self.status = "That duration overlaps the next event.".into(); }
+                    if m.notes.iter().enumerate().any(|(i,x)| i!=s.note && n.lane()==x.lane() && n.start < x.start+x.ticks() && n.start+n.ticks()>x.start) { self.score.parts[s.part].measures[s.measure].notes[s.note] = original; self.status = "That duration overlaps the next event.".into(); }
                     ui.add_space(12.0); ui.horizontal(|ui| { if ui.button("− semitone").clicked() { self.transpose(-1); }
  if ui.button("+").clicked() { self.transpose(1); } });
                     ui.horizontal(|ui| { if ui.button("− octave").clicked() { self.transpose(-12); }
@@ -2155,8 +2215,14 @@ impl EncoreApp {
         ) && from != to
             && let Err(error) = encore::document::move_anchor(&mut self.score, from, to)
         {
-            self.score = previous_score;
+            self.score = previous_score.clone();
             self.status = error;
+        }
+        if self.score != previous_score
+            && let Err(error) = self.score.validate()
+        {
+            self.score = previous_score;
+            self.status = format!("Cannot change entry: {error}");
         }
     }
 
@@ -2493,7 +2559,13 @@ impl EncoreApp {
                             {
                                 let target = rect.min
                                     + Vec2::new(
-                                        staff.x_at_tick(tick as f32),
+                                        staff.x_at_anchor(&encore::document::Anchor {
+                                            part,
+                                            measure: bar,
+                                            tick,
+                                            layer: self.active_layer,
+                                            voice: self.active_voice,
+                                        }),
                                         staff.y + staff.spacing * 2.0,
                                     ) * self.zoom;
                                 ui.scroll_to_rect(
@@ -2718,6 +2790,8 @@ impl EncoreApp {
                     self.active_part = sel.part;
                     self.active_layer =
                         self.score.parts[sel.part].measures[sel.measure].notes[sel.note].layer;
+                    self.active_voice =
+                        self.score.parts[sel.part].measures[sel.measure].notes[sel.note].voice;
                     if let Some(pitch) = self.score.parts[sel.part].measures[sel.measure].notes
                         [sel.note]
                         .pitches
@@ -2802,6 +2876,7 @@ impl EncoreApp {
                             )
                         };
                     let anchor = encore::document::Anchor {
+                        voice: self.active_voice,
                         part,
                         measure,
                         tick: start,
@@ -3226,6 +3301,14 @@ impl EncoreApp {
                 .and_then(|m| m.notes.get(s.note))
         {
             self.active_layer = note.layer;
+            self.active_voice = note.voice;
+            self.active_voice_launch = note.voice_launch.map(|tick| encore::document::Anchor {
+                part: s.part,
+                measure: s.measure,
+                tick,
+                layer: note.layer,
+                voice: 0,
+            });
         }
         self.reconcile_part_staff();
         self.keyboard(ctx);

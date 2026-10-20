@@ -38,7 +38,9 @@ fn encode_document_event(
     grace: Vec<encore::grace::GraceGroup>,
 ) -> Result<String, String> {
     let data = serde_json::to_string(&ClipboardEvent {
-        version: if !grace.is_empty() {
+        version: if note.voice != 0 || note.voice_launch.is_some() {
+            5
+        } else if !grace.is_empty() {
             4
         } else if style.is_some() {
             3
@@ -68,7 +70,7 @@ fn decode_event(text: &str) -> Result<ClipboardEvent, String> {
         .ok_or("Copy a single note, chord, or rest in Encore before pasting.")?;
     let event: ClipboardEvent = serde_json::from_str(data)
         .map_err(|error| format!("Invalid Encore clipboard event: {error}"))?;
-    if ![1, 2, 3, 4].contains(&event.version) {
+    if ![1, 2, 3, 4, 5].contains(&event.version) {
         return Err("This clipboard event requires a different Encore version.".into());
     }
     Ok(event)
@@ -142,6 +144,7 @@ impl EncoreApp {
             self.selected = None;
             self.active_part = selection.part;
             self.active_layer = note.layer;
+            self.active_voice = note.voice;
             self.cursor_measure = selection.measure;
             self.cursor_tick = note.start;
             self.status = "Cut one event. Paste inserts it at the entry cursor.".into();
@@ -264,8 +267,10 @@ impl EncoreApp {
             grace,
             ..
         } = decode_event(text)?;
+        let detached_launch = note.voice_launch.take().is_some();
         note.start = self.cursor_tick;
         note.layer = self.active_layer;
+        note.voice = self.active_voice;
         let end = note
             .start
             .checked_add(note.checked_ticks()?)
@@ -283,7 +288,7 @@ impl EncoreApp {
             .and_then(|part| part.measures.get_mut(self.cursor_measure))
             .ok_or("Choose an existing staff and measure before pasting.")?;
         if measure.notes.iter().any(|other| {
-            other.layer == note.layer
+            other.lane() == note.lane()
                 && note.start < other.start.saturating_add(other.ticks())
                 && end > other.start
         }) {
@@ -292,11 +297,12 @@ impl EncoreApp {
                     .into(),
             );
         }
-        let index = measure
-            .notes
-            .partition_point(|other| (other.start, other.layer) < (note.start, note.layer));
+        let index = measure.notes.partition_point(|other| {
+            (other.start, other.layer, other.voice) < (note.start, note.layer, note.voice)
+        });
         measure.notes.insert(index, note);
         let anchor = encore::document::Anchor {
+            voice: self.active_voice,
             part: self.active_part,
             measure: self.cursor_measure,
             tick: self.cursor_tick,
@@ -347,7 +353,7 @@ impl EncoreApp {
             self.cursor_measure += 1;
             self.cursor_tick = 0;
         }
-        self.status = "Pasted one event at the entry cursor.".into();
+        self.status = if detached_launch{"Pasted one event; its Voice 2 launch was detached. Copy whole measures to retain complete launch branches."}else{"Pasted one event at the entry cursor."}.into();
         Ok(())
     }
 }
@@ -613,6 +619,7 @@ mod tests {
         let mut app = app();
         app.score.parts[0].measures[0].notes.push(note());
         let mut style = EntryStyle::new(Anchor {
+            voice: 0,
             part: 0,
             measure: 0,
             tick: 480,
@@ -639,6 +646,7 @@ mod tests {
         app.cursor_tick = 800;
         app.paste_selection(&text);
         style.anchor = Anchor {
+            voice: 0,
             part: 1,
             measure: 2,
             tick: 800,
@@ -720,6 +728,7 @@ mod tests {
         let mut app = EncoreApp::from_score(score, None, "Ready".into());
         app.part_view = true;
         let mut style = EntryStyle::new(Anchor {
+            voice: 0,
             part: 0,
             measure: 0,
             tick: 480,
@@ -782,6 +791,7 @@ mod grace_clipboard_tests {
         let ctx = egui::Context::default();
         let mut app = EncoreApp::from_score(Score::demo(), None, "Ready".into());
         let at = Anchor {
+            voice: 0,
             part: 2,
             measure: 0,
             tick: 0,
@@ -823,6 +833,7 @@ mod grace_clipboard_tests {
             assert_eq!(
                 group.anchor,
                 Anchor {
+                    voice: 0,
                     part: 1,
                     measure: 3,
                     tick: 240,
@@ -837,6 +848,7 @@ mod grace_clipboard_tests {
     fn invalid_grace_clipboard_preserves_the_entire_destination() {
         let mut app = EncoreApp::from_score(Score::blank(), None, "Ready".into());
         let at = Anchor {
+            voice: 0,
             part: 0,
             measure: 0,
             tick: 0,
@@ -853,5 +865,117 @@ mod grace_clipboard_tests {
         app.paste_selection(&text);
         assert_eq!(app.score, before);
         assert!(app.status.starts_with("Cannot paste:"));
+    }
+}
+
+#[cfg(test)]
+mod secondary_voice_tests {
+    use super::*;
+    use encore::{
+        document::Anchor,
+        entry_style::{self, AccidentalDisplay, AccidentalOverride, EntryStyle},
+    };
+    #[test]
+    fn isolated_secondary_clip_uses_v5_detaches_launch_and_preserves_voice_local_style() {
+        let mut source = Score::blank();
+        source.parts.truncate(1);
+        let mut primary = Score::demo().parts[0].measures[0].notes[0].clone();
+        primary.start = 0;
+        primary.duration = Duration::Whole;
+        primary.dotted = false;
+        primary.pitches = vec![Pitch::from_midi(60)];
+        primary.tied = false;
+        let mut secondary = primary.clone();
+        secondary.voice = 1;
+        secondary.voice_launch = Some(0);
+        secondary.duration = Duration::Quarter;
+        secondary.pitches = vec![Pitch::from_midi(64)];
+        source.parts[0].measures[0].notes = vec![primary, secondary];
+        let anchor = Anchor {
+            part: 0,
+            measure: 0,
+            tick: 0,
+            layer: 0,
+            voice: 1,
+        };
+        let mut style = EntryStyle::new(anchor);
+        style.accidentals.push(AccidentalOverride {
+            pitch: 64,
+            display: AccidentalDisplay::Courtesy,
+        });
+        entry_style::assign(&mut source, style).unwrap();
+        let mut app = EncoreApp::from_score(source, None, "Ready".into());
+        app.selected = anchor.selection(&app.score);
+        let ctx = egui::Context::default();
+        app.copy_selection(&ctx, false);
+        let text = ctx
+            .output(|output| {
+                output.commands.iter().find_map(|command| {
+                    if let egui::OutputCommand::CopyText(text) = command {
+                        Some(text.clone())
+                    } else {
+                        None
+                    }
+                })
+            })
+            .unwrap();
+        assert_eq!(decode_event(&text).unwrap().version, 5);
+        app.active_voice = 1;
+        app.active_layer = 2;
+        app.cursor_measure = 1;
+        app.cursor_tick = 240;
+        app.paste_selection(&text);
+        let note = &app.score.parts[0].measures[1].notes[0];
+        assert_eq!((note.layer, note.voice, note.voice_launch), (2, 1, None));
+        let style = app
+            .score
+            .notation
+            .entries
+            .iter()
+            .find(|entry| entry.anchor.measure == 1)
+            .unwrap();
+        assert_eq!(
+            style.anchor,
+            Anchor {
+                part: 0,
+                measure: 1,
+                tick: 240,
+                layer: 2,
+                voice: 1
+            }
+        );
+        assert!(app.status.contains("detached"));
+        app.score.validate().unwrap();
+    }
+    #[test]
+    fn paste_checks_collisions_within_voice_and_cannot_delete_a_retained_launch() {
+        let mut app = EncoreApp::from_score(Score::blank(), None, "Ready".into());
+        app.score.parts.truncate(1);
+        let mut primary = Score::demo().parts[0].measures[0].notes[0].clone();
+        primary.start = 0;
+        primary.duration = Duration::Whole;
+        primary.dotted = false;
+        primary.tied = false;
+        app.score.parts[0].measures[0].notes = vec![primary.clone()];
+        let text = encode_event(primary).unwrap();
+        app.active_voice = 1;
+        app.paste_selection(&text);
+        assert_eq!(app.score.parts[0].measures[0].notes.len(), 2);
+        app.cursor_measure = 0;
+        app.cursor_tick = 0;
+        let before = app.score.clone();
+        app.paste_selection(&text);
+        assert_eq!(app.score, before);
+        app.score.parts[0].measures[0].notes[1].voice_launch = Some(0);
+        app.selected = Some(Selection {
+            part: 0,
+            measure: 0,
+            note: 0,
+        });
+        let before = app.score.clone();
+        let ctx = egui::Context::default();
+        app.copy_selection(&ctx, true);
+        assert_eq!(app.score, before);
+        assert!(ctx.output(|output| output.commands.is_empty()));
     }
 }

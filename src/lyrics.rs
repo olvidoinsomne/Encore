@@ -109,11 +109,11 @@ fn check_content(lyric: &Lyric) -> Result<(), String> {
     }
     if let Some(end) = &lyric.extend_to
         && (end.part != lyric.anchor.part
-            || end.layer != lyric.anchor.layer
+            || end.lane() != lyric.anchor.lane()
             || position(end) <= position(&lyric.anchor))
     {
         return Err(
-            "A word extension must end on a later note in the same staff and layer.".into(),
+            "A word extension must end on a later note in the same staff, layer, and voice.".into(),
         );
     }
     Ok(())
@@ -152,6 +152,7 @@ pub fn validate(score: &Score) -> Result<(), String> {
                         measure,
                         tick: n.start,
                         layer: n.layer,
+                        voice: n.voice,
                     })
             })
         })
@@ -165,7 +166,7 @@ pub fn validate(score: &Score) -> Result<(), String> {
             return Err("A lyric or word extension refers to a missing pitched note.".into());
         }
         let a = &lyric.anchor;
-        if !occupied.insert((a.part, a.measure, a.tick, a.layer, lyric.kind, lyric.verse)) {
+        if !occupied.insert((a.part, a.measure, a.tick, a.lane(), lyric.kind, lyric.verse)) {
             return Err("A note has duplicate syllables on the same lyric line.".into());
         }
     }
@@ -227,12 +228,13 @@ pub fn next_anchor(score: &Score, anchor: &Anchor, backward: bool) -> Option<Anc
         .flat_map(|(measure, m)| {
             m.notes
                 .iter()
-                .filter(|n| n.layer == anchor.layer && !n.pitches.is_empty())
+                .filter(|n| n.lane() == anchor.lane() && !n.pitches.is_empty())
                 .map(move |n| Anchor {
                     part: anchor.part,
                     measure,
                     tick: n.start,
                     layer: n.layer,
+                    voice: n.voice,
                 })
         })
         .collect::<Vec<_>>();
@@ -304,12 +306,13 @@ pub fn assign_text(
         .flat_map(|(measure, m)| {
             m.notes
                 .iter()
-                .filter(|n| n.layer == start.layer && !n.pitches.is_empty())
+                .filter(|n| n.lane() == start.lane() && !n.pitches.is_empty())
                 .map(move |n| Anchor {
                     part: start.part,
                     measure,
                     tick: n.start,
                     layer: n.layer,
+                    voice: n.voice,
                 })
         })
         .collect::<Vec<_>>();
@@ -402,6 +405,8 @@ mod tests {
         score.parts[0].measures.truncate(1);
         for tick in [0, 480, 960, 1440] {
             score.parts[0].measures[0].notes.push(Note {
+                voice: 0,
+                voice_launch: None,
                 start: tick,
                 duration: Duration::Quarter,
                 dotted: false,
@@ -418,6 +423,7 @@ mod tests {
     }
     fn anchor(tick: u32) -> Anchor {
         Anchor {
+            voice: 0,
             part: 0,
             measure: 0,
             tick,

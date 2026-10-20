@@ -1,11 +1,11 @@
 //! Bounded readers for public score interchange and MuseScore's XML format.
 //!
 //! Import is deliberately explicit about the limits of Encore's score model.
-//! Up to four notation voices share each staff as layers; unsupported timing is
+//! Up to eight notation voices share each staff as two voices in four layers; unsupported timing is
 //! rejected instead of rounded, and display-only losses are reported.
 use crate::model::{Duration, MAX_MEASURES, MAX_PARTS, Measure, Note, Part, Pitch, Score};
 use roxmltree::{Document, Node};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::io::{Cursor, Read};
 use std::path::Path;
@@ -20,6 +20,25 @@ mod lines;
 mod midi;
 mod musescore;
 mod musicxml;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct VoiceTarget {
+    pub part: usize,
+    pub layer: u8,
+    pub voice: u8,
+}
+pub(super) type VoiceMapping = BTreeMap<(u32, String), VoiceTarget>;
+impl VoiceTarget {
+    pub(super) fn anchor(self, measure: usize, tick: u32) -> crate::document::Anchor {
+        crate::document::Anchor {
+            part: self.part,
+            measure,
+            tick,
+            layer: self.layer,
+            voice: self.voice,
+        }
+    }
+}
 
 pub(super) const MAX_XML_BYTES: usize = 16 * 1024 * 1024;
 pub(super) const MAX_ARCHIVE_BYTES: usize = 64 * 1024 * 1024;
@@ -386,6 +405,8 @@ pub(super) fn push_event(
             ));
         };
         pieces.push(Note {
+            voice: 0,
+            voice_launch: None,
             articulations: Vec::new(),
             start: position,
             duration,

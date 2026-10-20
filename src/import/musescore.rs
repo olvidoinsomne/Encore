@@ -446,7 +446,7 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
                                 if child(item, "duration").is_none() {
                                     // Apply dots and ratio together, avoiding a fractional
                                     // intermediate for exact dotted 128th triplets.
-                                    Note { start: 0, layer: 0, duration, dotted, tuplet,
+                                    Note {voice:0, voice_launch:None,  start: 0, layer: 0, duration, dotted, tuplet,
                                         pitches: Vec::new(), velocity: 64, staccato: false, articulations: Vec::new(), tied: false }.checked_ticks()?
                                 } else {
                                     let nominal_ticks = event_ticks(item, actual_ticks as u32)?;
@@ -475,7 +475,7 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
                             annotations.muse(item,SourceAnchor{staff:source_staff,voice:voice_index.to_string(),measure:measure_index,tick:cursor as u32},division,&mut warnings)?;
                             let (staccato, articulations) = read_articulations(item, &mut warnings);
                             if let Some(duration) = rhythm {
-                                push_rhythmic_event(&mut notes, Note { start: cursor as u32 + pickup_shift,
+                                push_rhythmic_event(&mut notes, Note {voice:0, voice_launch:None,  start: cursor as u32 + pickup_shift,
                                     duration, dotted, tuplet, layer: 0, pitches, velocity, staccato, articulations, tied: tied.unwrap_or(false) }, ticks)
                             } else {
                                 let first_piece = notes.len();
@@ -555,7 +555,11 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
         for (voice, measures) in lanes {
             annotation_mapping.insert(
                 (source_staff, voice.to_string()),
-                (parts.len(), voice as u8),
+                super::VoiceTarget {
+                    part: parts.len(),
+                    layer: voice as u8,
+                    voice: 0,
+                },
             );
             if voice > 3 {
                 return Err("MuseScore staff has more than four independent voices.".into());

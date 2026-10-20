@@ -7,7 +7,7 @@ This is a functional compatibility checklist, not a claim that Encore has
 already reached parity. The modern Encore interface remains the intended UI.
 
 The starting point is Encore 0.5, commit `55f2cc0`; the tables also incorporate
-the Encore 0.6–0.9 implementation passes recorded below. Source evidence was inspected
+the Encore 0.6–0.10 implementation passes recorded below. Source evidence was inspected
 in `src/model.rs`, `src/app.rs`, `src/engraving.rs`, `src/export.rs`,
 `src/audio.rs`, `src/sampled.rs`, `src/synth.rs`, and the three format readers.
 Changes made after that commit must pass the acceptance checks below before a
@@ -37,7 +37,7 @@ Linux verification.
 | Full duration range, augmentation and tied overflow | Partial | Breve through 128th now reaches engraving/interchange/audio. One dot is supported where exact on the tick grid. Repeated dots and automatic splitting/rebar remain open. |
 | Tuplets, nested tuplets and custom ratios | Partial | Exact actual:normal ratios and basic grouping, triplet entry and inspector ratios. Fractional-grid, nested, mixed-value and cross-bar groups remain open. |
 | Grace notes, slashed/unslashed groups and playback | Partial | Editable before/after groups retain pitches/chords, values, dots, beam choices, size, slash, principal connector and bounded borrowed-time playback across native, linked parts and MusicXML. MuseScore imports before/after groups and pickups. Ordinary-entry conversion/rebar shortcuts, grace-specific lyric/articulation/tuplet/tie structures and inserted global make-time remain open. |
-| Four independent layers, each with two voices | Partial | Four editable rhythms now share a staff, with independent stems, beams, exports and playback. Two separate voices within each layer remain open. |
+| Four independent layers, each with two voices | Complete | Eight independent rhythmic lanes now retain source identity across entry/navigation, voice-local annotations, vector engraving, native persistence, linked parts, MusicXML, MIDI and both audio engines. Secondary launch points separate beam groups. This row covers basic polyphony; advanced layer policies and cross-voice/cross-staff notation remain tracked separately. |
 | Per-pitch chord spelling and independent ties | Partial | Active chord tones now have exact tie subsets, enharmonic respelling and editable tie direction, preserved by native/event-region clipboard, linked transposition, MusicXML and performed playback. Arbitrary continuation controls, tie curvature and complete cross-voice ties remain open. |
 | Clefs and clef changes | Partial | Three fixed staff clefs. Needs other C/F/G clefs, percussion, octave variants and mid-measure changes. |
 | Keys and key changes | Partial | One constant circle-of-fifths signature. Needs regional/independent signatures, cancellation and custom/nonlinear keys. |
@@ -188,7 +188,7 @@ and [Finale libraries](https://usermanuals.finalemusic.com/FinaleWin/Content/Fin
 | Capability | Status | Evidence and work remaining |
 | --- | --- | --- |
 | Native Encore persistence | Complete | Validated JSON, atomic saves, previous Encore files and dirty-document protection. |
-| Direct Finale `.musx` reader | Partial | Basic EnigmaXML with four layer frames and a real 27.4.1 fixture. Voice-2 structures, tuplets and complete semantics/layout remain open. |
+| Direct Finale `.musx` reader | Partial | Basic EnigmaXML with four layer frames and a real 27.4.1 fixture. Documented controller/v2 branches now have bounded import with independent timing. Tuplets, grace structures and complete semantics/layout remain open. |
 | Legacy Finale `.mus` and related templates | Missing | Actionable MusicXML conversion path only; no direct decoder. |
 | Finale project writing | Missing | Native output is Encore JSON; no MUSX/MUS writer. |
 | MusicXML import/export | Partial | Supported partwise subset and MXL input; extensive notation/layout fidelity still depends on missing model features. |
@@ -262,14 +262,13 @@ the corresponding status above. **No full-parity milestone has been reached.**
 - **Rhythms and layers:** breve through 128th, optional `actual:normal` ratio
   counts from 1 through 32, and four independent rhythms per staff. Native
   saves keep backward-compatible layer 0 defaults. MusicXML/MuseScore preserve
-  up to four source voices on their staff; direct MUSX reads its four layer
+  up to eight source voices on their staff; direct MUSX reads its four layer
   frames. Engraving separates stems/beams/rests by layer; MIDI and sampled
   playback separate layers to avoid tie or repeated-pitch interference.
   Sixteen rhythm/layer regressions accompany this work. This is partial tuplet
   support: the 480-PPQ score grid rejects fractional ticks rather than rounding
   them. Ordinary triplets and representable 5:4 ratios work, while a 7:4 eighth
-  does not. Nested, mixed-value and cross-bar grouping and a second voice inside
-  each layer remain open. Four-frame MUSX coverage uses synthetic fixtures;
+  does not. Nested, mixed-value and cross-bar grouping remain open. Four-frame MUSX coverage uses synthetic fixtures;
   the real Finale 27.4.1 fixture remains a basic single-layer score. Meter
   denominators now range from 1 through 128 in powers of two, with 1–32 beats.
 - **Entry editing:** triplet conversion creates two placeholder rests that
@@ -436,3 +435,41 @@ Both sampled study renders contain no clipped PCM samples. Carol remains
 byte-identical to the recorded 0.7/0.8 sampled SHA-256. The default remains
 monochromatic dark with a remembered light option. Full Finale parity has not
 been achieved; remaining table gaps and native-host checks remain open.
+
+
+### Encore 0.10 integration qualification
+
+Each of four layers now carries two independent rhythmic voices. Native primary
+defaults remain omitted for old-score compatibility. Secondary branches retain
+validated launch points; Speedy apostrophe and toolbar V1/V2 operate within the
+current layer. Navigation, ties, lyrics, slurs, grace and entry styles retain
+voice identity. Launch deletion is refused atomically while a dependent branch
+remains; a primary rest can continue launching it. All note entry also validates
+glissando endpoints, pedal capture and annotation invariants before accepting
+the edit. Keyboard/undo/redo frames exercise the new workflow.
+
+Vector engraving separates simultaneous heads and hit maps, opposes paired
+stems, and keeps secondary branch beams and tuplet groups separate. It does not
+invent leading/trailing secondary rests. MusicXML IDs 1–8 and source labels
+preserve eight lanes; implicit secondary gaps use `forward`, explicit rests
+remain notes and valid hidden metadata retains launch points. Documented direct
+MUSX controller/v2 branches now use their own cursor without advancing Voice 1;
+orphan/nested/overlapping branches are rejected. Real direct-MUSX Voice 2 fixture
+qualification and unsupported tuplets/grace/cross-staff structures remain open.
+
+MIDI, sample playback and procedural playback keep equal-pitch lifetimes
+independent. Dynamics, hairpins, technique changes and octave-display lines
+remain layer-scoped; pedal covers all notation voices. Chord accompaniment uses
+separate lanes 8–15. Event clipboard v5 and regional clipboard v2 prevent older
+clipboard readers flattening secondary content; source-linked projections and
+whole regions retain launch/style identity. Isolated event paste reports when
+it detaches a secondary launch.
+
+Local Linux qualification: **311 library and 126 editor/CLI tests** pass; format,
+all-target Clippy with warnings denied and the optimized release build pass.
+Independent Voices and Eight Voice Engraving export/reopen supported rhythms,
+pitches, voices and launch points through MusicXML, and render PDF/SVG/MIDI and
+sampled WAV. Both printed studies and both actual egui themes were inspected.
+Neither sampled study clips; Carol's sampled regression remains byte-identical.
+Dense multi-voice collision optimization, platform keyboard qualification and
+all remaining partial/missing audit rows stay open.

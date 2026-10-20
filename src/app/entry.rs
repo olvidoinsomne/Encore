@@ -2,6 +2,73 @@
 use super::*;
 
 impl EncoreApp {
+    pub(super) fn set_entry_voice(&mut self, voice: u8) {
+        if voice == self.active_voice || voice > 1 {
+            return;
+        }
+        let selected = self
+            .selected
+            .and_then(|s| encore::document::Anchor::from_selection(&self.score, s));
+        if voice == 1 {
+            let launch = selected
+                .filter(|a| {
+                    a.part == self.active_part && a.layer == self.active_layer && a.voice == 0
+                })
+                .unwrap_or_else(|| self.caret_anchor());
+            let mut launch = launch;
+            launch.voice = 0;
+            if encore::document::note_at(&self.score, &launch).is_none() {
+                self.status = "Voice 2 must launch from an existing Voice 1 note or rest. Select that entry first.".into();
+                return;
+            }
+            self.cursor_measure = launch.measure;
+            self.cursor_tick = launch.tick;
+            self.active_voice_launch = Some(launch);
+        } else {
+            self.active_voice_launch = None;
+        }
+        self.active_voice = voice;
+        let anchor = self.caret_anchor();
+        self.selected = anchor.selection(&self.score);
+        self.status = format!("Layer {} · Voice {}", self.active_layer + 1, voice + 1);
+    }
+
+    pub(super) fn entry_voice_launch(
+        &self,
+        part: usize,
+        measure: usize,
+        start: u32,
+    ) -> Result<Option<u32>, String> {
+        if self.active_voice == 0 {
+            return Ok(None);
+        }
+        let notes = &self.score.parts[part].measures[measure].notes;
+        if let Some(existing) = notes
+            .iter()
+            .find(|n| n.layer == self.active_layer && n.voice == 1 && n.start == start)
+        {
+            return Ok(existing.voice_launch);
+        }
+        let launch = self
+            .active_voice_launch
+            .filter(|a| {
+                a.part == part
+                    && a.measure == measure
+                    && a.layer == self.active_layer
+                    && a.tick <= start
+            })
+            .map(|a| a.tick)
+            .or_else(|| {
+                notes
+                    .iter()
+                    .find(|n| n.layer == self.active_layer && n.voice == 0 && n.start == start)
+                    .map(|n| n.start)
+            });
+        match launch {
+            Some(tick) if notes.iter().any(|n| n.voice == 0 && n.layer == self.active_layer && n.start == tick) => Ok(Some(tick)),
+            _ => Err("Voice 2 needs a Voice 1 launch in this measure. Select a primary entry and switch to Voice 2.".into()),
+        }
+    }
     /// The caret stores a concert pitch; its octave control is displayed in the
     /// active part's written pitch. Keep this conversion out of source notation.
     pub(super) fn entry_transposition(&self) -> encore::parts::Transposition {
@@ -23,6 +90,7 @@ impl EncoreApp {
             measure: self.cursor_measure,
             tick: self.cursor_tick,
             layer: self.active_layer,
+            voice: self.active_voice,
         }
     }
     fn selected_or_caret_anchor(&self) -> encore::document::Anchor {
@@ -101,6 +169,8 @@ impl EncoreApp {
 
     pub(super) fn entry_ticks(&self) -> u32 {
         Note {
+            voice: self.active_voice,
+            voice_launch: None,
             start: 0,
             duration: self.duration,
             dotted: self.dotted,
@@ -255,7 +325,7 @@ impl EncoreApp {
                 m.notes
                     .iter()
                     .enumerate()
-                    .filter(|(_, n)| n.layer == self.active_layer)
+                    .filter(|(_, n)| n.layer == self.active_layer && n.voice == self.active_voice)
                     .map(move |(note, n)| (measure, note, n.start))
             })
             .collect();
@@ -404,7 +474,7 @@ impl EncoreApp {
             let notes = &mut candidate.parts[selection.part].measures[selection.measure].notes;
             if notes.iter().enumerate().any(|(i, n)| {
                 i != selection.note
-                    && n.layer == first.layer
+                    && n.lane() == first.lane()
                     && n.start < end
                     && n.start + n.ticks() > first.start
             }) {
@@ -429,7 +499,7 @@ impl EncoreApp {
             let note = self.score.parts[selection.part].measures[selection.measure]
                 .notes
                 .iter()
-                .position(|n| n.start == first.start && n.layer == first.layer)
+                .position(|n| n.start == first.start && n.lane() == first.lane())
                 .unwrap();
             self.selected = Some(Selection { note, ..selection });
             self.duration = original.duration;
@@ -465,8 +535,8 @@ impl EncoreApp {
                 let selected_at_caret = self.selected.is_some_and(|s| {
                     s.part == self.active_part
                         && s.measure == self.cursor_measure
-                        && self.score.parts[s.part].measures[s.measure].notes[s.note].layer
-                            == self.active_layer
+                        && self.score.parts[s.part].measures[s.measure].notes[s.note].lane()
+                            == self.active_layer + 4 * self.active_voice
                         && self.score.parts[s.part].measures[s.measure].notes[s.note].start
                             == self.cursor_tick
                 });
@@ -507,8 +577,8 @@ impl EncoreApp {
                         && selection.measure == self.cursor_measure
                         && self.score.parts[selection.part].measures[selection.measure].notes
                             [selection.note]
-                            .layer
-                            == self.active_layer
+                            .lane()
+                            == self.active_layer + 4 * self.active_voice
                         && self.score.parts[selection.part].measures[selection.measure].notes
                             [selection.note]
                             .start
@@ -541,8 +611,8 @@ impl EncoreApp {
                             == self.cursor_tick
                         && self.score.parts[selection.part].measures[selection.measure].notes
                             [selection.note]
-                            .layer
-                            == self.active_layer
+                            .lane()
+                            == self.active_layer + 4 * self.active_voice
                 });
                 if self.entry_profile == EntryProfile::SimpleLaptop && at_selected {
                     let note = self.selected_entry().unwrap();
@@ -654,7 +724,9 @@ impl EncoreApp {
                         .notes
                         .iter()
                         .enumerate()
-                        .filter(|(_, n)| n.layer == self.active_layer)
+                        .filter(|(_, n)| {
+                            n.layer == self.active_layer && n.voice == self.active_voice
+                        })
                         .min_by_key(|(_, n)| n.start)
                     {
                         self.selected = Some(Selection {
@@ -671,7 +743,7 @@ impl EncoreApp {
                     self.cursor_tick = measure
                         .notes
                         .iter()
-                        .filter(|n| n.layer == self.active_layer)
+                        .filter(|n| n.layer == self.active_layer && n.voice == self.active_voice)
                         .map(|n| n.start + n.ticks())
                         .max()
                         .unwrap_or(0);
@@ -692,8 +764,10 @@ impl EncoreApp {
                 self.active_layer =
                     (i16::from(self.active_layer) + i16::from(direction)).rem_euclid(4) as u8;
                 self.selected = None;
+                self.active_voice_launch = None;
                 self.status = format!("Layer {}", self.active_layer + 1);
             }
+            ToggleVoice => self.set_entry_voice(1 - self.active_voice),
             Staff(direction) => {
                 if self.part_view {
                     let definitions = encore::parts::definitions(&self.score);
@@ -862,6 +936,7 @@ mod tests {
         app.apply_entry_command(EntryCommand::Pitch(Step::D, false));
         app.apply_entry_command(EntryCommand::Pitch(Step::E, false));
         let start = encore::document::Anchor {
+            voice: 0,
             part: 0,
             measure: 0,
             tick: 0,
@@ -1086,6 +1161,7 @@ mod ottava_tests {
         score.parts.truncate(1);
         score.parts[0].instrument = Instrument::Clarinet;
         let a = encore::document::Anchor {
+            voice: 0,
             part: 0,
             measure: 0,
             tick: 0,
@@ -1115,5 +1191,129 @@ mod ottava_tests {
             84
         );
         app.score.validate().unwrap();
+    }
+}
+
+#[cfg(test)]
+mod voice_tests {
+    use super::*;
+    fn app() -> EncoreApp {
+        let mut app = EncoreApp::from_score(Score::blank(), None, "Ready".into());
+        app.duration = Duration::Half;
+        app.enter_note(0, 0, 0, Pitch::from_midi(60), false);
+        app.cursor_measure = 0;
+        app.cursor_tick = 0;
+        app
+    }
+    #[test]
+    fn speedy_second_voice_launches_once_and_preserves_primary_rhythm() {
+        let mut app = app();
+        app.entry_profile = EntryProfile::Speedy;
+        app.apply_entry_command(EntryCommand::ToggleVoice);
+        assert_eq!((app.active_voice, app.cursor_tick), (1, 0));
+        for _ in 0..4 {
+            app.apply_entry_command(EntryCommand::SpeedyDuration(Duration::Eighth));
+        }
+        let notes = &app.score.parts[0].measures[0].notes;
+        assert_eq!(notes.len(), 5);
+        assert_eq!(notes.iter().find(|n| n.voice == 0).unwrap().ticks(), 960);
+        assert_eq!(
+            notes
+                .iter()
+                .filter(|n| n.voice == 1)
+                .map(|n| (n.start, n.voice_launch))
+                .collect::<Vec<_>>(),
+            vec![(0, Some(0)), (240, Some(0)), (480, Some(0)), (720, Some(0))]
+        );
+        app.score.validate().unwrap();
+        app.apply_entry_command(EntryCommand::ToggleVoice);
+        assert_eq!(app.active_voice, 0);
+    }
+    #[test]
+    fn primary_launcher_deletion_is_atomic_and_rest_conversion_keeps_branch() {
+        let mut app = app();
+        let primary = app.selected.unwrap();
+        app.set_entry_voice(1);
+        app.duration = Duration::Quarter;
+        app.enter_note(0, 0, 0, Pitch::from_midi(67), false);
+        app.selected = Some(primary);
+        let before = app.score.clone();
+        app.delete_selected();
+        assert_eq!(app.score, before);
+        assert!(app.status.contains("secondary branch"));
+        assert!(app.edit_entry(|n| n.pitches.clear()));
+        app.score.validate().unwrap();
+        assert!(
+            app.score.parts[0].measures[0]
+                .notes
+                .iter()
+                .any(|n| n.voice == 0 && n.pitches.is_empty())
+        );
+        assert_eq!(
+            app.score.parts[0].measures[0]
+                .notes
+                .iter()
+                .find(|n| n.voice == 1)
+                .unwrap()
+                .voice_launch,
+            Some(0)
+        );
+    }
+    #[test]
+    fn second_voice_requires_primary_and_navigation_stays_in_voice() {
+        let mut app = EncoreApp::from_score(Score::blank(), None, "Ready".into());
+        app.set_entry_voice(1);
+        assert_eq!(app.active_voice, 0);
+        assert!(app.status.contains("launch"));
+        app = self::app();
+        app.set_entry_voice(1);
+        app.duration = Duration::Quarter;
+        app.enter_note(0, 0, 0, Pitch::from_midi(67), false);
+        app.enter_note(0, 0, 480, Pitch::from_midi(69), false);
+        app.navigate_entry(-1);
+        assert_eq!(app.selected_entry().unwrap().voice, 1);
+        assert_eq!(app.selected_entry().unwrap().start, 0);
+        assert!(!app.edit_entry(|n| n.start = 480));
+        app.score.validate().unwrap();
+    }
+}
+
+#[cfg(test)]
+mod transactional_voice_tests {
+    use super::*;
+    #[test]
+    fn adding_chord_to_secondary_glissando_endpoint_rolls_back_entry_and_cursor() {
+        let mut app = EncoreApp::from_score(Score::blank(), None, "Ready".into());
+        app.duration = Duration::Half;
+        app.enter_note(0, 0, 0, Pitch::from_midi(72), false);
+        app.cursor_tick = 0;
+        app.set_entry_voice(1);
+        app.duration = Duration::Quarter;
+        app.enter_note(0, 0, 0, Pitch::from_midi(60), false);
+        app.enter_note(0, 0, 480, Pitch::from_midi(67), false);
+        let start = encore::document::Anchor {
+            part: 0,
+            measure: 0,
+            tick: 0,
+            layer: 0,
+            voice: 1,
+        };
+        app.score
+            .notation
+            .lines
+            .push(encore::lines::PerformanceLine::new(
+                start,
+                encore::document::Anchor { tick: 480, ..start },
+                encore::lines::LineKind::Glissando,
+            ));
+        app.score.validate().unwrap();
+        let before = app.score.clone();
+        let selected = app.selected;
+        let cursor = (app.cursor_measure, app.cursor_tick);
+        app.enter_note(0, 0, 480, Pitch::from_midi(71), true);
+        assert_eq!(app.score, before);
+        assert_eq!(app.selected, selected);
+        assert_eq!((app.cursor_measure, app.cursor_tick), cursor);
+        assert!(app.status.contains("single-pitch"));
     }
 }

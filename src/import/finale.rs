@@ -500,7 +500,11 @@ fn parse_enigma(xml: &str, metadata: Option<&[u8]>) -> Result<ImportResult, Stri
                 }
                 let mut current = first as u32;
                 let mut visited = HashSet::new();
-                let mut position = 0u32;
+                let mut primary_position = 0u32;
+                let mut secondary_position = 0u32;
+                let mut launch = None;
+                let mut prior_secondary_end = 0;
+                let mut previous = None;
                 loop {
                     if !visited.insert(current) || visited.len() > MAX_ENTRIES {
                         return Err(
@@ -511,22 +515,48 @@ fn parse_enigma(xml: &str, metadata: Option<&[u8]>) -> Result<ImportResult, Stri
                     let entry = *entries.get(&current).ok_or_else(|| {
                         format!("Finale frame refers to missing entry {current}.")
                     })?;
-                    for unsupported in [
-                        "v2",
-                        "controller",
-                        "graceNote",
-                        "tupletStart",
-                        "crossStaff",
-                        "dummy",
-                    ] {
+                    if previous.is_some_and(|id| {
+                        entry
+                            .attribute("prev")
+                            .and_then(|value| value.parse::<u32>().ok())
+                            != Some(id)
+                    }) {
+                        return Err("Finale entry chain has an inconsistent previous link.".into());
+                    }
+                    for unsupported in ["graceNote", "tupletStart", "crossStaff", "dummy"] {
                         if child(entry, unsupported).is_some() {
                             return Err(format!(
-                                "{} measure {} contains unsupported Finale voices, tuplets, grace notes, or cross-staff rhythms; export MusicXML or simplify those passages first.",
+                                "{} measure {} contains unsupported Finale tuplets, grace notes, or cross-staff rhythms; export MusicXML or simplify those passages first.",
                                 part.name,
                                 measure_index + 1
                             ));
                         }
                     }
+                    let secondary = child(entry, "v2").is_some();
+                    let controller = child(entry, "controller").is_some();
+                    if secondary && controller {
+                        return Err(
+                            "A Finale Voice 2 entry cannot launch another secondary branch.".into(),
+                        );
+                    }
+                    let position = if secondary {
+                        if launch.is_none() {
+                            return Err(
+                                "A Finale Voice 2 entry has no preceding primary launch.".into()
+                            );
+                        }
+                        secondary_position
+                    } else {
+                        launch = None;
+                        if controller {
+                            if primary_position < prior_secondary_end {
+                                return Err("Overlapping Finale Voice 2 branches cannot be represented as one secondary voice.".into());
+                            }
+                            launch = Some(primary_position);
+                            secondary_position = primary_position;
+                        }
+                        primary_position
+                    };
                     let dura = number(entry, "dura", 0)?;
                     if dura <= 0 {
                         return Err("Finale note duration must be positive.".into());
@@ -592,15 +622,23 @@ fn parse_enigma(xml: &str, metadata: Option<&[u8]>) -> Result<ImportResult, Stri
                     )?;
                     for note in &mut part.measures[measure_index].notes[previous_count..] {
                         note.layer = (layer - 1) as u8;
+                        note.voice = u8::from(secondary);
+                        note.voice_launch = if secondary { launch } else { None };
                     }
                     imported_events += part.measures[measure_index].notes.len() - previous_count;
                     if imported_events > MAX_ENTRIES {
                         return Err("Imported Finale score exceeds the 200,000-event limit.".into());
                     }
-                    position = end_position;
+                    if secondary {
+                        secondary_position = end_position;
+                        prior_secondary_end = end_position;
+                    } else {
+                        primary_position = end_position;
+                    }
                     if current == last as u32 {
                         break;
                     }
+                    previous = Some(current);
                     current = attribute(entry, "next")?;
                     if current == 0 {
                         return Err("Finale entry chain ends before its frame boundary.".into());
@@ -1033,6 +1071,56 @@ mod tests {
                 (0, 480, 480, 1440)
             );
             assert!(notes[0].tied);
+        }
+    }
+    fn voice_fixture() -> String {
+        let xml = fixture()
+            .replace(
+                "<entry entnum=\"40\" prev=\"0\" next=\"3\"><dura>1024</dura>",
+                "<entry entnum=\"40\" prev=\"0\" next=\"20\"><dura>1024</dura><controller/>",
+            )
+            .replace(
+                "<entry entnum=\"3\" prev=\"40\" next=\"0\"><dura>3072</dura>",
+                "<entry entnum=\"3\" prev=\"21\" next=\"22\"><dura>3072</dura><controller/>",
+            )
+            .replace("<endEntry>3</endEntry>", "<endEntry>22</endEntry>");
+        xml.replace(" </entries>",r#" <entry entnum="20" prev="40" next="21"><dura>512</dura><isNote/><v2/><note id="1"><harmLev>0</harmLev><harmAlt>0</harmAlt></note></entry>
+ <entry entnum="21" prev="20" next="3"><dura>512</dura><isNote/><v2/><note id="1"><harmLev>1</harmLev><harmAlt>0</harmAlt></note></entry>
+ <entry entnum="22" prev="3" next="0"><dura>1024</dura><isNote/><v2/><note id="1"><harmLev>2</harmLev><harmAlt>0</harmAlt></note></entry>
+ </entries>"#)
+    }
+    #[test]
+    fn direct_voice_two_preserves_launcher_timing_and_separate_branches() {
+        let imported = parse(&archive(&voice_fixture())).unwrap();
+        let notes = &imported.score.parts[0].measures[0].notes;
+        let primary = notes
+            .iter()
+            .filter(|note| note.voice == 0)
+            .map(|note| (note.start, note.ticks()))
+            .collect::<Vec<_>>();
+        let secondary = notes
+            .iter()
+            .filter(|note| note.voice == 1)
+            .map(|note| (note.start, note.ticks(), note.voice_launch))
+            .collect::<Vec<_>>();
+        assert_eq!(primary, vec![(0, 480), (480, 1440)]);
+        assert_eq!(
+            secondary,
+            vec![
+                (0, 240, Some(0)),
+                (240, 240, Some(0)),
+                (480, 480, Some(480))
+            ]
+        );
+    }
+    #[test]
+    fn direct_voice_two_rejects_orphans_nested_launches_and_overlap() {
+        for xml in [
+            voice_fixture().replace("<isNote/><v2/>", "<isNote/><v2/><controller/>"),
+            voice_fixture().replace("<controller/>", ""),
+            voice_fixture().replace("<dura>512</dura>", "<dura>2048</dura>"),
+        ] {
+            assert!(parse(&archive(&xml)).is_err());
         }
     }
 }

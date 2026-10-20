@@ -24,6 +24,7 @@ impl Chords {
         warnings: &mut Warnings,
     ) -> Result<(), String> {
         let anchor = Anchor {
+            voice: 0,
             part: 0,
             measure,
             tick,
@@ -93,6 +94,7 @@ impl Chords {
         };
         let mut symbol = ChordSymbol::new(
             Anchor {
+                voice: 0,
                 part: 0,
                 measure,
                 tick,
@@ -153,18 +155,18 @@ impl Chords {
     pub(super) fn finish(
         self,
         score: &mut Score,
-        mapping: &BTreeMap<(u32, String), (usize, u8)>,
+        mapping: &super::VoiceMapping,
         warnings: &mut Warnings,
     ) -> Result<(), String> {
         for (staff, mut symbol) in self.items {
-            let Some((part, _)) = mapping
+            let Some(target) = mapping
                 .iter()
                 .find_map(|((source, _), target)| (*source == staff).then_some(target))
             else {
                 warnings.add("A chord symbol on a missing source staff was omitted.");
                 continue;
             };
-            symbol.anchor.part = *part;
+            symbol.anchor.part = target.part;
             symbol.anchor.layer = 0;
             if symbol.anchor.tick >= score.measure_ticks() {
                 return Err("Imported chord symbol extends outside its measure.".into());

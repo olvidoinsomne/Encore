@@ -51,10 +51,10 @@ impl Slur {
 }
 fn check_geometry(slur: &Slur) -> Result<(), String> {
     if slur.start.part != slur.end.part
-        || slur.start.layer != slur.end.layer
+        || slur.start.lane() != slur.end.lane()
         || position(&slur.start) >= position(&slur.end)
     {
-        return Err("A slur must join later notes on the same staff and layer.".into());
+        return Err("A slur must join later notes on the same staff, layer, and voice.".into());
     }
     if !slur.height.is_finite() || !(4.0..=100.0).contains(&slur.height) {
         return Err("Slur curve height must be 4–100 points.".into());
@@ -100,6 +100,7 @@ pub fn validate(score: &Score) -> Result<(), String> {
                         measure,
                         tick: n.start,
                         layer: n.layer,
+                        voice: n.voice,
                     })
             })
         })
@@ -190,7 +191,7 @@ pub fn prune(score: &mut Score) {
 pub fn continues(score: &Score, anchor: &Anchor) -> bool {
     score.notation.slurs.iter().any(|s| {
         s.start.part == anchor.part
-            && s.start.layer == anchor.layer
+            && s.start.lane() == anchor.lane()
             && position(&s.start) <= position(anchor)
             && position(anchor) < position(&s.end)
     })
@@ -203,12 +204,14 @@ mod tests {
     fn phrase_curves_preserve_native_adjustments() {
         let mut score = Score::demo();
         let start = Anchor {
+            voice: 0,
             part: 0,
             measure: 0,
             tick: 0,
             layer: 0,
         };
         let end = Anchor {
+            voice: 0,
             part: 0,
             measure: 2,
             tick: 0,

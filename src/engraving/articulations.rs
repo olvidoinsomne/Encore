@@ -98,6 +98,8 @@ mod tests {
 
     fn note() -> Note {
         Note {
+            voice: 0,
+            voice_launch: None,
             layer: 0,
             start: 0,
             duration: Duration::Quarter,

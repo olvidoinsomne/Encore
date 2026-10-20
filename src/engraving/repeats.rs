@@ -230,6 +230,8 @@ mod tests {
         score.parts.truncate(1);
         for (measure, bar) in score.parts[0].measures.iter_mut().enumerate() {
             bar.notes = vec![Note {
+                voice: 0,
+                voice_launch: None,
                 start: 0,
                 duration: Duration::Quarter,
                 dotted: false,
@@ -243,6 +245,7 @@ mod tests {
             }];
         }
         let start = Anchor {
+            voice: 0,
             part: 0,
             measure: 0,
             tick: 0,

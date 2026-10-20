@@ -289,7 +289,9 @@ pub(crate) fn written_adjacent(
         + u64::from(first.note.start)
         + u64::from(first.note.ticks());
     let source_start = next.measure as u64 * u64::from(measure_ticks) + u64::from(next.note.start);
-    first.tick + u64::from(first.note.ticks()) == next.tick && source_end == source_start
+    first.note.lane() == next.note.lane()
+        && first.tick + u64::from(first.note.ticks()) == next.tick
+        && source_end == source_start
 }
 
 pub(crate) fn legato_extension(
@@ -302,7 +304,7 @@ pub(crate) fn legato_extension(
         return 0;
     };
     if event.note.playback_shortening() != 0.0
-        || event.note.layer != next.note.layer
+        || event.note.lane() != next.note.lane()
         || !written_adjacent(event, next, score.measure_ticks())
         || next.note.pitches.is_empty()
         || event.note.pitches.iter().any(|pitch| {
@@ -319,6 +321,7 @@ pub(crate) fn legato_extension(
         measure: event.measure,
         tick: event.note.start,
         layer: event.note.layer,
+        voice: event.note.voice,
     };
     if crate::slurs::continues(score, &anchor) {
         (event.note.ticks() / 16).clamp(1, 15)

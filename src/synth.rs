@@ -84,6 +84,7 @@ pub(crate) fn render_dry(score: &Score) -> Vec<f32> {
                 // Ties join each matching pitch independently, including across barlines.
                 while style_index.ties_forward(
                     &crate::document::Anchor {
+                        voice: last_note.voice,
                         part: part_index,
                         measure: events[current_index].measure,
                         tick: last_note.start,
@@ -99,7 +100,7 @@ pub(crate) fn render_dry(score: &Score) -> Vec<f32> {
                         .take_while(|(_, e)| e.tick <= end)
                         .find(|(_, e)| {
                             e.tick == end
-                                && e.note.layer == event.note.layer
+                                && e.note.lane() == event.note.lane()
                                 && crate::repeats::written_adjacent(
                                     &events[current_index],
                                     e,
@@ -122,7 +123,7 @@ pub(crate) fn render_dry(score: &Score) -> Vec<f32> {
                 let following = events
                     .iter()
                     .skip(current_index + 1)
-                    .find(|next| next.note.layer == event.note.layer && next.tick >= end);
+                    .find(|next| next.note.lane() == event.note.lane() && next.tick >= end);
                 let overlap = crate::repeats::legato_extension(
                     score,
                     part_index,
@@ -136,6 +137,7 @@ pub(crate) fn render_dry(score: &Score) -> Vec<f32> {
                     midi,
                     expression_map.velocity(
                         crate::document::Anchor {
+                            voice: event.note.voice,
                             part: part_index,
                             measure: event.measure,
                             tick: event.note.start,
@@ -1101,6 +1103,8 @@ mod tests {
         score.parts.truncate(1);
         score.parts[0].measures.truncate(1);
         score.parts[0].measures[0].notes = vec![Note {
+            voice: 0,
+            voice_launch: None,
             articulations: Vec::new(),
             start: 0,
             duration: Duration::Quarter,
@@ -1463,5 +1467,48 @@ mod tests {
             .extend(score.parts[0].measures.clone());
         assert_eq!(duration_seconds(&score), duration_seconds(&expanded));
         assert_eq!(render(&score), render(&expanded));
+    }
+}
+
+#[cfg(test)]
+mod voice_two_tests {
+    use super::*;
+    use crate::model::{Duration, Note, Pitch};
+    #[test]
+    fn ending_secondary_same_pitch_does_not_cut_off_primary_audio() {
+        let mut score = Score::blank();
+        score.tempo = 120;
+        score.parts.truncate(1);
+        score.parts[0].measures.truncate(1);
+        score.parts[0].instrument = Instrument::Piano;
+        let first = Note {
+            layer: 0,
+            voice: 0,
+            voice_launch: None,
+            start: 0,
+            duration: Duration::Whole,
+            dotted: false,
+            tuplet: None,
+            pitches: vec![Pitch::from_midi(60)],
+            velocity: 80,
+            staccato: false,
+            tied: false,
+            articulations: vec![],
+        };
+        score.parts[0].measures[0].notes = vec![first.clone()];
+        let primary = render_dry(&score);
+        let mut secondary = first;
+        secondary.voice = 1;
+        secondary.voice_launch = Some(0);
+        secondary.duration = Duration::Half;
+        score.parts[0].measures[0].notes.push(secondary);
+        let both = render_dry(&score);
+        assert_eq!(primary.len(), both.len());
+        let before = (0.9 * SAMPLE_RATE as f32) as usize * 2;
+        assert_ne!(primary[..before], both[..before]);
+        let after = (1.5 * SAMPLE_RATE as f32) as usize * 2;
+        let end = (1.9 * SAMPLE_RATE as f32) as usize * 2;
+        assert_eq!(primary[after..end], both[after..end]);
+        assert!(both[after..end].iter().any(|v| v.abs() > 0.0001));
     }
 }

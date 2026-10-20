@@ -734,6 +734,8 @@ fn clicking_the_staff_enters_the_pitch_at_the_written_position() {
 
 fn event(start: u32, duration: Duration, pitches: &[u8]) -> Note {
     Note {
+        voice: 0,
+        voice_launch: None,
         start,
         duration,
         tuplet: None,
@@ -1925,6 +1927,7 @@ fn engraving_shortcuts_undo_and_layer_selection_follow_real_editor_frames() {
         let _ = ctx.run(raw_input(frame, events, mods), |ctx| app.ui(ctx));
     }
     let anchor = encore::document::Anchor {
+        voice: 0,
         part: 0,
         measure: 0,
         tick: 0,
@@ -2035,6 +2038,7 @@ fn ottava_mouse_entry_inverts_the_printed_pitch() {
     configure_context(&ctx);
     let mut score = Score::blank();
     let a = encore::document::Anchor {
+        voice: 0,
         part: 0,
         measure: 0,
         tick: 0,
@@ -2172,6 +2176,7 @@ fn linked_part_chord_and_grace_clicks_resolve_their_source_staff() {
     let mut score = Score::blank();
     score.parts[1].measures[0].notes = vec![event(0, Duration::Quarter, &[48])];
     let anchor = encore::document::Anchor {
+        voice: 0,
         part: 1,
         measure: 0,
         tick: 0,
@@ -2298,4 +2303,86 @@ fn next_part_shortcut_activates_the_new_staff_before_reconciliation() {
     );
     assert_eq!(app.score, score);
     assert!(!app.dirty());
+}
+
+#[test]
+fn speedy_voice_shortcut_enters_secondary_with_real_undo_redo_frames() {
+    let ctx = egui::Context::default();
+    configure_context(&ctx);
+    let mut score = Score::blank();
+    score.parts[0].measures[0]
+        .notes
+        .push(event(0, Duration::Half, &[72]));
+    let original = score.clone();
+    let mut app = controller(score);
+    app.write_mode = true;
+    app.entry_profile = EntryProfile::Speedy;
+    app.selected = Some(Selection {
+        part: 0,
+        measure: 0,
+        note: 0,
+    });
+    let plain = egui::Modifiers::NONE;
+    let command = egui::Modifiers {
+        ctrl: true,
+        command: true,
+        ..plain
+    };
+    let _ = ctx.run(raw_input(0, vec![], plain), |ctx| app.ui(ctx));
+    let _ = ctx.run(
+        raw_input(1, vec![key(egui::Key::Quote, true, plain)], plain),
+        |ctx| app.ui(ctx),
+    );
+    assert_eq!(app.active_voice, 1);
+    assert_eq!(app.score, original);
+    assert!(app.undo.is_empty());
+    let _ = ctx.run(
+        raw_input(
+            2,
+            vec![
+                key(egui::Key::Quote, false, plain),
+                key(egui::Key::Num4, true, plain),
+            ],
+            plain,
+        ),
+        |ctx| app.ui(ctx),
+    );
+    let entered = app.score.clone();
+    assert_eq!(entered.parts[0].measures[0].notes.len(), 2);
+    assert_eq!(entered.parts[0].measures[0].notes[1].voice_launch, Some(0));
+    assert_eq!(app.undo.len(), 1);
+    let _ = ctx.run(
+        raw_input(
+            3,
+            vec![
+                key(egui::Key::Num4, false, plain),
+                key(egui::Key::Z, true, command),
+            ],
+            command,
+        ),
+        |ctx| app.ui(ctx),
+    );
+    assert_eq!(app.score, original);
+    let _ = ctx.run(
+        raw_input(
+            4,
+            vec![
+                key(egui::Key::Z, false, command),
+                key(egui::Key::Y, true, command),
+            ],
+            command,
+        ),
+        |ctx| app.ui(ctx),
+    );
+    assert_eq!(app.score, entered);
+    app.selected = Some(Selection {
+        part: 0,
+        measure: 0,
+        note: 1,
+    });
+    app.apply_style_command(shortcuts::StyleCommand::FlipStem);
+    assert_eq!(
+        app.score.notation.entries[0].stem,
+        encore::entry_style::StemDirection::Up
+    );
 }

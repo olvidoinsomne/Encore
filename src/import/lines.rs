@@ -23,6 +23,7 @@ pub(super) struct Lines {
 }
 fn dummy(a: &SourceAnchor) -> Anchor {
     Anchor {
+        voice: 0,
         part: 0,
         layer: 0,
         measure: a.measure,
@@ -30,7 +31,11 @@ fn dummy(a: &SourceAnchor) -> Anchor {
     }
 }
 fn key(at: &SourceAnchor, family: &str, number: &str) -> String {
-    format!("{}:{family}:{number}", at.staff)
+    if matches!(family, "wavy-line" | "glissando" | "slide") {
+        format!("{}:{}:{family}:{number}", at.staff, at.voice)
+    } else {
+        format!("{}:{family}:{number}", at.staff)
+    }
 }
 impl Lines {
     pub(super) fn xml(
@@ -367,7 +372,7 @@ impl Lines {
     pub(super) fn resolve(
         self,
         score: &mut Score,
-        mapping: &BTreeMap<(u32, String), (usize, u8)>,
+        mapping: &super::VoiceMapping,
         _warnings: &mut Warnings,
     ) -> Result<(), String> {
         if !self.open.is_empty() {
@@ -376,7 +381,7 @@ impl Lines {
         let width = u64::from(score.measure_ticks());
         let count = score.measure_count();
         let anchor = |source: &SourceAnchor| -> Result<Anchor, String> {
-            let &(part, layer) = mapping
+            let target = mapping
                 .get(&(source.staff, source.voice.clone()))
                 .or_else(|| {
                     mapping
@@ -392,8 +397,9 @@ impl Lines {
                 ((total / width) as usize, (total % width) as u32)
             };
             Ok(Anchor {
-                part,
-                layer,
+                voice: target.voice,
+                part: target.part,
+                layer: target.layer,
                 measure,
                 tick,
             })
@@ -401,6 +407,10 @@ impl Lines {
         for (a, b, mut line) in self.raw {
             line.start = anchor(&a)?;
             line.end = anchor(&b)?;
+            if matches!(line.kind, LineKind::Pedal { .. } | LineKind::Ottava { .. }) {
+                line.start.voice = 0;
+                line.end.voice = 0;
+            }
             if !score.notation.lines.contains(&line) {
                 score.notation.lines.push(line);
             }
@@ -415,6 +425,8 @@ mod tests {
     use crate::model::{Duration, Note, Pitch};
     fn n(start: u32, midi: u8) -> Note {
         Note {
+            voice: 0,
+            voice_launch: None,
             start,
             duration: Duration::Quarter,
             dotted: false,
@@ -437,6 +449,7 @@ mod tests {
         }
         score.parts[0].measures[0].notes = vec![n(0, 72), n(480, 76), n(960, 79)];
         let a = Anchor {
+            voice: 0,
             part: 0,
             measure: 0,
             tick: 0,

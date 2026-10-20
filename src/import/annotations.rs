@@ -18,6 +18,7 @@ pub(super) struct SourceAnchor {
 impl SourceAnchor {
     fn dummy(&self) -> Anchor {
         Anchor {
+            voice: 0,
             part: 0,
             measure: self.measure,
             tick: self.tick,
@@ -152,7 +153,7 @@ impl Annotations {
             if number.len() > 64 {
                 return Err("MusicXML slur number is too long.".into());
             }
-            let key = format!("{}:{number}", at.staff);
+            let key = format!("{}:{}:{number}", at.staff, at.voice);
             match element.attribute("type"){
                 Some("start")=>{
                     let mut slur=Slur::new(at.dummy(),at.dummy());
@@ -391,20 +392,15 @@ impl Annotations {
     pub(super) fn finish(
         self,
         score: &mut Score,
-        mapping: &BTreeMap<(u32, String), (usize, u8)>,
+        mapping: &super::VoiceMapping,
         warnings: &mut Warnings,
     ) -> Result<(), String> {
         let mt = score.measure_ticks();
         let resolve = |at: &SourceAnchor| -> Result<Anchor, String> {
-            let (part, layer) = mapping
+            let target = mapping
                 .get(&(at.staff, at.voice.clone()))
                 .ok_or("Annotation refers to an unknown source voice.")?;
-            Ok(Anchor {
-                part: *part,
-                layer: *layer,
-                measure: at.measure + at.tick as usize / mt as usize,
-                tick: at.tick % mt,
-            })
+            Ok(target.anchor(at.measure + at.tick as usize / mt as usize, at.tick % mt))
         };
         self.styles.finish(score, mapping)?;
         for raw in self.lyrics {
@@ -417,7 +413,7 @@ impl Annotations {
             let mut slur = raw.value;
             slur.start = resolve(&raw.start)?;
             slur.end = resolve(&raw.end)?;
-            if slur.start.part != slur.end.part || slur.start.layer != slur.end.layer {
+            if slur.start.part != slur.end.part || slur.start.lane() != slur.end.lane() {
                 warnings.add("Cross-staff or cross-voice slurs are omitted; same-layer phrase curves are retained.");
             } else {
                 score.notation.slurs.push(slur);

@@ -28,6 +28,7 @@ struct Event {
     articulations: Vec<Articulation>,
     tied: bool,
     rhythm: Option<(Duration, bool, Option<Tuplet>)>,
+    voice_launch: Option<u32>,
 }
 
 pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
@@ -512,19 +513,33 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
                         )?;
                         lines.xml_note(item, at, divisions.unwrap_or(480.0), &mut warnings)?;
                         let key = (staff, voice);
+                        let voice_launch = item
+                            .descendants()
+                            .filter(|element| element.has_tag_name("other-notation"))
+                            .filter_map(|element| element.text())
+                            .find_map(|text| text.strip_prefix("encore-voice-launch:"))
+                            .map(|value| {
+                                value
+                                    .parse::<u32>()
+                                    .map_err(|_| "Invalid Encore voice launch position.")
+                            })
+                            .transpose()?;
+                        if voice_launch.is_some_and(|launch| launch >= score.measure_ticks()) {
+                            return Err("Encore voice launch is outside its measure.".into());
+                        }
                         if !events.contains_key(&key)
                             && events
                                 .keys()
                                 .filter(|(source_staff, _)| *source_staff == staff)
                                 .count()
-                                >= 4
+                                >= 8
                         {
                             return Err(format!(
-                                "MusicXML staff {staff} has more than four independent voices; Encore supports four layers per staff."
+                                "MusicXML staff {staff} has more than eight independent voices; Encore supports two voices in each of four layers."
                             ));
                         }
                         if !events.contains_key(&key)
-                            && events.len() >= 4 * (MAX_PARTS - parts.len())
+                            && events.len() >= 8 * (MAX_PARTS - parts.len())
                         {
                             return Err(format!(
                                 "Separating MusicXML voices exceeds Encore's {MAX_PARTS}-staff limit."
@@ -539,6 +554,9 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
                                 ));
                             }
                             prior.tied |= tied;
+                            if voice_launch.is_some() && voice_launch != prior.voice_launch {
+                                return Err("Chord tones disagree on their Voice 2 launch.".into());
+                            }
                             if prior.pitches.is_empty() || pitches.is_empty() {
                                 return Err("A rest cannot be a member of a chord.".into());
                             }
@@ -564,6 +582,7 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
                                 articulations,
                                 tied,
                                 rhythm,
+                                voice_launch,
                             });
                         }
                         if item.descendants().any(|n| {
@@ -653,14 +672,14 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
             }
             for (key, events) in events {
                 if !lanes.contains_key(&key)
-                    && lanes.keys().filter(|(staff, _)| *staff == key.0).count() >= 4
+                    && lanes.keys().filter(|(staff, _)| *staff == key.0).count() >= 8
                 {
                     return Err(format!(
-                        "MusicXML staff {} has more than four independent voices; Encore supports four layers per staff.",
+                        "MusicXML staff {} has more than eight independent voices; Encore supports two voices in each of four layers.",
                         key.0
                     ));
                 }
-                if !lanes.contains_key(&key) && lanes.len() >= 4 * (MAX_PARTS - parts.len()) {
+                if !lanes.contains_key(&key) && lanes.len() >= 8 * (MAX_PARTS - parts.len()) {
                     return Err(format!(
                         "Separating MusicXML voices exceeds Encore's {MAX_PARTS}-staff limit."
                     ));
@@ -670,10 +689,16 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
                     .or_insert_with(|| vec![Measure::default(); measures.len()]);
                 for event in events {
                     let notes = &mut measures[measure_index].notes;
+                    let first_piece = notes.len();
+                    let launch = event
+                        .voice_launch
+                        .map(|tick| tick.saturating_add(pickup_shift));
                     if let Some((duration, dotted, tuplet)) = event.rhythm {
                         push_rhythmic_event(
                             notes,
                             Note {
+                                voice: 0,
+                                voice_launch: None,
                                 start: event.start + pickup_shift,
                                 duration,
                                 dotted,
@@ -707,6 +732,9 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
                         })
                     }
                     .map_err(|e| format!("{context}: {e}"))?;
+                    for note in &mut notes[first_piece..] {
+                        note.voice_launch = launch;
+                    }
                 }
             }
         }
@@ -718,53 +746,56 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
                 );
             }
         }
-        let multiple_staves = lanes
-            .keys()
-            .map(|(staff, _)| *staff)
-            .collect::<std::collections::BTreeSet<_>>()
-            .len()
-            > 1;
         let staff_order = lanes
             .keys()
             .map(|(staff, _)| *staff)
             .collect::<std::collections::BTreeSet<_>>()
             .into_iter()
             .collect::<Vec<_>>();
+        let canonical = |label: &str| {
+            label
+                .parse::<u8>()
+                .ok()
+                .filter(|id| (1..=8).contains(id) && id.to_string() == label)
+                .map(|id| id - 1)
+        };
+        let mut reserved = BTreeMap::<u32, usize>::new();
+        for (staff, label) in lanes.keys() {
+            if let Some(lane) = canonical(label) {
+                *reserved.entry(*staff).or_default() |= 1 << lane;
+            }
+        }
         let mut staff_layers: BTreeMap<u32, (Vec<Measure>, usize)> = BTreeMap::new();
-        for ((staff, voice), measures) in lanes {
-            let (combined, layer_count) = staff_layers
+        for ((staff, label), measures) in lanes {
+            let (combined, used) = staff_layers
                 .entry(staff)
                 .or_insert_with(|| (vec![Measure::default(); measures.len()], 0));
-            if (*layer_count as u8).count_ones() >= 4 {
-                return Err(format!(
-                    "MusicXML staff {staff} has more than four independent voices; Encore supports four layers per staff."
-                ));
-            }
-            let preferred = (!multiple_staves)
-                .then(|| voice.parse::<u8>().ok())
-                .flatten()
-                .filter(|voice| (1..=4).contains(voice))
-                .map(|voice| voice - 1);
-            let layer = preferred
-                .filter(|layer| *layer_count & (1 << layer) == 0)
-                .unwrap_or_else(|| {
-                    (0..4)
-                        .find(|layer| *layer_count & (1 << layer) == 0)
-                        .unwrap_or(0)
-                });
+            let lane = canonical(&label)
+                .filter(|lane| *used & (1 << lane) == 0)
+                .or_else(|| {
+                    (0..8).find(|lane| {
+                        *used & (1 << lane) == 0
+                            && reserved.get(&staff).copied().unwrap_or(0) & (1 << lane) == 0
+                    })
+                })
+                .ok_or("MusicXML staff exceeds eight distinct source voices.")?;
+            let layer = lane % 4;
+            let voice = lane / 4;
             annotation_mapping.insert(
-                (staff, voice),
-                (
-                    parts.len() + staff_order.iter().position(|s| *s == staff).unwrap(),
+                (staff, label),
+                super::VoiceTarget {
+                    part: parts.len() + staff_order.iter().position(|s| *s == staff).unwrap(),
                     layer,
-                ),
+                    voice,
+                },
             );
-            *layer_count |= 1 << layer;
+            *used |= 1 << lane;
             for (destination, source) in combined.iter_mut().zip(measures) {
                 destination
                     .notes
                     .extend(source.notes.into_iter().map(|mut note| {
                         note.layer = layer;
+                        note.voice = voice;
                         note
                     }));
             }
@@ -772,7 +803,7 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
         let split = staff_layers.len() > 1;
         for (staff, (measures, layer_count)) in staff_layers {
             if layer_count.count_ones() > 1 {
-                warnings.add("Independent MusicXML voices are preserved as rhythmic layers on their source staff.");
+                warnings.add("Independent MusicXML voices are preserved in up to eight rhythmic lanes (two voices per layer) on their source staff.");
             }
             parts.push(Part {
                 name: if split {
@@ -906,6 +937,8 @@ fn read_rhythm(
     if let Some(duration) = duration.filter(|_| dots <= 1) {
         let rhythm = (duration, dots == 1, tuplet);
         let probe = Note {
+            voice: 0,
+            voice_launch: None,
             start: 0,
             duration,
             dotted: dots == 1,
@@ -1069,6 +1102,7 @@ mod harmony_tests {
     fn standard_xml_export_import_retains_chords_frames_grace_and_lines() {
         let mut score = Score::demo();
         let at = Anchor {
+            voice: 0,
             part: 2,
             measure: 0,
             tick: 0,
@@ -1223,5 +1257,127 @@ mod articulation_tests {
             vec![Articulation::Tenuto, Articulation::Staccatissimo]
         );
         assert!(!notes[1].tied);
+    }
+}
+
+#[cfg(test)]
+mod secondary_voice_tests {
+    use super::*;
+    use crate::{
+        document::Anchor,
+        entry_style::{self, AccidentalDisplay, AccidentalOverride, EntryStyle},
+        grace::{GraceGroup, GraceNote},
+        lines::{LineKind, PerformanceLine},
+        lyrics::{self, Lyric},
+        model::Score,
+        slurs::{self, Slur},
+    };
+    fn read(body: &str) -> Result<ImportResult, String> {
+        let xml = format!(
+            "<score-partwise><part-list><score-part id='p'><part-name>Piano</part-name></score-part></part-list><part id='p'><measure><attributes><divisions>480</divisions><time><beats>4</beats><beat-type>4</beat-type></time></attributes>{body}</measure></part></score-partwise>"
+        );
+        parse(&super::super::parse_xml(&xml)?)
+    }
+    #[test]
+    fn arbitrary_voice_names_are_deterministic_without_stealing_canonical_lanes() {
+        let imported=read("<note><rest/><duration>480</duration><voice>alto</voice></note><backup><duration>480</duration></backup><note><rest/><duration>480</duration><voice>5</voice></note><backup><duration>480</duration></backup><note><rest/><duration>480</duration><voice>1</voice></note>").unwrap();
+        assert_eq!(
+            imported.score.parts[0].measures[0]
+                .notes
+                .iter()
+                .map(|note| note.lane())
+                .collect::<Vec<_>>(),
+            vec![0, 4, 1]
+        );
+    }
+    #[test]
+    fn secondary_voice_xml_roundtrip_keeps_launches_and_voice_local_annotations() {
+        let mut source = Score::blank();
+        source.parts.truncate(1);
+        source.parts[0].measures.truncate(1);
+        let mut primary = Score::demo().parts[0].measures[0].notes[0].clone();
+        primary.duration = Duration::Whole;
+        primary.start = 0;
+        primary.layer = 0;
+        primary.voice = 0;
+        primary.voice_launch = None;
+        primary.pitches = vec![Pitch::from_midi(60)];
+        primary.tied = false;
+        primary.dotted = false;
+        let mut secondary = primary.clone();
+        secondary.duration = Duration::Quarter;
+        secondary.voice = 1;
+        secondary.voice_launch = Some(0);
+        secondary.pitches = vec![Pitch::from_midi(64)];
+        let mut next = secondary.clone();
+        next.start = 480;
+        next.pitches = vec![Pitch::from_midi(67)];
+        source.parts[0].measures[0].notes = vec![primary, secondary, next];
+        let at = Anchor {
+            part: 0,
+            measure: 0,
+            tick: 0,
+            layer: 0,
+            voice: 1,
+        };
+        lyrics::assign(&mut source, Lyric::new(at, "lower")).unwrap();
+        slurs::add(&mut source, Slur::new(at, Anchor { tick: 480, ..at })).unwrap();
+        source.notation.grace.push(GraceGroup::new(
+            at,
+            vec![GraceNote::new(Pitch::from_midi(69), Duration::Sixteenth)],
+        ));
+        let mut style = EntryStyle::new(at);
+        style.accidentals.push(AccidentalOverride {
+            pitch: 64,
+            display: AccidentalDisplay::Show,
+        });
+        entry_style::assign(&mut source, style).unwrap();
+        source.notation.lines.push(PerformanceLine::new(
+            at,
+            Anchor { tick: 480, ..at },
+            LineKind::Glissando,
+        ));
+        source.validate().unwrap();
+        let xml = crate::export::musicxml(&source);
+        assert!(xml.contains("<voice>5</voice>"));
+        assert!(xml.contains("encore-voice-launch:0"));
+        let imported = parse(&super::super::parse_xml(&xml).unwrap())
+            .unwrap()
+            .score;
+        let notes = &imported.parts[0].measures[0].notes;
+        assert_eq!(notes.iter().filter(|note| note.voice == 1).count(), 2);
+        assert!(
+            notes
+                .iter()
+                .filter(|note| note.voice == 1)
+                .all(|note| note.voice_launch == Some(0))
+        );
+        assert_eq!(imported.notation.lyrics[0].anchor, at);
+        assert_eq!(imported.notation.slurs[0].start, at);
+        assert_eq!(imported.notation.grace[0].anchor, at);
+        assert_eq!(imported.notation.entries[0].anchor, at);
+        assert_eq!(imported.notation.lines[0].start, at);
+    }
+    #[test]
+    fn paired_voice_slurs_can_reuse_a_number_without_cross_binding() {
+        let lane = |voice: u8, step: &str| {
+            format!(
+                "<note><pitch><step>{step}</step><octave>4</octave></pitch><duration>480</duration><voice>{voice}</voice><notations><slur number='1' type='start'/></notations></note><note><pitch><step>{step}</step><octave>4</octave></pitch><duration>480</duration><voice>{voice}</voice><notations><slur number='1' type='stop'/></notations></note>"
+            )
+        };
+        let imported =
+            read(&(lane(1, "C") + "<backup><duration>960</duration></backup>" + &lane(5, "E")))
+                .unwrap();
+        assert_eq!(imported.score.notation.slurs.len(), 2);
+        assert_eq!(
+            imported
+                .score
+                .notation
+                .slurs
+                .iter()
+                .map(|slur| slur.start.voice)
+                .collect::<Vec<_>>(),
+            vec![0, 1]
+        );
     }
 }

@@ -427,9 +427,19 @@ fn hostile_numbers_return_errors_instead_of_overflowing() {
 
 #[test]
 fn excess_voices_are_rejected_before_allocating_measure_grids() {
-    let voices = (1..=65).map(|voice| format!("<note><rest/><duration>4</duration><voice>{voice}</voice></note><backup><duration>4</duration></backup>")).collect::<String>();
+    let voices = (1..=8).map(|voice| format!("<note><rest/><duration>4</duration><voice>{voice}</voice></note><backup><duration>4</duration></backup>")).collect::<String>();
+    let accepted = musicxml(&simple_xml(&voices)).unwrap().score;
+    assert_eq!(
+        accepted.parts[0].measures[0]
+            .notes
+            .iter()
+            .map(|note| note.lane())
+            .collect::<Vec<_>>(),
+        vec![0, 4, 1, 5, 2, 6, 3, 7]
+    );
+    let voices = voices + "<note><rest/><duration>4</duration><voice>9</voice></note>";
     let error = musicxml(&simple_xml(&voices)).unwrap_err();
-    assert!(error.contains("four independent voices"));
+    assert!(error.contains("eight independent voices"));
     let xml = format!(
         "<museScore version='4.30'><Score><Staff id='1'><Measure>{}</Measure></Staff></Score></museScore>",
         "<voice><Rest><durationType>whole</durationType></Rest></voice>".repeat(65)
@@ -449,6 +459,7 @@ fn partially_tied_musicxml_chords_preserve_exact_pitch_ties() {
     );
     let score = musicxml(&music).unwrap().score;
     let anchor = crate::document::Anchor {
+        voice: 0,
         part: 0,
         measure: 0,
         tick: 0,
@@ -699,6 +710,8 @@ fn musicxml_round_trip_keeps_four_layers_and_independent_tuplet_timing() {
     score.parts[0].measures.truncate(1);
     score.parts[0].measures[0].notes = (0..4)
         .map(|layer| Note {
+            voice: 0,
+            voice_launch: None,
             articulations: Vec::new(),
             layer,
             start: 0,

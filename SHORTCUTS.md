@@ -90,6 +90,7 @@ remain pending.
 | Set sharp / flat / natural / double sharp / double flat | S / F / N / X / V | Same |
 | Raise / lower accidental by half step | + or Shift+S / − or Shift+F | Same |
 | Next layer | Shift+apostrophe | Shift+Up (previous: Shift+Down) |
+| Toggle Voice 1 / Voice 2 within the layer | apostrophe | apostrophe |
 | Flip / automatic stem | L / Ctrl+L | L / Option+L |
 | Break/join / automatic beam | / or B / Shift+B | Same |
 | Flatten beam | Backslash or Shift+M | Same |
@@ -99,7 +100,7 @@ remain pending.
 | Show/hide accidental | * (text-producing key) | Same |
 
 Speedy currently operates without MIDI input. Caps Lock pitch rows,
-independent voices, insert mode, and MIDI held-chord input remain pending.
+insert mode, and MIDI held-chord input remain pending.
 The modified asterisk command for restoring automatic accidentals requires
 native keyboard validation; the Entry engraving window provides that control. macOS Finale distinguishes **Return**
 (staff navigation) from keypad **Enter**, often Fn+Return (chord entry).
@@ -109,9 +110,15 @@ as Backspace; Encore accepts both logical Delete/Backspace for ordinary event
 deletion and their shifted forms for tone removal. Native Clear-key behavior
 still needs keyboard validation.
 
-Four independent layers can share each staff. Select the active layer in the
-toolbar; each has independent note navigation and rhythm. A second voice
-inside each layer remains pending. Select a chord tone in the Inspector to target its pitch edits.
+Four independent layers can share each staff, each with two rhythmic voices.
+Select the layer and V1/V2 in the toolbar. In Speedy Entry, apostrophe toggles
+voices. Enter Voice 1 first, then select its note or rest and switch to Voice 2
+to launch a branch. Navigation, ties, lyrics and entry styling stay in the active
+voice. Different launch points break secondary beams. Deleting a primary entry
+with a secondary branch is refused until the branch is removed or relocated;
+converting it to a rest retains the launch. An isolated secondary clipboard
+event is detached from its launch with a warning. Layer dynamics and techniques
+apply to both voices. Select a chord tone in the Inspector to target its pitch edits.
 The Inspector also edits staccato, accent, marcato, tenuto and staccatissimo.
 Finale's articulation trigger keys and programmable marking metatools remain
 pending; these checkboxes are the current entry route.

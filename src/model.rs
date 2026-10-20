@@ -701,6 +701,13 @@ pub struct Note {
     /// Finale-compatible independent rhythmic layer, numbered 0–3 internally.
     #[serde(default, skip_serializing_if = "is_layer_zero")]
     pub layer: u8,
+    /// Independent rhythmic voice within a layer: primary (0) or secondary (1).
+    #[serde(default, skip_serializing_if = "is_layer_zero")]
+    pub voice: u8,
+    /// Measure-relative onset of the primary entry launching this secondary branch.
+    /// Foreign independent voices may omit a launch rather than inventing one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub voice_launch: Option<u32>,
     pub start: u32,
     pub duration: Duration,
     pub dotted: bool,
@@ -718,6 +725,9 @@ fn is_layer_zero(layer: &u8) -> bool {
     *layer == 0
 }
 impl Note {
+    pub fn lane(&self) -> u8 {
+        self.voice.saturating_mul(4).saturating_add(self.layer)
+    }
     /// Ordinary articulation performance is deliberately modest and deterministic.
     /// Chord-wide accents share one bounded boost; silent entries stay silent.
     pub fn playback_velocity(&self) -> u8 {
@@ -1063,7 +1073,9 @@ impl Score {
         for part in &mut self.parts {
             part.measures.resize_with(count, Measure::default);
             for measure in &mut part.measures {
-                measure.notes.sort_by_key(|note| (note.start, note.layer));
+                measure
+                    .notes
+                    .sort_by_key(|note| (note.start, note.layer, note.voice));
             }
         }
     }
@@ -1118,11 +1130,31 @@ impl Score {
                 if total_notes > MAX_EVENTS {
                     return Err("Score exceeds the 200,000-event limit.".into());
                 }
-                let mut ends = [0; 4];
+                let primary_onsets: std::collections::BTreeSet<_> = measure
+                    .notes
+                    .iter()
+                    .filter(|n| n.voice == 0)
+                    .map(|n| (n.layer, n.start))
+                    .collect();
+                let mut ends = [0; 8];
                 for (ni, note) in measure.notes.iter().enumerate() {
                     let context = format!("{context}, measure {}, event {}", mi + 1, ni + 1);
                     if note.layer > 3 {
                         return Err(format!("{context}: layer must be 1–4 (0–3 internally)."));
+                    }
+                    if note.voice > 1 {
+                        return Err(format!(
+                            "{context}: voice must be 1 or 2 (0 or 1 internally)."
+                        ));
+                    }
+                    if let Some(launch) = note.voice_launch
+                        && (note.voice != 1
+                            || launch > note.start
+                            || !primary_onsets.contains(&(note.layer, launch)))
+                    {
+                        return Err(format!(
+                            "{context}: a secondary branch must launch from an existing primary entry at or before its onset."
+                        ));
                     }
                     if note.articulations.len() > Articulation::ALL.len()
                         || note
@@ -1137,7 +1169,7 @@ impl Score {
                             "{context}: articulations must be unique, with at most four marks."
                         ));
                     }
-                    let end = &mut ends[usize::from(note.layer)];
+                    let end = &mut ends[usize::from(note.lane())];
                     if note.start < *end {
                         return Err(format!(
                             "{context}: events overlap or are not in chronological order."
@@ -1240,6 +1272,8 @@ impl Score {
 
 fn demo_note(start: u32, duration: Duration, midis: &[u8], velocity: u8) -> Note {
     Note {
+        voice: 0,
+        voice_launch: None,
         articulations: Vec::new(),
         start,
         duration,
@@ -1552,5 +1586,60 @@ mod tests {
         assert_eq!(note.playback_velocity(), 127);
         note.velocity = 0;
         assert_eq!(note.playback_velocity(), 0);
+    }
+}
+
+#[cfg(test)]
+mod voice_tests {
+    use super::*;
+    #[test]
+    fn eight_lanes_overlap_independently_and_legacy_json_is_unchanged() {
+        let mut score = Score::blank();
+        let mut notes = Vec::new();
+        for voice in 0..=1 {
+            for layer in 0..4 {
+                let mut note = demo_note(0, Duration::Whole, &[60 + layer + voice * 4], 80);
+                note.layer = layer;
+                note.voice = voice;
+                note.voice_launch = (voice == 1).then_some(0);
+                notes.push(note);
+            }
+        }
+        score.parts[0].measures[0].notes = notes;
+        score.normalize();
+        score.validate().unwrap();
+        let json = serde_json::to_string(&score).unwrap();
+        assert_eq!(serde_json::from_str::<Score>(&json).unwrap(), score);
+        let legacy = demo_note(0, Duration::Quarter, &[60], 80);
+        let json = serde_json::to_string(&legacy).unwrap();
+        assert!(!json.contains("voice"));
+        assert_eq!(serde_json::from_str::<Note>(&json).unwrap().voice, 0);
+        let mut collision = legacy;
+        collision.voice = 1;
+        collision.voice_launch = Some(0);
+        score.parts[0].measures[0].notes.push(collision);
+        score.normalize();
+        assert!(score.validate().unwrap_err().contains("overlap"));
+    }
+    #[test]
+    fn secondary_launches_reject_missing_future_and_wrong_layer_primaries() {
+        let mut score = Score::blank();
+        let mut secondary = demo_note(480, Duration::Quarter, &[67], 80);
+        secondary.voice = 1;
+        secondary.voice_launch = Some(0);
+        score.parts[0].measures[0].notes.push(secondary);
+        assert!(score.validate().unwrap_err().contains("launch"));
+        let mut primary = demo_note(0, Duration::Whole, &[], 80);
+        primary.layer = 1;
+        score.parts[0].measures[0].notes.insert(0, primary);
+        assert!(score.validate().unwrap_err().contains("launch"));
+        score.parts[0].measures[0].notes[0].layer = 0;
+        score.validate().unwrap();
+        score.parts[0].measures[0].notes[1].voice_launch = Some(960);
+        assert!(score.validate().unwrap_err().contains("launch"));
+        score.parts[0].measures[0].notes[1].voice_launch = None;
+        score.validate().unwrap(); // Independent foreign voices need no invented launcher.
+        score.parts[0].measures[0].notes[1].voice = 2;
+        assert!(score.validate().unwrap_err().contains("voice"));
     }
 }

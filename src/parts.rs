@@ -500,12 +500,14 @@ mod tests {
         let first = &score.parts[2].measures[0].notes[0];
         let second = &score.parts[2].measures[1].notes[0];
         let a = Anchor {
+            voice: first.voice,
             part: 2,
             measure: 0,
             tick: first.start,
             layer: first.layer,
         };
         let b = Anchor {
+            voice: second.voice,
             part: 2,
             measure: 1,
             tick: second.start,
@@ -671,12 +673,14 @@ mod notation_projection_tests {
     fn new_anchored_notation_and_pitch_overrides_follow_written_parts() {
         let mut score = Score::demo();
         let start = Anchor {
+            voice: 0,
             part: 2,
             measure: 0,
             tick: 0,
             layer: 0,
         };
         let end = Anchor {
+            voice: 0,
             part: 2,
             measure: 1,
             tick: 0,
@@ -739,6 +743,7 @@ mod new_metadata_tests {
     fn chord_grace_and_line_projection_transposes_only_pitched_metadata() {
         let mut score = Score::demo();
         let at = Anchor {
+            voice: 0,
             part: 2,
             measure: 0,
             tick: 0,
@@ -787,6 +792,68 @@ mod new_metadata_tests {
         assert_eq!(projected.grace[0].notes[0].pitches[0].midi(), 62);
         assert_eq!(projected.lines[0].start.part, 0);
         assert_eq!(projected.lines[0].kind, LineKind::Ottava { semitones: 12 });
+        assert_eq!(score, before);
+    }
+}
+
+#[cfg(test)]
+mod secondary_voice_tests {
+    use super::*;
+    use crate::{
+        document::Anchor,
+        entry_style::{self, AccidentalDisplay, AccidentalOverride, EntryStyle},
+        lyrics::{self, Lyric},
+        model::Duration,
+    };
+    #[test]
+    fn projection_keeps_secondary_identity_launch_and_source_annotations() {
+        let mut score = Score::blank();
+        score.parts.truncate(1);
+        let mut primary = Score::demo().parts[0].measures[0].notes[0].clone();
+        primary.start = 0;
+        primary.duration = Duration::Whole;
+        primary.dotted = false;
+        primary.tied = false;
+        primary.pitches = vec![Pitch::from_midi(60)];
+        let mut secondary = primary.clone();
+        secondary.voice = 1;
+        secondary.voice_launch = Some(0);
+        secondary.pitches = vec![Pitch::from_midi(64)];
+        score.parts[0].measures[0].notes = vec![primary, secondary];
+        let at = Anchor {
+            part: 0,
+            measure: 0,
+            tick: 0,
+            layer: 0,
+            voice: 1,
+        };
+        lyrics::assign(&mut score, Lyric::new(at, "voice two")).unwrap();
+        let mut style = EntryStyle::new(at);
+        style.accidentals.push(AccidentalOverride {
+            pitch: 64,
+            display: AccidentalDisplay::Courtesy,
+        });
+        entry_style::assign(&mut score, style).unwrap();
+        let before = score.clone();
+        let part = LinkedPart {
+            id: "clarinet".into(),
+            name: "Clarinet".into(),
+            staves: vec![0],
+            transposition: Transposition {
+                semitones: 2,
+                diatonic_steps: 1,
+            },
+            layout: Default::default(),
+        };
+        let projected = project(&score, &part).unwrap().score;
+        assert_eq!(projected.parts[0].measures[0].notes[1].voice, 1);
+        assert_eq!(
+            projected.parts[0].measures[0].notes[1].voice_launch,
+            Some(0)
+        );
+        assert_eq!(projected.notation.lyrics[0].anchor, at);
+        assert_eq!(projected.notation.entries[0].anchor.voice, 1);
+        assert_eq!(projected.notation.entries[0].accidentals[0].pitch, 66);
         assert_eq!(score, before);
     }
 }

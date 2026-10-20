@@ -158,7 +158,7 @@ fn point(score: &Score, at: TimePoint, end: bool) -> bool {
         && (end || at.tick < score.measure_ticks())
 }
 fn anchor(score: &Score, at: Anchor, end: bool) -> bool {
-    at.part < score.parts.len() && at.layer < 4 && point(score, at.into(), end)
+    at.part < score.parts.len() && at.layer < 4 && at.voice < 2 && point(score, at.into(), end)
 }
 fn text_ok(text: &str) -> bool {
     text.chars().count() <= 256 && !text.chars().any(char::is_control)
@@ -183,7 +183,14 @@ pub fn validate(score: &Score) -> Result<(), String> {
         {
             return Err("Invalid expression position, text, velocity or offset.".into());
         }
-        if mark.kind == ExpressionKind::Dynamic && (!dynamics.insert(mark.anchor) || mark.system) {
+        if mark.kind == ExpressionKind::Dynamic
+            && (!dynamics.insert((
+                mark.anchor.part,
+                mark.anchor.measure,
+                mark.anchor.tick,
+                mark.anchor.layer,
+            )) || mark.system)
+        {
             return Err("A staff/layer position supports one staff dynamic.".into());
         }
     }
@@ -618,6 +625,7 @@ mod tests {
     fn explicit_dynamics_and_hairpins_change_velocity_without_editing_notes() {
         let mut score = Score::demo();
         let at = Anchor {
+            voice: 0,
             part: 0,
             measure: 0,
             tick: 0,

@@ -81,13 +81,21 @@ pub(super) fn clearance(score: &Score, part: usize, measure: usize, bars: usize)
                 let pitch = pitch_index.written_pitch(g.anchor, *p);
                 let y = pitch_y(&pitch, score.parts[part].clef, 0.0);
                 above = above.max(
-                    -y + if n.duration.has_stem() {
+                    -y + if n.duration.has_stem() && g.anchor.voice == 0 {
                         stem_length(n.duration) * g.scale + 8.0
                     } else {
                         10.0
                     },
                 );
-                below = below.max(y + if g.slur_to_main { 18.0 } else { 10.0 });
+                below = below.max(
+                    y + if n.duration.has_stem() && g.anchor.voice == 1 {
+                        stem_length(n.duration) * g.scale + 8.0
+                    } else if g.slur_to_main {
+                        18.0
+                    } else {
+                        10.0
+                    },
+                );
             }
         }
     }
@@ -115,7 +123,8 @@ pub(super) fn draw(page: &mut Page, score: &Score) {
             continue;
         };
         let clef = score.parts[group.anchor.part].clef;
-        let main_x = region.x_at_tick(group.anchor.tick as f32);
+        let main_x = region.x_at_anchor(&group.anchor);
+        let up = group.anchor.voice == 0;
         let desired = width(group);
         let start = if group.placement == GracePlacement::Before {
             main_x - desired - 6.0
@@ -209,17 +218,18 @@ pub(super) fn draw(page: &mut Page, score: &Score) {
                 y: mid,
             });
             layouts.push(NoteLayout {
+                voice_launch: None,
                 x: cx,
                 top,
                 bottom,
                 mid,
-                up: true,
+                up,
                 duration: note.duration,
                 start: index as u32,
                 end: index as u32 + 1,
                 scale: s,
                 stem: note.duration.has_stem(),
-                forced_up: Some(true),
+                forced_up: Some(up),
                 beam: note.beam,
             });
             x += note_width(note, s) * squeeze;
@@ -245,12 +255,16 @@ pub(super) fn draw(page: &mut Page, score: &Score) {
         if group.slashed
             && let Some(first) = layouts.iter().find(|n| n.duration.has_stem())
         {
-            let y = first.top - stem_length(first.duration) * group.scale * 0.65;
+            let y = if up {
+                first.top - stem_length(first.duration) * group.scale * 0.65
+            } else {
+                first.bottom + stem_length(first.duration) * group.scale * 0.65
+            };
             page.line(
                 first.x - 4.0 * group.scale,
-                y + 4.0 * group.scale,
+                y + if up { 4.0 } else { -4.0 } * group.scale,
                 first.x + 12.0 * group.scale,
-                y - 6.0 * group.scale,
+                y - if up { 6.0 } else { -6.0 } * group.scale,
                 1.3 * group.scale,
                 INK,
             );
@@ -262,22 +276,48 @@ pub(super) fn draw(page: &mut Page, score: &Score) {
                 .pitches
                 .iter()
                 .map(|p| pitch_y(&pitch_index.written_pitch(group.anchor, *p), clef, region.y))
-                .fold(region.y + 20.0, f32::max)
-                + 8.0;
+                .reduce(|a, b| if up { a.max(b) } else { a.min(b) })
+                .unwrap_or(region.y + 20.0)
+                + if up { 8.0 } else { -8.0 };
+            let main_y = if up {
+                main_y.max(region.y + 28.0)
+            } else {
+                main_y
+            };
             let first = &layouts[0];
             let last = layouts.last().unwrap();
             let (a, b) = if group.placement == GracePlacement::Before {
-                ((first.x, first.bottom + 7.0), (main_x - 5.0, main_y))
+                (
+                    (
+                        first.x,
+                        if up {
+                            first.bottom + 7.0
+                        } else {
+                            first.top - 7.0
+                        },
+                    ),
+                    (main_x - 5.0, main_y),
+                )
             } else {
-                ((main_x + 5.0, main_y), (last.x, last.bottom + 7.0))
+                (
+                    (main_x + 5.0, main_y),
+                    (
+                        last.x,
+                        if up {
+                            last.bottom + 7.0
+                        } else {
+                            last.top - 7.0
+                        },
+                    ),
+                )
             };
             let mut points = vec![a];
             let span = (b.0 - a.0).abs();
             cubic(
                 &mut points,
                 a,
-                (a.0 + span * 0.25, a.1 + 10.0),
-                (b.0 - span * 0.25, b.1 + 10.0),
+                (a.0 + span * 0.25, a.1 + if up { 10.0 } else { -10.0 }),
+                (b.0 - span * 0.25, b.1 + if up { 10.0 } else { -10.0 }),
                 b,
                 24,
             );
@@ -327,6 +367,8 @@ mod tests {
     fn grace_hits_are_separate_from_principal_hits_and_prefix_clears_header() {
         let mut score = Score::blank();
         score.parts[0].measures[0].notes = vec![Note {
+            voice: 0,
+            voice_launch: None,
             start: 0,
             layer: 0,
             duration: Duration::Quarter,
@@ -339,6 +381,7 @@ mod tests {
             tied: false,
         }];
         let anchor = Anchor {
+            voice: 0,
             part: 0,
             measure: 0,
             tick: 0,

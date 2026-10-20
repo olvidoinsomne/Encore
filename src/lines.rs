@@ -78,6 +78,7 @@ fn position(score: &Score, at: Anchor, end: bool) -> bool {
     at.part < score.parts.len()
         && at.measure < score.measure_count()
         && at.layer < 4
+        && at.voice < 2
         && at.tick <= score.measure_ticks()
         && (end || at.tick < score.measure_ticks())
 }
@@ -96,9 +97,13 @@ pub fn validate(score: &Score) -> Result<(), String> {
         for (part, p) in score.parts.iter().enumerate() {
             for (measure, m) in p.measures.iter().enumerate() {
                 for note in &m.notes {
-                    entry_positions.entry((part, note.layer)).or_default().push(
-                        measure as u64 * u64::from(score.measure_ticks()) + u64::from(note.start),
-                    );
+                    entry_positions
+                        .entry((part, note.lane()))
+                        .or_default()
+                        .push(
+                            measure as u64 * u64::from(score.measure_ticks())
+                                + u64::from(note.start),
+                        );
                 }
             }
         }
@@ -113,6 +118,8 @@ pub fn validate(score: &Score) -> Result<(), String> {
             || !position(score, line.end, true)
             || line.start.part != line.end.part
             || line.start.layer != line.end.layer
+            || (matches!(line.kind, LineKind::Glissando | LineKind::Trill { .. })
+                && line.start.voice != line.end.voice)
             || a >= b
             || !line.offset.is_finite()
             || line.offset.abs() > 160.0
@@ -153,7 +160,7 @@ pub fn validate(score: &Score) -> Result<(), String> {
                     );
                 }
                 let lane = entry_positions
-                    .get(&(line.start.part, line.start.layer))
+                    .get(&(line.start.part, line.start.lane()))
                     .map(Vec::as_slice)
                     .unwrap_or(&[]);
                 let left = lane.partition_point(|at| *at <= a);
@@ -167,8 +174,10 @@ pub fn validate(score: &Score) -> Result<(), String> {
         // Pedals control all four layers of a staff, so one lane per pedal type.
         let layer = if matches!(line.kind, LineKind::Pedal { .. }) {
             0
-        } else {
+        } else if matches!(line.kind, LineKind::Ottava { .. }) {
             line.start.layer
+        } else {
+            line.start.lane()
         };
         lanes
             .entry((line.start.part, layer, family))
@@ -202,7 +211,7 @@ fn validate_sostenuto(score: &Score) -> Result<(), String> {
     for (part, p) in score.parts.iter().enumerate() {
         for (measure, m) in p.measures.iter().enumerate() {
             for n in &m.notes {
-                lanes.entry((part, n.layer)).or_default().push((
+                lanes.entry((part, n.lane())).or_default().push((
                     measure as u64 * u64::from(score.measure_ticks()) + u64::from(n.start),
                     n,
                 ));
@@ -224,7 +233,7 @@ fn validate_sostenuto(score: &Score) -> Result<(), String> {
         }
         let a = tick(score, line.start.into());
         let b = tick(score, line.end.into());
-        for layer in 0..4 {
+        for layer in 0..8 {
             let Some(lane) = lanes.get(&(line.start.part, layer)) else {
                 continue;
             };
@@ -263,8 +272,9 @@ fn validate_sostenuto(score: &Score) -> Result<(), String> {
                         && lane[j - 1].1.pitches.iter().any(|p| p.midi() == midi)
                         && styles.ties_forward(
                             &Anchor {
+                                voice: layer / 4,
                                 part: line.start.part,
-                                layer,
+                                layer: layer % 4,
                                 measure: (lane[j - 1].0 / u64::from(score.measure_ticks()))
                                     as usize,
                                 tick: lane[j - 1].1.start,
@@ -273,7 +283,7 @@ fn validate_sostenuto(score: &Score) -> Result<(), String> {
                             midi,
                         );
                     if !tied_in {
-                        return Err("Sostenuto currently cannot reattack a captured pitch in the same layer before release; use another layer or damper pedal.".into());
+                        return Err("Sostenuto currently cannot reattack a captured pitch in the same voice before release; use another voice or layer or damper pedal.".into());
                     }
                 }
             }
@@ -443,7 +453,11 @@ fn append_direction(out: &mut String, line: &PerformanceLine, at: Anchor, start:
             },
             native,
             at.tick,
-            at.layer + 1,
+            if matches!(line.kind, LineKind::Ottava { .. } | LineKind::Pedal { .. }) {
+                at.layer + 1
+            } else {
+                at.lane() + 1
+            },
             match line.kind {
                 LineKind::Pedal { kind } => format!(
                     "<sound {}=\"{}\"/>",
@@ -539,6 +553,7 @@ mod tests {
     fn ottava_is_display_only_and_native_roundtrips() {
         let mut s = Score::blank();
         let a = Anchor {
+            voice: 0,
             part: 0,
             measure: 0,
             tick: 0,
@@ -562,6 +577,7 @@ mod tests {
     fn pedal_overlap_across_layers_is_rejected() {
         let mut s = Score::blank();
         let a = Anchor {
+            voice: 0,
             part: 0,
             measure: 0,
             tick: 0,

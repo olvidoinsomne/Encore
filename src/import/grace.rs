@@ -24,6 +24,7 @@ pub(super) struct GraceCollector {
 }
 fn dummy(at: &SourceAnchor) -> Anchor {
     Anchor {
+        voice: 0,
         part: 0,
         measure: at.measure,
         tick: at.tick,
@@ -373,7 +374,7 @@ impl GraceCollector {
     pub(super) fn finish(
         self,
         score: &mut Score,
-        mapping: &BTreeMap<(u32, String), (usize, u8)>,
+        mapping: &super::VoiceMapping,
         warnings: &mut Warnings,
     ) -> Result<(), String> {
         if !self.pending.is_empty() {
@@ -381,13 +382,14 @@ impl GraceCollector {
         }
         let mt = score.measure_ticks();
         for raw in self.groups {
-            let Some(&(part, layer)) = mapping.get(&(raw.at.staff, raw.at.voice.clone())) else {
+            let Some(target) = mapping.get(&(raw.at.staff, raw.at.voice.clone())) else {
                 return Err("Grace notes refer to an unknown source voice.".into());
             };
             let mut group = raw.group;
             group.anchor = Anchor {
-                part,
-                layer,
+                voice: target.voice,
+                part: target.part,
+                layer: target.layer,
                 measure: raw.at.measure + raw.at.tick as usize / mt as usize,
                 tick: raw.at.tick % mt,
             };
@@ -408,6 +410,8 @@ mod tests {
     use super::*;
     fn note(start: u32, midi: u8) -> crate::model::Note {
         crate::model::Note {
+            voice: 0,
+            voice_launch: None,
             start,
             layer: 0,
             duration: Duration::Quarter,
@@ -427,6 +431,7 @@ mod tests {
         score.parts[0].measures.truncate(1);
         score.parts[0].measures[0].notes = vec![note(0, 60), note(480, 62)];
         let anchor = Anchor {
+            voice: 0,
             part: 0,
             measure: 0,
             tick: 0,
@@ -514,6 +519,7 @@ mod tests {
         let before = crate::grace::at(
             &imported.score,
             &Anchor {
+                voice: 0,
                 part: 0,
                 measure: 0,
                 tick: 1440,

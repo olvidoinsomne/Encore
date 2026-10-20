@@ -98,7 +98,7 @@ impl RegionClip {
         self.measures.first().map_or(0, Vec::len)
     }
     pub fn validate(&self) -> Result<(), String> {
-        if self.version != 1 {
+        if ![1, 2].contains(&self.version) {
             return Err("This region clipboard requires a different Encore version.".into());
         }
         if self.measures.is_empty()
@@ -449,7 +449,15 @@ pub fn copy_region(score: &Score, region: &Region) -> Result<RegionClip, String>
         ));
     }
     let clip = RegionClip {
-        version: 1,
+        version: if region.staves.iter().any(|staff| {
+            score.parts[*staff].measures[region.start..=region.end]
+                .iter()
+                .any(|measure| measure.notes.iter().any(|note| note.voice != 0))
+        }) {
+            2
+        } else {
+            1
+        },
         time_numerator: score.time_numerator,
         time_denominator: score.time_denominator,
         key_fifths: score.key_fifths,
@@ -823,6 +831,7 @@ fn transpose_with(
         for measure in region.start..=region.end {
             for note in &mut candidate.parts[staff].measures[measure].notes {
                 let anchor = Anchor {
+                    voice: note.voice,
                     part: staff,
                     measure,
                     tick: note.start,
@@ -1067,6 +1076,7 @@ mod tests {
 
     fn anchor(part: usize, measure: usize) -> Anchor {
         Anchor {
+            voice: 0,
             part,
             measure,
             tick: 0,
@@ -1657,6 +1667,7 @@ mod new_metadata_tests {
     fn new_notation_survives_region_copy_paste_transpose_and_structural_edits() {
         let mut score = Score::demo();
         let at = Anchor {
+            voice: 0,
             part: 2,
             measure: 0,
             tick: 0,
@@ -1740,5 +1751,100 @@ mod new_metadata_tests {
         assert!(!score.notation.grace.iter().any(|g| g.anchor.part == 4));
         assert!(!score.notation.chords.iter().any(|g| g.anchor.part == 4));
         assert!(!score.notation.lines.iter().any(|g| g.start.part == 4));
+    }
+}
+
+#[cfg(test)]
+mod secondary_voice_tests {
+    use super::*;
+    use crate::{
+        document::Anchor,
+        entry_style::{self, AccidentalDisplay, AccidentalOverride, EntryStyle},
+        model::{Duration, Pitch},
+    };
+    #[test]
+    fn voice_two_regions_preserve_launch_and_update_only_their_own_style_keys() {
+        let mut score = Score::blank();
+        score.parts.truncate(1);
+        let mut primary = Score::demo().parts[0].measures[0].notes[0].clone();
+        primary.start = 0;
+        primary.duration = Duration::Whole;
+        primary.dotted = false;
+        primary.tied = false;
+        primary.pitches = vec![Pitch::from_midi(60)];
+        let mut secondary = primary.clone();
+        secondary.voice = 1;
+        secondary.voice_launch = Some(0);
+        secondary.pitches = vec![Pitch::from_midi(64)];
+        score.parts[0].measures[0].notes = vec![primary, secondary];
+        let at = Anchor {
+            part: 0,
+            measure: 0,
+            tick: 0,
+            layer: 0,
+            voice: 1,
+        };
+        let mut style = EntryStyle::new(at);
+        style.accidentals.push(AccidentalOverride {
+            pitch: 64,
+            display: AccidentalDisplay::Courtesy,
+        });
+        entry_style::assign(&mut score, style).unwrap();
+        let region = Region {
+            staves: vec![0],
+            start: 0,
+            end: 0,
+        };
+        let clip = copy_region(&score, &region).unwrap();
+        assert_eq!(clip.version, 2);
+        let clip = RegionClip::decode(&clip.encode().unwrap()).unwrap();
+        paste_region(&mut score, &clip, &[0], 1, PasteMode::EmptyOnly).unwrap();
+        let target = Region {
+            start: 1,
+            end: 1,
+            ..region
+        };
+        transpose_region(
+            &mut score,
+            &target,
+            Transposition {
+                semitones: 2,
+                diatonic_steps: 1,
+            },
+        )
+        .unwrap();
+        let notes = &score.parts[0].measures[1].notes;
+        assert_eq!(
+            notes
+                .iter()
+                .map(|note| (note.voice, note.voice_launch, note.pitches[0].midi()))
+                .collect::<Vec<_>>(),
+            vec![(0, None, 62), (1, Some(0), 66)]
+        );
+        assert_eq!(
+            score
+                .notation
+                .entries
+                .iter()
+                .find(|style| style.anchor.measure == 1)
+                .unwrap()
+                .accidentals[0]
+                .pitch,
+            66
+        );
+        insert_measures(&mut score, 1, 1).unwrap();
+        assert_eq!(score.parts[0].measures[2].notes[1].voice_launch, Some(0));
+        assert_eq!(
+            score
+                .notation
+                .entries
+                .iter()
+                .find(|style| style.anchor.measure == 2)
+                .unwrap()
+                .anchor
+                .voice,
+            1
+        );
+        score.validate().unwrap();
     }
 }

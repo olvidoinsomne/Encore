@@ -234,6 +234,7 @@ fn onset_index(score: &Score) -> BTreeMap<Anchor, &Note> {
                                 measure,
                                 tick: note.start,
                                 layer: note.layer,
+                                voice: note.voice,
                             },
                             note,
                         )
@@ -480,6 +481,8 @@ mod tests {
     fn fixture() -> (Score, Anchor) {
         let mut score = Score::blank();
         score.parts[0].measures[0].notes.push(Note {
+            voice: 0,
+            voice_launch: None,
             start: 0,
             layer: 0,
             duration: Duration::Quarter,
@@ -494,6 +497,7 @@ mod tests {
         (
             score,
             Anchor {
+                voice: 0,
                 part: 0,
                 measure: 0,
                 tick: 0,

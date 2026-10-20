@@ -435,6 +435,7 @@ pub struct ChordSymbol {
 impl ChordSymbol {
     pub fn new(mut anchor: Anchor, chord: ChordSpec) -> Self {
         anchor.layer = 0;
+        anchor.voice = 0;
         Self {
             anchor,
             slot: 0,
@@ -449,7 +450,7 @@ impl ChordSymbol {
     }
     pub fn validate(&self) -> Result<(), String> {
         self.chord.validate()?;
-        if self.slot > 7 || self.anchor.layer != 0 {
+        if self.slot > 7 || self.anchor.layer != 0 || self.anchor.voice != 0 {
             return Err(
                 "Chord symbols support eight stacked slots on staff beats (layer 1).".into(),
             );
@@ -600,6 +601,7 @@ mod tests {
     use super::*;
     fn at() -> Anchor {
         Anchor {
+            voice: 0,
             part: 0,
             measure: 0,
             tick: 0,

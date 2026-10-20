@@ -885,6 +885,8 @@ fn rhythmic_notes(
             for tuplet in RATIOS {
                 for dotted in [false, true] {
                     let note = Note {
+                        voice: 0,
+                        voice_launch: None,
                         articulations: Vec::new(),
                         start: 0,
                         layer: 0,
@@ -940,6 +942,8 @@ fn rhythmic_notes(
             ));
         };
         let note = Note {
+            voice: 0,
+            voice_launch: None,
             articulations: Vec::new(),
             start: position,
             layer: 0,
@@ -1204,6 +1208,8 @@ mod tests {
             source.parts[0].measures.truncate(1);
             source.parts[0].measures[0].notes = (0..5)
                 .map(|index| Note {
+                    voice: 0,
+                    voice_launch: None,
                     articulations: Vec::new(),
                     start: index * ticks,
                     layer: 0,

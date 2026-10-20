@@ -20,6 +20,7 @@ pub(super) struct Expressions {
 }
 fn dummy(at: &SourceAnchor) -> Anchor {
     Anchor {
+        voice: 0,
         part: 0,
         measure: at.measure,
         tick: at.tick,
@@ -277,13 +278,13 @@ impl Expressions {
     pub(super) fn resolve(
         self,
         score: &mut Score,
-        mapping: &BTreeMap<(u32, String), (usize, u8)>,
+        mapping: &super::VoiceMapping,
         warnings: &mut Warnings,
     ) -> Result<(), String> {
         let width = score.measure_ticks();
         let count = score.measure_count();
         let at = |source: &SourceAnchor| -> Result<Anchor, String> {
-            let &(part, layer) = mapping
+            let target = mapping
                 .get(&(source.staff, source.voice.clone()))
                 .or_else(|| {
                     mapping
@@ -302,10 +303,11 @@ impl Expressions {
                 )
             };
             Ok(Anchor {
-                part,
+                voice: 0,
+                part: target.part,
                 measure,
                 tick,
-                layer,
+                layer: target.layer,
             })
         };
         for (source, mut mark) in self.marks {
@@ -368,6 +370,8 @@ mod tests {
         let mut source = Score::blank();
         source.parts.truncate(1);
         source.parts[0].measures[0].notes = vec![Note {
+            voice: 0,
+            voice_launch: None,
             start: 0,
             duration: Duration::Whole,
             dotted: false,
@@ -380,6 +384,7 @@ mod tests {
             tied: false,
         }];
         let start = Anchor {
+            voice: 0,
             part: 0,
             measure: 0,
             tick: 0,

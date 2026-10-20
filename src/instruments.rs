@@ -351,6 +351,8 @@ pub fn audition_phrase(instrument: Instrument, velocity: u8) -> Score {
         Pitch::from_midi(p.midi().clamp(info.low, info.high))
     };
     let note = |start, duration, degree, staccato| Note {
+        voice: 0,
+        voice_launch: None,
         articulations: Vec::new(),
         start,
         duration,
@@ -385,6 +387,8 @@ pub fn audition_phrase(instrument: Instrument, velocity: u8) -> Score {
         measures[3].notes = vec![
             note(0, Duration::Half, 0, false),
             Note {
+                voice: 0,
+                voice_launch: None,
                 articulations: Vec::new(),
                 start: PPQ * 2,
                 duration: Duration::Half,

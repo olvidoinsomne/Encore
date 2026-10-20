@@ -4,7 +4,7 @@ Encore 0.7 is an original clean-room Rust music notation application. No Finale 
 
 ## Score and instrument catalog
 
-`src/model.rs` owns the serialized types. Time uses 480 ticks per quarter. Pitches are written at concert pitch: MIDI = `(octave + 1) * 12 + step semitone + alter`. Empty pitch vectors are rests. Notes have an absolute start within their measure; events carry a zero-based layer (0–3), with one nonoverlapping voice in each layer. Independent layers may overlap. Optional tuplet ratios preserve exact integer ticks; unsupported fractional-grid rhythms are rejected. A piano grand staff uses two `Part`s. Serde JSON is the native `.encore` format; saves are validated and atomic.
+`src/model.rs` owns the serialized types. Time uses 480 ticks per quarter. Pitches are written at concert pitch: MIDI = `(octave + 1) * 12 + step semitone + alter`. Empty pitch vectors are rests. Notes have an absolute start within their measure; events carry a zero-based layer (0–3), and voice (0–1), giving eight nonoverlapping lanes. Different lanes may overlap. Optional `voice_launch` records the primary onset of a secondary branch; validation rejects dangling/future launches, while independent foreign voices can omit it. Optional tuplet ratios preserve exact integer ticks; unsupported fractional-grid rhythms are rejected. A piano grand staff uses two `Part`s. Serde JSON is the native `.encore` format; saves are validated and atomic.
 
 `Instrument::ALL` contains each of the 128 melodic General MIDI programs exactly once, in zero-based bank order. `name()`, `family()`, `gm_program()` and `default_clef()` provide presentation and export metadata. `from_gm_program(u8)` returns the canonical variant for valid programs and `None` above 127. The original 18 named variants and their serialized names are retained; additional programs use `Instrument::GeneralMidi(u8)`. Explicit aliases for an original program are valid, and score validation rejects program values above 127. `Instrument::LEGACY` preserves the original 18 voices in their original order for procedural synthesis and regression checks.
 
@@ -34,7 +34,7 @@ annotations; validation rejects dangling anchors. `src/lyrics.rs` owns numbered
 verse/chorus/section syllables, syllabic state, optional extension endpoints and
 baseline offsets. `assign_text` tokenizes and applies an entire text assignment
 using one sorted melody traversal and a map of lyric keys, then validates before
-committing metadata. `src/slurs.rs` stores same-layer phrase endpoints,
+committing metadata. `src/slurs.rs` stores same-layer/voice phrase endpoints,
 direction, arch height and endpoint offsets. Validation uses sorted endpoint
 sets and a sweep of active phrases, with at most 16 overlaps per staff.
 
@@ -133,7 +133,7 @@ Application audio goes through `src/audio.rs` and `AudioEngine`, either `Procedu
 
 `src/sampled.rs` loads a bounded, validated SF2 bank and requires all **128 melodic bank-0 programs**. A bank with missing programs is rejected instead of substituting a piano or procedural voice. All catalog entries, including woodwinds, harp, electronic presets and sound effects, use SoundFont sample regions. The bundled GeneralUser GS bank advertises 261 presets and 13 drum kits upstream; Encore currently exposes only its 128 melodic bank-0 programs. GS variations, bank selection and drum-kit mapping are outside this version's scope. Electronic and effect patches can use synthesized source material and SF2 processing; the catalog is not a collection of 128 acoustic recording sessions.
 
-OxiSynth renders the samples and SF2 modulators. Each part receives a fresh synthesizer; a shared decoded font is loaned under a mutex and restored by RAII on success, error or unwinding. Loans end between parts. This avoids channel/program interference and duplicate sample decoding. Commands use rounded frame positions; OxiSynth's 64-frame DSP buffering can add up to 63 frames of latency. Ordinary articulation helpers preserve legacy behavior when their metadata is empty; accent, marcato, tenuto and staccatissimo adjust bounded attack velocity and release time. Ties merge matching chord pitches independently within each layer, and note-offs precede retriggers at the same frame. Mute/solo, staff volume and pan are honored. The bundled GeneralUser GS bank has measured orchestral mix trims; additional GM presets and other banks retain native relative levels.
+OxiSynth renders the samples and SF2 modulators. Each part receives a fresh synthesizer; a shared decoded font is loaned under a mutex and restored by RAII on success, error or unwinding. Loans end between parts. This avoids channel/program interference and duplicate sample decoding. Commands use rounded frame positions; OxiSynth's 64-frame DSP buffering can add up to 63 frames of latency. Ordinary articulation helpers preserve legacy behavior when their metadata is empty; accent, marcato, tenuto and staccatissimo adjust bounded attack velocity and release time. Ties merge matching chord pitches independently within each layer/voice, and note-offs precede retriggers at the same frame. Mute/solo, staff volume and pan are honored. The bundled GeneralUser GS bank has measured orchestral mix trims; additional GM presets and other banks retain native relative levels.
 
 `src/synth.rs` retains the original 18 procedural voices. New GM programs use related family approximations only when Procedural mode is explicitly selected or a visible fallback has occurred. These approximations do not replace presets in sampled mode. Both audio backends use the shared room/limiter pass in `synth::finish`, 44.1 kHz stereo output and the same WAV encoder. The original procedural Carol WAV files remain the comparison baseline.
 
@@ -157,6 +157,17 @@ The app's `Theme` selects a shared palette for all chrome and configures egui vi
 
 ## Harmonic notation
 
-`src/chords.rs` separates spelled `PitchClass` roots/basses and semantic kinds/degrees from display suffixes. `ChordSymbol` uses a free staff-beat anchor normalized to layer zero and a bounded stack slot. It remains attached when a note is deleted. `src/chords/parser.rs` parses common letter-name suffixes; `frame.rs` validates original string geometry and performs a bounded standard-guitar search. Known tuning and unknown imported geometry are distinct states.
+`src/chords.rs` separates spelled `PitchClass` roots/basses and semantic kinds/degrees from display suffixes. `ChordSymbol` uses a free staff-beat anchor normalized to primary layer zero and a bounded stack slot. It remains attached when a note is deleted. `src/chords/parser.rs` parses common letter-name suffixes; `frame.rs` validates original string geometry and performs a bounded standard-guitar search. Known tuning and unknown imported geometry are distinct states.
 
 Linked projections transpose harmonic spelling and diagram stops alongside nested grace pitches. Regional copying/remapping treats these as staff-anchored musical content. Event clipboard version 4 carries principal-linked before/after grace groups; free-beat harmony/performance lines travel with whole regions. `src/chords/musicxml.rs` writes standard harmony/frame elements and reads semantic degrees rather than inferring sound from suffix text. Import collectors resolve staff/voice mappings, pickup shifts and cursor offsets before committing a validated score. `src/engraving/chords.rs` supplies vector diagrams, spacing/clearance and semantic hit rectangles. The shared performance pipeline realizes concert harmony in independent stack lanes.
+
+
+Eight-voice routing keeps `Anchor.layer` and `Anchor.voice` separate from performed
+lane IDs. `lane()` maps notation to `layer + 4*voice`; the shared performance
+timeline, sample channels and MIDI keep these eight note lifetimes independent.
+Chord accompaniment occupies lanes 8–15. Layer-scoped expressions and octave
+display use layer identity, while lyrics, grace, slurs, glissandi and entry
+overrides use the complete source anchor. Engraving adds per-onset lane offsets
+without changing the shared temporal map. `x_at_anchor` addresses a displaced
+head; `x_at_tick` remains the aligned beat/playhead coordinate. Secondary outer
+gaps are not engraved as rests and MusicXML writes them as `forward` elements.

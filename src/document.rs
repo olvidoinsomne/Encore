@@ -8,9 +8,18 @@ pub struct Anchor {
     pub measure: usize,
     pub tick: u32,
     pub layer: u8,
+    #[serde(default, skip_serializing_if = "is_primary_voice")]
+    pub voice: u8,
+}
+
+fn is_primary_voice(voice: &u8) -> bool {
+    *voice == 0
 }
 
 impl Anchor {
+    pub fn lane(self) -> u8 {
+        self.voice.saturating_mul(4).saturating_add(self.layer)
+    }
     pub fn from_selection(score: &Score, selection: Selection) -> Option<Self> {
         let note = score
             .parts
@@ -24,6 +33,7 @@ impl Anchor {
             measure: selection.measure,
             tick: note.start,
             layer: note.layer,
+            voice: note.voice,
         })
     }
 
@@ -35,7 +45,9 @@ impl Anchor {
             .get(self.measure)?
             .notes
             .iter()
-            .position(|note| note.start == self.tick && note.layer == self.layer)?;
+            .position(|note| {
+                note.start == self.tick && note.layer == self.layer && note.voice == self.voice
+            })?;
         Some(Selection {
             part: self.part,
             measure: self.measure,
@@ -101,10 +113,31 @@ pub fn note_at<'a>(score: &'a Score, anchor: &Anchor) -> Option<&'a Note> {
         .get(anchor.measure)?
         .notes
         .iter()
-        .find(|note| note.start == anchor.tick && note.layer == anchor.layer)
+        .find(|note| {
+            note.start == anchor.tick && note.layer == anchor.layer && note.voice == anchor.voice
+        })
 }
 
 pub fn validate(score: &Score) -> Result<(), String> {
+    let n = &score.notation;
+    let anchors = n
+        .grace
+        .iter()
+        .map(|g| &g.anchor)
+        .chain(n.chords.iter().map(|c| &c.anchor))
+        .chain(n.lines.iter().flat_map(|s| [&s.start, &s.end]))
+        .chain(n.entries.iter().map(|e| &e.anchor))
+        .chain(n.expressions.iter().map(|e| &e.anchor))
+        .chain(n.spanners.iter().flat_map(|s| [&s.start, &s.end]))
+        .chain(
+            n.lyrics
+                .iter()
+                .flat_map(|l| std::iter::once(&l.anchor).chain(l.extend_to.as_ref())),
+        )
+        .chain(n.slurs.iter().flat_map(|s| [&s.start, &s.end]));
+    if anchors.into_iter().any(|a| a.layer > 3 || a.voice > 1) {
+        return Err("Notation must refer to one of four layers and two voices per layer.".into());
+    }
     crate::grace::validate(score)?;
     crate::chords::validate(score)?;
     crate::lines::validate(score)?;
@@ -311,6 +344,8 @@ mod ornament_anchor_tests {
     fn principal_edits_move_attached_groups_and_keep_free_beat_marks() {
         let mut score = Score::blank();
         let note = |start, duration, midi| Note {
+            voice: 0,
+            voice_launch: None,
             start,
             layer: 0,
             duration,
@@ -327,6 +362,7 @@ mod ornament_anchor_tests {
             note(480, Duration::Quarter, 64),
         ];
         let old = Anchor {
+            voice: 0,
             part: 0,
             measure: 0,
             tick: 0,
@@ -367,5 +403,99 @@ mod ornament_anchor_tests {
         assert!(score.notation.grace.is_empty());
         assert_eq!(score.notation.lines.len(), 1);
         assert_eq!(score.notation.chords.len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod voice_tests {
+    use super::*;
+    use crate::{
+        entry_style::{EntryStyle, StemDirection},
+        lyrics::{Lyric, LyricKind},
+        model::{Duration, Pitch},
+    };
+    fn fixture() -> Score {
+        let mut score = Score::blank();
+        for start in [0, 480] {
+            for voice in [0, 1] {
+                score.parts[0].measures[0].notes.push(Note {
+                    layer: 0,
+                    voice,
+                    voice_launch: (voice == 1).then_some(start),
+                    start,
+                    duration: Duration::Quarter,
+                    dotted: false,
+                    tuplet: None,
+                    pitches: vec![Pitch::from_midi(60 + voice * 7)],
+                    velocity: 80,
+                    staccato: false,
+                    articulations: vec![],
+                    tied: false,
+                });
+            }
+        }
+        score.normalize();
+        score
+    }
+    fn anchor(voice: u8, tick: u32) -> Anchor {
+        Anchor {
+            part: 0,
+            measure: 0,
+            tick,
+            layer: 0,
+            voice,
+        }
+    }
+    #[test]
+    fn underlay_and_entry_styles_keep_simultaneous_voice_identities() {
+        let mut score = fixture();
+        for voice in [0, 1] {
+            crate::lyrics::assign_text(
+                &mut score,
+                anchor(voice, 0),
+                LyricKind::Verse,
+                1,
+                if voice == 0 {
+                    "upper line"
+                } else {
+                    "lower line"
+                },
+            )
+            .unwrap();
+        }
+        let mut style = EntryStyle::new(anchor(1, 0));
+        style.stem = StemDirection::Down;
+        crate::entry_style::assign(&mut score, style).unwrap();
+        score.validate().unwrap();
+        assert_eq!(score.notation.lyrics.len(), 4);
+        assert_eq!(
+            crate::lyrics::next_anchor(&score, &anchor(1, 0), false),
+            Some(anchor(1, 480))
+        );
+        assert!(crate::entry_style::at(&score, &anchor(0, 0)).is_none());
+        remove_anchor(&mut score, &anchor(1, 0));
+        assert_eq!(score.notation.lyrics.len(), 3);
+        assert!(
+            score
+                .notation
+                .lyrics
+                .iter()
+                .any(|l| l.anchor == anchor(0, 0))
+        );
+        assert!(score.notation.entries.is_empty());
+        let mut mixed = crate::slurs::Slur::new(anchor(0, 0), anchor(1, 480));
+        assert!(crate::slurs::add(&mut score, mixed.clone()).is_err());
+        mixed.start.voice = 1;
+        crate::slurs::add(&mut score, mixed).unwrap();
+        score.validate().unwrap();
+    }
+    #[test]
+    fn corrupt_notation_voice_is_rejected_without_arithmetic_panic() {
+        let mut score = fixture();
+        score
+            .notation
+            .lyrics
+            .push(Lyric::new(anchor(u8::MAX, 0), "invalid"));
+        assert!(score.validate().unwrap_err().contains("two voices"));
     }
 }

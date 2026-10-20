@@ -75,6 +75,7 @@ impl EncoreApp {
         self.selected = anchor.selection(&self.score);
         self.active_part = anchor.part;
         self.active_layer = anchor.layer;
+        self.active_voice = anchor.voice;
         self.cursor_measure = anchor.measure;
         self.cursor_tick = anchor.tick;
     }
@@ -132,7 +133,7 @@ impl EncoreApp {
         {
             self.notation_editor.slur_start = Some(anchor);
             self.status =
-                "Slur start set. Click its final note on the same staff and layer.".into();
+                "Slur start set. Click its final note on the same staff, layer, and voice.".into();
         } else {
             self.status = "A slur must start on a pitched note.".into();
         }
@@ -140,6 +141,7 @@ impl EncoreApp {
     }
     fn move_lyric(&mut self, backward: bool) {
         let anchor = self.annotation_anchor().unwrap_or(Anchor {
+            voice: self.active_voice,
             part: self.active_part,
             measure: self.cursor_measure,
             tick: self.cursor_tick.saturating_add(u32::from(backward)),
@@ -155,6 +157,7 @@ impl EncoreApp {
             self.selected,
             self.active_part,
             self.active_layer,
+            self.active_voice,
             self.cursor_measure,
             self.cursor_tick,
         );
@@ -164,6 +167,7 @@ impl EncoreApp {
                 self.selected,
                 self.active_part,
                 self.active_layer,
+                self.active_voice,
                 self.cursor_measure,
                 self.cursor_tick,
             ) = location;
@@ -205,7 +209,7 @@ impl EncoreApp {
                         lyric.kind == kind
                             && lyric.verse == verse
                             && lyric.anchor.part == anchor.part
-                            && lyric.anchor.layer == anchor.layer
+                            && lyric.anchor.lane() == anchor.lane()
                             && lyrics::position(&lyric.anchor) < lyrics::position(&anchor)
                     })
                     .collect::<Vec<_>>();
@@ -230,7 +234,7 @@ impl EncoreApp {
                             lyric.kind == kind
                                 && lyric.verse == verse
                                 && lyric.anchor.part == anchor.part
-                                && lyric.anchor.layer == anchor.layer
+                                && lyric.anchor.lane() == anchor.lane()
                                 && lyrics::position(&lyric.anchor) < lyrics::position(&anchor)
                         })
                         .max_by_key(|lyric| lyrics::position(&lyric.anchor))
@@ -846,6 +850,8 @@ mod tests {
         score.parts.truncate(1);
         score.parts[0].measures[0].notes = (0..4)
             .map(|index| Note {
+                voice: 0,
+                voice_launch: None,
                 start: index * PPQ,
                 layer: 0,
                 duration: Duration::Quarter,
@@ -1041,6 +1047,7 @@ mod tests {
     fn live_paste_at_the_last_note_never_merges_two_words_or_partially_applies() {
         let mut app = app();
         let last = Anchor {
+            voice: 0,
             part: 0,
             measure: 0,
             tick: 1440,

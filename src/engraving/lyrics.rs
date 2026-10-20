@@ -9,7 +9,7 @@ fn lines(score: &Score, part: usize) -> Vec<(LyricKind, u16, u8)> {
         .lyrics
         .iter()
         .filter(|l| l.anchor.part == part)
-        .map(|l| (l.kind, l.verse, l.anchor.layer))
+        .map(|l| (l.kind, l.verse, l.anchor.lane()))
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect()
@@ -22,7 +22,7 @@ fn base(score: &Score, regions: &[&StaffRegion]) -> f32 {
             let multiple = m
                 .notes
                 .iter()
-                .any(|n| m.notes.first().is_some_and(|p| p.layer != n.layer));
+                .any(|n| m.notes.first().is_some_and(|p| p.lane() != n.lane()));
             baseline = baseline.max(
                 staff_dynamic_baseline(&m.notes, score.parts[region.part].clef, region.y, multiple)
                     + 25.0,
@@ -41,7 +41,7 @@ fn base(score: &Score, regions: &[&StaffRegion]) -> f32 {
                 && s.end.measure >= first_measure
                 && (s.direction == crate::slurs::SlurDirection::Below
                     || (s.direction == crate::slurs::SlurDirection::Auto
-                        && !s.start.layer.is_multiple_of(2)))
+                        && !automatic_slur_above(score, s.start)))
         })
         .map(|s| s.height + 15.0 + s.start_offset[1].abs().max(s.end_offset[1].abs()))
         .fold(0.0, f32::max);
@@ -65,7 +65,7 @@ pub(super) fn horizontal_requirement(score: &Score, parts: &[usize], measure: us
                 lyric.anchor.part,
                 lyric.kind,
                 lyric.verse,
-                lyric.anchor.layer,
+                lyric.anchor.lane(),
             ))
             .or_default() += width(&lyric.text, 13.0) + 8.0;
     }
@@ -98,7 +98,7 @@ pub(super) fn draw(page: &mut Page, score: &Score) {
         syllable_lines
             .entry((
                 lyric.anchor.part,
-                lyric.anchor.layer,
+                lyric.anchor.lane(),
                 lyric.kind,
                 lyric.verse,
             ))
@@ -138,7 +138,7 @@ pub(super) fn draw(page: &mut Page, score: &Score) {
             .filter(|l| l.anchor.part == part)
         {
             let row = line_rows
-                .get(&(lyric.kind, lyric.verse, lyric.anchor.layer))
+                .get(&(lyric.kind, lyric.verse, lyric.anchor.lane()))
                 .copied()
                 .unwrap_or(0);
             let y = base + row as f32 * 18.0 + lyric.baseline;
@@ -219,12 +219,14 @@ mod tests {
     fn lyric_underlay_reserves_space_and_extends_over_systems() {
         let mut score = Score::demo();
         let a = Anchor {
+            voice: 0,
             part: 0,
             measure: 0,
             tick: 0,
             layer: 0,
         };
         let end = Anchor {
+            voice: 0,
             part: 0,
             measure: 5,
             tick: 0,
@@ -260,6 +262,8 @@ mod tests {
         score.parts.truncate(1);
         for tick in [0, 480, 960, 1440] {
             score.parts[0].measures[0].notes.push(Note {
+                voice: 0,
+                voice_launch: None,
                 start: tick,
                 layer: 0,
                 duration: Duration::Quarter,
@@ -273,6 +277,7 @@ mod tests {
             });
         }
         let start = Anchor {
+            voice: 0,
             part: 0,
             measure: 0,
             tick: 0,

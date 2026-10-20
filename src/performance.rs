@@ -14,7 +14,7 @@ pub const MAX_CONTROLS: usize = 1_000_000;
 #[derive(Clone, Debug)]
 pub struct PerformedNote {
     pub anchor: Anchor,
-    /// 0–3 notation layers; 4–11 independent chord stack slots.
+    /// 0–7 independent notation voices; 8–15 chord stack slots.
     pub layer: u8,
     pub grace: bool,
     pub start: f64,
@@ -61,7 +61,13 @@ impl Timeline {
     }
 }
 pub fn needed(score: &Score) -> bool {
-    score.notation.chords.iter().any(|chord| chord.play)
+    score
+        .parts
+        .iter()
+        .flat_map(|part| &part.measures)
+        .flat_map(|measure| &measure.notes)
+        .any(|note| note.voice != 0)
+        || score.notation.chords.iter().any(|chord| chord.play)
         || !score.notation.grace.is_empty()
         || score
             .notation
@@ -129,7 +135,7 @@ fn adjacent(a: &Event, b: &Event, score: &Score) -> bool {
     !a.grace
         && !b.grace
         && a.anchor.part == b.anchor.part
-        && a.anchor.layer == b.anchor.layer
+        && a.anchor.lane() == b.anchor.lane()
         && source(score, a.anchor) + u64::from(a.note.ticks()) == source(score, b.anchor)
         && a.original_end == b.original_start
 }
@@ -145,13 +151,14 @@ fn events(
 ) -> Result<Vec<Event>, String> {
     let mut main: Vec<_> = crate::repeats::events(&score.parts[part], score.measure_ticks(), order)
         .into_iter()
-        .filter(|e| e.note.layer == layer)
+        .filter(|e| e.note.lane() == layer)
         .map(|e| Event {
             anchor: Anchor {
                 part,
                 measure: e.measure,
                 tick: e.note.start,
-                layer,
+                layer: layer % 4,
+                voice: layer / 4,
             },
             start: e.tick as f64,
             end: (e.tick + u64::from(e.note.ticks())) as f64,
@@ -265,7 +272,8 @@ fn to_anchor(score: &Score, part: usize, layer: u8, source_tick: u64) -> Anchor 
     let width = u64::from(score.measure_ticks());
     Anchor {
         part,
-        layer,
+        voice: layer / 4,
+        layer: layer % 4,
         measure: (source_tick / width) as usize,
         tick: (source_tick % width) as u32,
     }
@@ -305,7 +313,7 @@ impl Timeline {
             lane.sort_by_key(|(t, _)| *t);
         }
         for (part, p) in score.parts.iter().enumerate() {
-            for layer in 0..4 {
+            for layer in 0..8 {
                 let timeline = events(score, part, layer, &order, &groups)?;
                 let mut consumed = HashSet::new();
                 for (i, e) in timeline.iter().enumerate() {
@@ -355,7 +363,7 @@ impl Timeline {
                             && shortening == 0.0;
                         let end = (end - shortening + if legato { 15.0 } else { 0.0 })
                             .max(e.start + 0.01);
-                        let lane = techniques.get(&(part, layer));
+                        let lane = techniques.get(&(part, layer % 4));
                         let instrument = lane.map_or(p.instrument, |lane| {
                             let count =
                                 lane.partition_point(|(at, _)| *at <= source(score, e.anchor));
@@ -404,7 +412,7 @@ impl Timeline {
                             return true;
                         }
                         if n.anchor.part != line.start.part
-                            || n.anchor.layer != line.start.layer
+                            || n.anchor.lane() != line.start.lane()
                             || n.grace
                         {
                             return true;
@@ -518,10 +526,10 @@ impl Timeline {
         for line in &score.notation.lines {
             if let LineKind::Pedal { kind } = line.kind {
                 for (a, b) in intervals(score, &order, line.start, line.end) {
-                    if controls.len() + 8 > MAX_CONTROLS {
+                    if controls.len() + 16 > MAX_CONTROLS {
                         return Err("Pedal controller expansion exceeds one million events.".into());
                     }
-                    for layer in 0..4 {
+                    for layer in 0..8 {
                         let controller = if kind == PedalKind::Damper { 64 } else { 66 };
                         controls.push(Control {
                             tick: a,
@@ -561,12 +569,12 @@ impl Timeline {
         // A fixed attack reference leaves headroom for CC11 to swell a held SF2
         // voice. This is GM expression loudness, not sample-layer crossfading.
         for part in 0..score.parts.len() {
-            for layer in 0..4 {
+            for layer in 0..8 {
                 let mut hairpins: Vec<_> = score
                     .notation
                     .spanners
                     .iter()
-                    .filter(|h| h.start.part == part && h.start.layer == layer)
+                    .filter(|h| h.start.part == part && h.start.layer == layer % 4)
                     .collect();
                 if hairpins.is_empty() {
                     continue;
@@ -577,7 +585,7 @@ impl Timeline {
                     .notation
                     .expressions
                     .iter()
-                    .filter(|mark| mark.anchor.part == part && mark.anchor.layer == layer)
+                    .filter(|mark| mark.anchor.part == part && mark.anchor.layer == layer % 4)
                 {
                     mark_positions
                         .entry(mark.anchor.measure)
@@ -586,14 +594,14 @@ impl Timeline {
                 }
                 let reference = notes
                     .iter()
-                    .filter(|n| n.anchor.part == part && n.anchor.layer == layer)
+                    .filter(|n| n.anchor.part == part && n.layer == layer)
                     .map(|n| n.velocity)
                     .chain(
                         score
                             .notation
                             .spanners
                             .iter()
-                            .filter(|h| h.start.part == part && h.start.layer == layer)
+                            .filter(|h| h.start.part == part && h.start.layer == layer % 4)
                             .flat_map(|h| {
                                 [
                                     h.start_velocity.unwrap_or(127),
@@ -605,11 +613,13 @@ impl Timeline {
                     .unwrap_or(127)
                     .max(1);
                 let fallback = Note {
+                    voice_launch: None,
                     start: 0,
                     duration: crate::model::Duration::Whole,
                     dotted: false,
                     tuplet: None,
-                    layer,
+                    layer: layer % 4,
+                    voice: layer / 4,
                     pitches: Vec::new(),
                     velocity: 80,
                     staccato: false,
@@ -624,7 +634,7 @@ impl Timeline {
                         bar.notes
                             .iter()
                             .filter(move |n| {
-                                n.layer == layer && n.velocity > 0 && !n.pitches.is_empty()
+                                n.lane() == layer && n.velocity > 0 && !n.pitches.is_empty()
                             })
                             .map(move |n| {
                                 (
@@ -666,7 +676,7 @@ impl Timeline {
                         score.parts[part].measures[source_bar]
                             .notes
                             .iter()
-                            .filter(|n| n.layer == layer)
+                            .filter(|n| n.lane() == layer)
                             .map(|n| n.start),
                     );
                     if bar + 1 == order.len() {
@@ -747,7 +757,7 @@ impl Timeline {
                 for &midi in &pitches {
                     notes.push(PerformedNote {
                         anchor: a,
-                        layer: 4 + slot,
+                        layer: 8 + slot,
                         grace: false,
                         start,
                         end,
@@ -802,6 +812,8 @@ mod tests {
     }
     fn note(start: u32, midi: u8) -> Note {
         Note {
+            voice: 0,
+            voice_launch: None,
             start,
             duration: Duration::Quarter,
             dotted: false,
@@ -816,6 +828,7 @@ mod tests {
     }
     fn anchor(tick: u32) -> Anchor {
         Anchor {
+            voice: 0,
             part: 0,
             measure: 0,
             tick,
@@ -908,7 +921,7 @@ mod tests {
                     960.
                 }
             );
-            assert_eq!(t.controls.iter().filter(|c| c.value == 127).count(), 4);
+            assert_eq!(t.controls.iter().filter(|c| c.value == 127).count(), 8);
         }
     }
     #[test]
@@ -1006,6 +1019,7 @@ mod accompaniment_tests {
         score.parts[0].measures.truncate(1);
         score.parts[0].measures[0].notes.clear();
         let anchor = Anchor {
+            voice: 0,
             part: 0,
             measure: 0,
             tick: 0,
@@ -1025,8 +1039,8 @@ mod accompaniment_tests {
         });
         score.validate().unwrap();
         let timeline = Timeline::new(&score).unwrap();
-        assert_eq!(timeline.notes.iter().filter(|n| n.layer == 4).count(), 10);
-        assert_eq!(timeline.notes.iter().filter(|n| n.layer == 5).count(), 10);
+        assert_eq!(timeline.notes.iter().filter(|n| n.layer == 8).count(), 10);
+        assert_eq!(timeline.notes.iter().filter(|n| n.layer == 9).count(), 10);
         assert!(timeline.notes.iter().all(|n| n.end - n.start == 1920.));
         let midi = crate::export::midi(&score);
         assert_eq!(u16::from_be_bytes([midi[10], midi[11]]), 4);
@@ -1048,6 +1062,8 @@ mod review_regressions {
         s.parts.truncate(1);
         s.parts[0].measures.truncate(1);
         s.parts[0].measures[0].notes = vec![Note {
+            voice: 0,
+            voice_launch: None,
             start: 0,
             duration: Duration::Whole,
             dotted: false,
@@ -1062,6 +1078,7 @@ mod review_regressions {
         (
             s,
             Anchor {
+                voice: 0,
                 part: 0,
                 measure: 0,
                 tick: 0,
@@ -1142,5 +1159,184 @@ mod review_regressions {
             },
         ));
         assert!(s.validate().is_err());
+    }
+}
+
+#[cfg(test)]
+mod voice_two_tests {
+    use super::*;
+    use crate::{
+        expressions::{Expression, Hairpin},
+        grace::{GraceGroup, GraceNote},
+        lines::PerformanceLine,
+        model::{Duration, Pitch},
+    };
+    pub(super) fn fixture() -> Score {
+        let mut score = Score::blank();
+        score.tempo = 120;
+        score.parts.truncate(1);
+        score.parts[0].measures.truncate(1);
+        let first = Note {
+            layer: 0,
+            voice: 0,
+            voice_launch: None,
+            start: 0,
+            duration: Duration::Whole,
+            dotted: false,
+            tuplet: None,
+            pitches: vec![Pitch::from_midi(60)],
+            velocity: 80,
+            staccato: false,
+            tied: false,
+            articulations: vec![],
+        };
+        let mut second = first.clone();
+        second.voice = 1;
+        second.voice_launch = Some(0);
+        second.duration = Duration::Quarter;
+        second.tied = true;
+        let mut continuation = second.clone();
+        continuation.start = 480;
+        continuation.tied = false;
+        score.parts[0].measures[0].notes = vec![first, second, continuation];
+        score
+    }
+    fn a(voice: u8, tick: u32) -> Anchor {
+        Anchor {
+            part: 0,
+            measure: 0,
+            tick,
+            layer: 0,
+            voice,
+        }
+    }
+    #[test]
+    fn simultaneous_identical_pitches_have_voice_local_tie_lifetimes() {
+        let score = fixture();
+        score.validate().unwrap();
+        let t = Timeline::new(&score).unwrap();
+        assert_eq!(t.notes.len(), 2);
+        let first = t.notes.iter().find(|n| n.layer == 0).unwrap();
+        let second = t.notes.iter().find(|n| n.layer == 4).unwrap();
+        assert_eq!((first.start, first.end, first.anchor.voice), (0., 1920., 0));
+        assert_eq!(
+            (second.start, second.end, second.anchor.voice),
+            (0., 960., 1)
+        );
+        assert!(needed(&score));
+    }
+    #[test]
+    fn layer_dynamics_hairpins_and_techniques_reach_both_voices() {
+        let mut score = fixture();
+        score.parts[0].instrument = Instrument::Violin;
+        score
+            .notation
+            .expressions
+            .push(Expression::dynamic(a(0, 0), "p", 40));
+        let mut technique = Expression::text(a(1, 0), "pizz.");
+        technique.kind = ExpressionKind::Technique;
+        score.notation.expressions.push(technique);
+        let mut hairpin = Hairpin::new(a(0, 0), a(0, 1920));
+        hairpin.start_velocity = Some(40);
+        hairpin.end_velocity = Some(120);
+        score.notation.spanners.push(hairpin);
+        let t = Timeline::new(&score).unwrap();
+        for lane in [0, 4] {
+            let n = t.notes.iter().find(|n| n.layer == lane).unwrap();
+            assert_eq!(n.instrument.gm_program(), 45);
+            assert_eq!(n.velocity, 120);
+            assert!((t.expression(0, lane, 0.) - 40. / 120.).abs() < 0.01);
+            assert!(t.expression(0, lane, 960.) > 0.6);
+        }
+        let mut duplicate = Expression::dynamic(a(1, 0), "f", 100);
+        duplicate.anchor.voice = 1;
+        score.notation.expressions.push(duplicate);
+        assert!(score.validate().is_err());
+    }
+    #[test]
+    fn grace_donor_and_glissando_are_local_to_secondary_voice() {
+        let mut score = fixture();
+        score.parts[0].measures[0].notes[1].tied = false;
+        score.notation.grace.push(GraceGroup::new(
+            a(1, 480),
+            vec![GraceNote::new(Pitch::from_midi(72), Duration::Eighth)],
+        ));
+        let t = Timeline::new(&score).unwrap();
+        let primary = t.notes.iter().find(|n| n.layer == 0).unwrap();
+        assert_eq!(primary.end, 1920.);
+        assert!(
+            t.notes
+                .iter()
+                .any(|n| n.layer == 4 && n.grace && n.start == 384.)
+        );
+        assert!(
+            t.notes
+                .iter()
+                .any(|n| n.layer == 4 && !n.grace && n.end == 384.)
+        );
+        score.notation.grace.clear();
+        score.parts[0].measures[0].notes[1].pitches = vec![Pitch::from_midi(64)];
+        score.parts[0].measures[0].notes[2].pitches = vec![Pitch::from_midi(67)];
+        score.notation.lines.push(PerformanceLine::new(
+            a(1, 0),
+            a(1, 480),
+            LineKind::Glissando,
+        ));
+        let t = Timeline::new(&score).unwrap();
+        assert_eq!(t.notes.iter().filter(|n| n.layer == 0).count(), 1);
+        assert_eq!(
+            t.notes
+                .iter()
+                .filter(|n| n.layer == 4)
+                .map(|n| n.midi)
+                .collect::<Vec<_>>(),
+            vec![64, 65, 66, 67]
+        );
+    }
+    #[test]
+    fn layer_ottava_reaches_both_voices_while_pedal_isolates_equal_keys() {
+        let mut score = fixture();
+        score.parts[0].measures[0].notes[1].tied = false;
+        score.notation.lines.push(PerformanceLine::new(
+            a(0, 0),
+            a(0, 1920),
+            LineKind::Ottava { semitones: 12 },
+        ));
+        let index = crate::lines::PitchIndex::new(&score);
+        for voice in 0..2 {
+            assert_eq!(
+                index
+                    .written_pitch(a(voice, 0), Pitch::from_midi(72))
+                    .midi(),
+                60
+            );
+        }
+        score.notation.lines.push(PerformanceLine::new(
+            a(0, 0),
+            a(0, 1440),
+            LineKind::Pedal {
+                kind: PedalKind::Sostenuto,
+            },
+        ));
+        assert!(score.validate().is_err());
+        score.parts[0].measures[0].notes[2].pitches[0] = Pitch::from_midi(64);
+        score.validate().unwrap();
+        let t = Timeline::new(&score).unwrap();
+        assert_eq!(
+            t.notes
+                .iter()
+                .find(|n| n.layer == 4 && n.midi == 60)
+                .unwrap()
+                .sounding_end,
+            1440.
+        );
+        assert_eq!(
+            t.notes
+                .iter()
+                .find(|n| n.layer == 4 && n.midi == 64)
+                .unwrap()
+                .sounding_end,
+            960.
+        );
     }
 }

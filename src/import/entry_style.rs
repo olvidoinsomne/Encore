@@ -30,6 +30,7 @@ impl Styles {
         }
         let raw = self.entries.entry(at.clone()).or_insert_with(|| RawStyle {
             style: EntryStyle::new(Anchor {
+                voice: 0,
                 part: 0,
                 measure: at.measure,
                 tick: at.tick,
@@ -163,19 +164,16 @@ impl Styles {
             })
             .collect();
     }
-    pub fn finish(
-        self,
-        score: &mut Score,
-        mapping: &BTreeMap<(u32, String), (usize, u8)>,
-    ) -> Result<(), String> {
+    pub fn finish(self, score: &mut Score, mapping: &super::VoiceMapping) -> Result<(), String> {
         let mt = score.measure_ticks();
         for (at, raw) in self.entries {
-            let Some((part, layer)) = mapping.get(&(at.staff, at.voice)) else {
+            let Some(target) = mapping.get(&(at.staff, at.voice)) else {
                 return Err("Entry engraving references an unknown source voice.".into());
             };
             let anchor = Anchor {
-                part: *part,
-                layer: *layer,
+                voice: target.voice,
+                part: target.part,
+                layer: target.layer,
                 measure: at.measure + at.tick as usize / mt as usize,
                 tick: at.tick % mt,
             };
@@ -225,6 +223,8 @@ mod tests {
         let mut score = Score::blank();
         score.parts.truncate(1);
         score.parts[0].measures[0].notes = vec![Note {
+            voice: 0,
+            voice_launch: None,
             start: 0,
             layer: 2,
             duration: Duration::Eighth,
@@ -240,6 +240,7 @@ mod tests {
         continuation.start = 240;
         score.parts[0].measures[0].notes.push(continuation);
         let anchor = Anchor {
+            voice: 0,
             part: 0,
             measure: 0,
             tick: 0,
@@ -305,6 +306,7 @@ mod tests {
         let score = super::super::musicxml::parse(&doc).unwrap().score;
         score.validate().unwrap();
         let anchor = Anchor {
+            voice: 0,
             part: 0,
             measure: 0,
             tick: 0,

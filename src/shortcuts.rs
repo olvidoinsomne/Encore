@@ -61,6 +61,7 @@ pub enum EntryCommand {
     Boundary(i8),
     Staff(i8),
     Layer(i8),
+    ToggleVoice,
     Delete,
     RemoveTone,
     ClearSelection,
@@ -328,6 +329,7 @@ pub fn entry_command(
         return Some(SpeedyDuration(duration(number)));
     }
     match key {
+        Key::Quote => Some(ToggleVoice),
         Key::L => Some(Style(StyleCommand::FlipStem)),
         Key::Slash | Key::B => Some(Style(StyleCommand::CycleBeam)),
         Key::Backslash => Some(Style(StyleCommand::FlatBeam)),
@@ -758,6 +760,28 @@ mod engraving_tests {
                 false
             ),
             Some(Layer(1))
+        );
+    }
+}
+
+#[cfg(test)]
+mod voice_tests {
+    use super::*;
+    #[test]
+    fn apostrophe_switches_speedy_voice_without_stealing_layer_shortcut() {
+        for mac in [false, true] {
+            assert_eq!(
+                entry_command(EntryProfile::Speedy, Key::Quote, Modifiers::NONE, mac),
+                Some(EntryCommand::ToggleVoice)
+            );
+            assert_eq!(
+                entry_command(EntryProfile::SimpleLaptop, Key::Quote, Modifiers::NONE, mac),
+                None
+            );
+        }
+        assert_eq!(
+            entry_command(EntryProfile::Speedy, Key::Quote, Modifiers::SHIFT, false),
+            Some(EntryCommand::Layer(1))
         );
     }
 }

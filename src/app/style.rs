@@ -34,7 +34,15 @@ impl EncoreApp {
         match command {
             StyleCommand::FlipStem => {
                 let automatic = self.selected_entry().is_some_and(|note| {
-                    if note.layer > 0 {
+                    let notes = &self.score.parts[selection.part].measures[selection.measure].notes;
+                    let paired = notes
+                        .iter()
+                        .any(|other| other.layer == note.layer && other.voice != note.voice);
+                    if paired {
+                        note.voice == 0
+                    } else if note.voice == 1 {
+                        false
+                    } else if notes.iter().any(|other| other.lane() != note.lane()) {
                         note.layer.is_multiple_of(2)
                     } else {
                         let center = match self.score.parts[selection.part].clef {
@@ -44,9 +52,13 @@ impl EncoreApp {
                         };
                         note.pitches
                             .iter()
-                            .map(|pitch| pitch.staff_step())
+                            .map(|pitch| {
+                                self.written_pitch_at(*pitch, anchor)
+                                    .unwrap_or(*pitch)
+                                    .staff_step()
+                            })
                             .sum::<i32>()
-                            < center * note.pitches.len() as i32
+                            <= center * note.pitches.len() as i32
                     }
                 });
                 style.stem = match style.stem {

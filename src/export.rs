@@ -200,12 +200,12 @@ impl<'a> Timeline<'a> {
         let starts = notes
             .iter()
             .enumerate()
-            .map(|(i, (t, note))| ((*t, note.layer), i))
+            .map(|(i, (t, note))| ((*t, note.lane()), i))
             .collect();
         let ends = notes
             .iter()
             .enumerate()
-            .map(|(i, (t, n))| ((*t + n.ticks(), n.layer), i))
+            .map(|(i, (t, n))| ((*t + n.ticks(), n.lane()), i))
             .collect();
         Self {
             notes,
@@ -225,10 +225,11 @@ impl<'a> Timeline<'a> {
         self.ends.get(&(start, layer)).is_some_and(|i| {
             index.ties_forward(
                 &crate::document::Anchor {
+                    voice: self.notes[*i].1.voice,
                     part,
                     measure: (self.notes[*i].0 / score.measure_ticks()) as usize,
                     tick: self.notes[*i].1.start,
-                    layer,
+                    layer: self.notes[*i].1.layer,
                 },
                 self.notes[*i].1,
                 midi,
@@ -246,6 +247,7 @@ impl<'a> Timeline<'a> {
     ) -> bool {
         index.ties_forward(
             &crate::document::Anchor {
+                voice: note.voice,
                 part,
                 measure: (start / score.measure_ticks()) as usize,
                 tick: note.start,
@@ -255,7 +257,7 @@ impl<'a> Timeline<'a> {
             midi,
         ) && self
             .starts
-            .get(&(start + note.ticks(), note.layer))
+            .get(&(start + note.ticks(), note.lane()))
             .is_some_and(|i| self.notes[*i].1.pitches.iter().any(|p| p.midi() == midi))
     }
 }
@@ -307,12 +309,12 @@ pub fn musicxml(score: &Score) -> String {
         let _ = writeln!(out, "  <part id=\"P{}\">", pi + 1);
         let timeline = Timeline::new(part, measure_ticks);
         let mut previous_dynamic: [Option<&str>; 4] = [None; 4];
-        let layers = (0..4)
+        let layers = (0..8)
             .filter(|layer| {
                 part.measures
                     .iter()
                     .flat_map(|measure| &measure.notes)
-                    .any(|note| note.layer == *layer)
+                    .any(|note| note.lane() == *layer)
             })
             .collect::<Vec<_>>();
         let layers = if layers.is_empty() { vec![0] } else { layers };
@@ -352,9 +354,13 @@ pub fn musicxml(score: &Score) -> String {
                 let layer_notes = measure
                     .notes
                     .iter()
-                    .filter(|note| note.layer == layer)
+                    .filter(|note| note.lane() == layer)
                     .collect::<Vec<_>>();
                 if layer_notes.is_empty() {
+                    if layer >= 4 {
+                        write_gap(&mut out, measure_ticks, layer);
+                        continue;
+                    }
                     let _ = writeln!(
                         out,
                         "      <note><rest measure=\"yes\"/><duration>{measure_ticks}</duration><voice>{}</voice></note>",
@@ -371,6 +377,7 @@ pub fn musicxml(score: &Score) -> String {
                     }
                     let start = mi as u32 * measure_ticks + note.start;
                     let anchor = crate::document::Anchor {
+                        voice: note.voice,
                         part: pi,
                         measure: mi,
                         tick: note.start,
@@ -399,14 +406,14 @@ pub fn musicxml(score: &Score) -> String {
                             mark.anchor.part == pi
                                 && mark.kind == crate::expressions::ExpressionKind::Dynamic
                         }) && note.velocity > 0
-                            && previous_dynamic[usize::from(layer)] != Some(dynamic)
+                            && previous_dynamic[usize::from(layer % 4)] != Some(dynamic)
                         {
                             let _ = writeln!(
                                 out,
                                 "      <direction placement=\"below\"><direction-type><dynamics><{dynamic}/></dynamics><other-direction print-object=\"no\">encore-derived-dynamic</other-direction></direction-type><voice>{}</voice></direction>",
                                 layer + 1
                             );
-                            previous_dynamic[usize::from(layer)] = Some(dynamic);
+                            previous_dynamic[usize::from(layer % 4)] = Some(dynamic);
                         }
                         for (chord_index, pitch) in note.pitches.iter().enumerate() {
                             write_xml_note(
@@ -419,7 +426,7 @@ pub fn musicxml(score: &Score) -> String {
                                     score,
                                     pi,
                                     start,
-                                    note.layer,
+                                    note.lane(),
                                     pitch.midi(),
                                 ),
                                 timeline.tie_out(
@@ -543,6 +550,7 @@ fn xml_annotations(
         for (measure, m) in p.measures.iter().enumerate() {
             for note in &m.notes {
                 let anchor = crate::document::Anchor {
+                    voice: note.voice,
                     part,
                     measure,
                     tick: note.start,
@@ -582,6 +590,16 @@ fn tuplet_boundaries(notes: &[&Note]) -> Vec<(bool, bool)> {
 }
 
 fn write_gap(out: &mut String, mut ticks: u32, layer: u8) {
+    // Secondary voices contain only their branch entries. Forward cursor motion
+    // preserves implicit gaps without inventing visible secondary rests.
+    if layer >= 4 {
+        let _ = writeln!(
+            out,
+            "      <forward><duration>{ticks}</duration><voice>{}</voice></forward>",
+            layer + 1
+        );
+        return;
+    }
     for duration in Duration::ALL {
         for dotted in [true, false] {
             if dotted && !duration.ticks().is_multiple_of(2) {
@@ -590,12 +608,14 @@ fn write_gap(out: &mut String, mut ticks: u32, layer: u8) {
             let size = duration.ticks() * if dotted { 3 } else { 2 } / 2;
             while ticks >= size {
                 let note = Note {
+                    voice: layer / 4,
+                    voice_launch: None,
                     articulations: Vec::new(),
                     start: 0,
                     duration: *duration,
                     dotted,
                     tuplet: None,
-                    layer,
+                    layer: layer % 4,
                     pitches: Vec::new(),
                     velocity: 64,
                     staccato: false,
@@ -673,7 +693,7 @@ fn write_xml_note(
     let _ = write!(
         out,
         "<voice>{}</voice><type>{}</type>",
-        note.layer + 1,
+        note.lane() + 1,
         note.duration.musicxml_type()
     );
     if note.dotted {
@@ -708,6 +728,7 @@ fn write_xml_note(
         || tuplet_bounds.1
         || !annotations.0.is_empty()
         || !style_notations.is_empty()
+        || (!chord && note.voice_launch.is_some())
     {
         out.push_str("<notations>");
         let orientation = style.map_or("", |style| match style.tie_direction {
@@ -740,6 +761,12 @@ fn write_xml_note(
             out.push_str("<tuplet type=\"stop\"/>");
         }
         out.push_str(&style_notations);
+        if !chord && let Some(launch) = note.voice_launch {
+            let _ = write!(
+                out,
+                "<other-notation type=\"single\" print-object=\"no\">encore-voice-launch:{launch}</other-notation>"
+            );
+        }
         out.push_str(annotations.0);
         out.push_str("</notations>");
     }
@@ -873,17 +900,17 @@ pub fn midi(score: &Score) -> Vec<u8> {
     }
     let mut lane_index = 0;
     for (part_index, part) in score.parts.iter().enumerate() {
-        let layers = (0..4)
+        let layers = (0..8)
             .filter(|layer| {
                 part.measures
                     .iter()
                     .flat_map(|measure| &measure.notes)
-                    .any(|note| note.layer == *layer)
+                    .any(|note| note.lane() == *layer)
             })
             .collect::<Vec<_>>();
         let mut layers = if layers.is_empty() { vec![0] } else { layers };
         if let Some(timeline) = &decorated {
-            for lane in 4..12 {
+            for lane in 8..16 {
                 if timeline
                     .notes
                     .iter()
@@ -963,13 +990,14 @@ pub fn midi(score: &Score) -> Vec<u8> {
                     }
                     for event in crate::repeats::events(part, measure_ticks, &order)
                         .into_iter()
-                        .filter(|e| e.note.layer == layer)
+                        .filter(|e| e.note.lane() == layer)
                     {
                         let anchor = crate::document::Anchor {
+                            voice: event.note.voice,
                             part: part_index,
                             measure: event.measure,
                             tick: event.note.start,
-                            layer,
+                            layer: event.note.layer,
                         };
                         if let Some(lyrics) = lyric_index.get(&anchor) {
                             for lyric in lyrics {
@@ -994,26 +1022,30 @@ pub fn midi(score: &Score) -> Vec<u8> {
                     let starts: HashMap<_, _> = timeline
                         .iter()
                         .enumerate()
-                        .map(|(index, event)| ((event.tick, event.note.layer), index))
+                        .map(|(index, event)| ((event.tick, event.note.lane()), index))
                         .collect();
                     let ends: HashMap<_, _> = timeline
                         .iter()
                         .enumerate()
                         .map(|(index, event)| {
                             (
-                                (event.tick + u64::from(event.note.ticks()), event.note.layer),
+                                (
+                                    event.tick + u64::from(event.note.ticks()),
+                                    event.note.lane(),
+                                ),
                                 index,
                             )
                         })
                         .collect();
-                    for event in timeline.iter().filter(|event| event.note.layer == layer) {
+                    for event in timeline.iter().filter(|event| event.note.lane() == layer) {
                         let note = event.note;
                         let start = event.tick as u32;
                         let anchor = crate::document::Anchor {
+                            voice: note.voice,
                             part: part_index,
                             measure: event.measure,
                             tick: note.start,
-                            layer,
+                            layer: note.layer,
                         };
                         if let Some(lyrics) = lyric_index.get(&anchor) {
                             for lyric in lyrics {
@@ -1043,10 +1075,11 @@ pub fn midi(score: &Score) -> Vec<u8> {
                             let tie_in = previous.is_some_and(|previous| {
                                 style_index.ties_forward(
                                     &crate::document::Anchor {
+                                        voice: previous.note.voice,
                                         part: part_index,
                                         measure: previous.measure,
                                         tick: previous.note.start,
-                                        layer,
+                                        layer: previous.note.layer,
                                     },
                                     previous.note,
                                     midi,
@@ -1116,6 +1149,8 @@ mod tests {
     use crate::model::Instrument;
     fn note(start: u32, pitches: &[u8]) -> Note {
         Note {
+            voice: 0,
+            voice_launch: None,
             articulations: Vec::new(),
             start,
             duration: Duration::Quarter,
@@ -1452,6 +1487,7 @@ mod tests {
         score.parts.truncate(1);
         score.parts[0].measures[0].notes = vec![note(0, &[60]), note(480, &[62])];
         let start = Anchor {
+            voice: 0,
             part: 0,
             measure: 0,
             tick: 0,
@@ -1502,6 +1538,7 @@ mod tests {
         score.parts[0].measures[0].notes = vec![note(0, &[60])];
         let mut lyric = Lyric::new(
             Anchor {
+                voice: 0,
                 part: 0,
                 measure: 0,
                 tick: 0,
@@ -1580,6 +1617,8 @@ mod solo_regression {
         score.parts[1].solo = false;
         score.parts[1].muted = false;
         score.parts[1].measures[0].notes = vec![Note {
+            voice: 0,
+            voice_launch: None,
             start: 0,
             duration: Duration::Quarter,
             dotted: false,
@@ -1593,5 +1632,134 @@ mod solo_regression {
         }];
         let bytes = midi(&score);
         assert!(bytes.windows(3).any(|b| b == [0x91, 60, 80]));
+    }
+}
+
+#[cfg(test)]
+mod voice_two_tests {
+    use super::*;
+    fn score() -> Score {
+        let mut score = Score::blank();
+        score.parts.truncate(1);
+        score.parts[0].measures.truncate(1);
+        let note = Note {
+            layer: 0,
+            voice: 0,
+            voice_launch: None,
+            start: 0,
+            duration: Duration::Whole,
+            dotted: false,
+            tuplet: None,
+            pitches: vec![Pitch::from_midi(60)],
+            velocity: 80,
+            staccato: false,
+            tied: false,
+            articulations: vec![],
+        };
+        let mut second = note.clone();
+        second.voice = 1;
+        second.voice_launch = Some(0);
+        second.duration = Duration::Quarter;
+        second.tied = true;
+        let mut tail = second.clone();
+        tail.start = 480;
+        tail.tied = false;
+        score.parts[0].measures[0].notes = vec![note, second, tail];
+        score
+    }
+    fn vlq(bytes: &[u8], at: &mut usize) -> u32 {
+        let mut n = 0;
+        loop {
+            let b = bytes[*at];
+            *at += 1;
+            n = (n << 7) | u32::from(b & 127);
+            if b & 128 == 0 {
+                return n;
+            }
+        }
+    }
+    fn events(bytes: &[u8]) -> Vec<(u32, u8, u8, u8)> {
+        let mut all = Vec::new();
+        let mut at = 14;
+        while at < bytes.len() {
+            assert_eq!(&bytes[at..at + 4], b"MTrk");
+            let length = u32::from_be_bytes(bytes[at + 4..at + 8].try_into().unwrap()) as usize;
+            at += 8;
+            let end = at + length;
+            let mut tick = 0;
+            while at < end {
+                tick += vlq(bytes, &mut at);
+                let status = bytes[at];
+                at += 1;
+                if status == 255 {
+                    at += 1;
+                    let count = vlq(bytes, &mut at) as usize;
+                    at += count;
+                } else {
+                    let one = status & 240 == 192 || status & 240 == 208;
+                    let key = bytes[at];
+                    let value = if one { 0 } else { bytes[at + 1] };
+                    if status & 240 == 128 || status & 240 == 144 {
+                        all.push((tick, status, key, value));
+                    }
+                    at += if one { 1 } else { 2 };
+                }
+            }
+        }
+        all
+    }
+    #[test]
+    fn midi_keeps_same_pitch_voices_on_independent_lanes_and_ties() {
+        let score = score();
+        score.validate().unwrap();
+        let events = events(&midi(&score));
+        assert!(events.contains(&(0, 0x90, 60, 80)));
+        assert!(events.contains(&(1920, 0x80, 60, 0)));
+        assert!(events.contains(&(0, 0x91, 60, 80)));
+        assert!(events.contains(&(960, 0x81, 60, 0)));
+        assert_eq!(events.len(), 4);
+    }
+    #[test]
+    fn musicxml_writes_independent_voice_passes_and_launch_metadata() {
+        let score = score();
+        let xml = musicxml(&score);
+        assert_eq!(
+            xml.matches("<backup><duration>1920</duration></backup>")
+                .count(),
+            1
+        );
+        assert!(xml.contains("<voice>1</voice><type>whole</type>"));
+        assert!(xml.contains("<voice>5</voice><type>quarter</type>"));
+        assert_eq!(xml.matches("encore-voice-launch:0").count(), 2);
+        assert!(xml.contains("<forward><duration>960</duration><voice>5</voice></forward>"));
+        let document = roxmltree::Document::parse_with_options(
+            &xml,
+            roxmltree::ParsingOptions {
+                allow_dtd: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let voice_five: Vec<_> = document
+            .descendants()
+            .filter(|n| {
+                n.has_tag_name("note")
+                    && n.children()
+                        .find(|n| n.has_tag_name("voice"))
+                        .and_then(|n| n.text())
+                        == Some("5")
+            })
+            .collect();
+        assert_eq!(voice_five.len(), 2);
+        assert!(
+            voice_five[0]
+                .descendants()
+                .any(|n| n.has_tag_name("tie") && n.attribute("type") == Some("start"))
+        );
+        assert!(
+            voice_five[1]
+                .descendants()
+                .any(|n| n.has_tag_name("tie") && n.attribute("type") == Some("stop"))
+        );
     }
 }

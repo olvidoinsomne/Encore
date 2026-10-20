@@ -56,6 +56,7 @@ impl EncoreApp {
         self.selected = selection.anchor.selection(&self.score);
         self.active_part = selection.anchor.part;
         self.active_layer = selection.anchor.layer;
+        self.active_voice = selection.anchor.voice;
         self.cursor_measure = selection.anchor.measure;
         self.cursor_tick = selection.anchor.tick;
         self.open_grace_at(selection.anchor, selection.placement, selection.note);

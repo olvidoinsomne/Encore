@@ -76,7 +76,7 @@ fn base(score: &Score, region: &StaffRegion, placement: Placement) -> f32 {
                     &measure.notes,
                     score.parts[region.part].clef,
                     region.y,
-                    measure.notes.iter().any(|note| note.layer != 0),
+                    measure.notes.iter().any(|note| note.lane() != 0),
                 )
             }),
     }

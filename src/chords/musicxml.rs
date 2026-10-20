@@ -346,6 +346,7 @@ mod tests {
         let mut score = Score::blank();
         let mut symbol = ChordSymbol::new(
             Anchor {
+                voice: 0,
                 part: 0,
                 measure: 0,
                 tick: 240,
@@ -383,6 +384,7 @@ mod tests {
         let mut score = Score::blank();
         score.notation.chords.push(ChordSymbol::new(
             Anchor {
+                voice: 0,
                 part: 0,
                 measure: 0,
                 tick: 0,
