@@ -87,7 +87,9 @@ pub(crate) fn render_dry(score: &Score) -> Vec<f32> {
                         .skip(current_index + 1)
                         .take_while(|(_, e)| e.tick <= end)
                         .find(|(_, e)| {
-                            e.tick == end && e.note.pitches.iter().any(|p| p.midi() == midi)
+                            e.tick == end
+                                && e.note.layer == event.note.layer
+                                && e.note.pitches.iter().any(|p| p.midi() == midi)
                         });
                     let Some((next_index, next_event)) = next else {
                         break;
@@ -99,18 +101,17 @@ pub(crate) fn render_dry(score: &Score) -> Vec<f32> {
                     last_note = next_event.note;
                     current_index = next_index;
                 }
-                let last_shortening = if last_note.staccato {
-                    last_note.ticks() as f32 * 0.52
-                } else {
-                    0.0
-                };
+                let last_shortening =
+                    last_note.ticks() as f32 * last_note.playback_shortening() as f32;
                 let held_ticks = ((end - event.tick) as f32 - last_shortening).max(1.0);
                 let voice = synth_voice_seeded(
                     part.instrument,
                     midi,
-                    event.note.velocity,
+                    event.note.playback_velocity(),
                     held_ticks * seconds_per_tick,
-                    event.tick ^ (part_index as u64 + 1).wrapping_mul(0x517C_C1B7_2722_0A95),
+                    event.tick
+                        ^ (part_index as u64 + 1).wrapping_mul(0x517C_C1B7_2722_0A95)
+                        ^ u64::from(event.note.layer).wrapping_mul(0x9e37_79b9_7f4a_7c15),
                 );
                 let offset =
                     (event.tick as f32 * seconds_per_tick * SAMPLE_RATE as f32).round() as usize;
@@ -960,9 +961,12 @@ mod tests {
         score.parts.truncate(1);
         score.parts[0].measures.truncate(1);
         score.parts[0].measures[0].notes = vec![Note {
+            articulations: Vec::new(),
             start: 0,
             duration: Duration::Quarter,
             dotted: false,
+            tuplet: None,
+            layer: 0,
             pitches: vec![Pitch::from_midi(60)],
             velocity: 100,
             staccato: false,
@@ -983,6 +987,35 @@ mod tests {
             assert!(samples.iter().any(|s| s.abs() > 0.01), "{instrument:?}");
             assert_eq!(samples[samples.len() - 1], 0.0);
         }
+    }
+
+    #[test]
+    fn articulations_change_procedural_attack_and_sustained_release() {
+        use crate::model::Articulation;
+        let mut score = one_note();
+        score.parts[0].instrument = Instrument::Flute;
+        score.parts[0].measures[0].notes[0].velocity = 80;
+        let ordinary = render_dry(&score);
+        score.parts[0].measures[0].notes[0].articulations = vec![Articulation::Accent];
+        let accented = render_dry(&score);
+        assert_ne!(ordinary, accented);
+        score.parts[0].measures[0].notes[0].articulations = vec![Articulation::Staccatissimo];
+        let detached = render_dry(&score);
+        let energy = |samples: &[f32]| {
+            let start = (0.36 * SAMPLE_RATE as f32) as usize * 2;
+            let end = (0.44 * SAMPLE_RATE as f32) as usize * 2;
+            samples[start..end]
+                .iter()
+                .map(|sample| f64::from(*sample).powi(2))
+                .sum::<f64>()
+        };
+        assert!(energy(&detached) < energy(&ordinary) * 0.05);
+        assert!(
+            accented
+                .iter()
+                .chain(&detached)
+                .all(|sample| sample.is_finite())
+        );
     }
 
     #[test]
@@ -1248,5 +1281,28 @@ mod tests {
             let tail = &samples[samples.len() - SAMPLE_RATE as usize / 50..];
             assert!(rms(tail) < rms(&samples) * 0.02, "{instrument:?}");
         }
+    }
+    #[test]
+    fn three_tied_triplet_eighths_render_like_one_quarter_note() {
+        let mut triplets = one_note();
+        triplets.parts[0].instrument = Instrument::Flute;
+        let mut value = triplets.parts[0].measures[0].notes[0].clone();
+        value.duration = Duration::Eighth;
+        value.tuplet = Some(crate::model::Tuplet::TRIPLET);
+        triplets.parts[0].measures[0].notes = (0..3)
+            .map(|index| {
+                let mut next = value.clone();
+                next.start = index * 160;
+                next.tied = index < 2;
+                next
+            })
+            .collect();
+        let mut quarter = triplets.clone();
+        quarter.parts[0].measures[0].notes.truncate(1);
+        let first = &mut quarter.parts[0].measures[0].notes[0];
+        first.duration = Duration::Quarter;
+        first.tuplet = None;
+        first.tied = false;
+        assert_eq!(render(&triplets), render(&quarter));
     }
 }

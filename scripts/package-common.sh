@@ -11,10 +11,16 @@ encore_copy_source() {
     mkdir -p "$encore_destination"
     # Keep the exact source and the LGPL rebuild materials with the executable.
     # Exclude Git metadata, dependency caches, local exports and rendered WAVs.
-    for encore_item in src scripts Cargo.toml Cargo.lock LICENSE README.md ARCHITECTURE.md BUILDING.md COMPATIBILITY.md .gitlab-ci.yml; do
+    for encore_item in src scripts Cargo.toml Cargo.lock LICENSE README.md ARCHITECTURE.md BUILDING.md COMPATIBILITY.md FINALE_PARITY.md SHORTCUTS.md .gitlab-ci.yml; do
         cp -R "$encore_root/$encore_item" "$encore_destination/"
     done
     if [ -d "$encore_root/tests" ]; then
         cp -R "$encore_root/tests" "$encore_destination/"
     fi
+    mkdir -p "$encore_destination/examples"
+    for encore_example in "$encore_root"/examples/*.encore "$encore_root"/examples/*.pdf "$encore_root"/examples/*.png; do
+        if [ -f "$encore_example" ]; then
+            cp "$encore_example" "$encore_destination/examples/"
+        fi
+    done
 }

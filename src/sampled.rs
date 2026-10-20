@@ -136,18 +136,20 @@ impl SampleBank {
             if part.muted || part.volume <= 0.0 || (any_solo && !part.solo) {
                 continue;
             }
-            let events = timeline(part, score.measure_ticks(), score.tempo);
-            if events.is_empty() {
-                continue;
+            for layer in 0..4 {
+                let events = timeline(part, score.measure_ticks(), score.tempo, layer);
+                if events.is_empty() {
+                    continue;
+                }
+                let mut engine = self.engine(part.instrument)?;
+                guarded_mix(
+                    &mut engine.engine,
+                    &events,
+                    &mut output,
+                    part.volume * self.instrument_trim(part.instrument),
+                    part.pan,
+                )?;
             }
-            let mut engine = self.engine(part.instrument)?;
-            guarded_mix(
-                &mut engine.engine,
-                &events,
-                &mut output,
-                part.volume * self.instrument_trim(part.instrument),
-                part.pan,
-            )?;
         }
         synth::finish(&mut output);
         Ok(output)
@@ -448,10 +450,10 @@ struct Event<'a> {
     note: &'a Note,
 }
 
-fn timeline(part: &Part, measure_ticks: u32, tempo: u16) -> Vec<Command> {
+fn timeline(part: &Part, measure_ticks: u32, tempo: u16, layer: u8) -> Vec<Command> {
     let mut notes = Vec::new();
     for (measure_index, measure) in part.measures.iter().enumerate() {
-        for note in &measure.notes {
+        for note in measure.notes.iter().filter(|note| note.layer == layer) {
             notes.push(Event {
                 tick: measure_index as u64 * measure_ticks as u64 + note.start as u64,
                 note,
@@ -493,18 +495,14 @@ fn timeline(part: &Part, measure_ticks: u32, tempo: u16) -> Vec<Command> {
                 last = next_note.note;
                 current = next_index;
             }
-            let shortening = if last.staccato {
-                last.ticks() as f64 * 0.52
-            } else {
-                0.0
-            };
+            let shortening = last.ticks() as f64 * last.playback_shortening();
             let gate_end = end as f64 - shortening;
             let start_frame = (event.tick as f64 * frames_per_tick).round() as usize;
             let end_frame = ((gate_end * frames_per_tick).round() as usize).max(start_frame + 1);
             commands.push(Command {
                 frame: start_frame,
                 midi,
-                kind: Kind::On(event.note.velocity),
+                kind: Kind::On(event.note.playback_velocity()),
             });
             commands.push(Command {
                 frame: end_frame,
@@ -606,9 +604,12 @@ mod tests {
 
     fn note(start: u32, pitches: &[u8]) -> Note {
         Note {
+            articulations: Vec::new(),
             start,
             duration: Duration::Quarter,
             dotted: false,
+            tuplet: None,
+            layer: 0,
             pitches: pitches.iter().map(|m| Pitch::from_midi(*m)).collect(),
             velocity: 100,
             staccato: false,
@@ -643,7 +644,7 @@ mod tests {
         let mut score = score();
         score.parts[0].measures[0].notes =
             vec![note(0, &[]), note(PPQ, &[60]), note(PPQ * 2, &[60])];
-        let events = timeline(&score.parts[0], score.measure_ticks(), score.tempo);
+        let events = timeline(&score.parts[0], score.measure_ticks(), score.tempo, 0);
         assert_eq!(
             events,
             vec![
@@ -678,7 +679,7 @@ mod tests {
         first.tied = true;
         score.parts[0].measures[0].notes = vec![first];
         score.parts[0].measures[1].notes = vec![note(0, &[60, 67])];
-        let events = timeline(&score.parts[0], score.measure_ticks(), score.tempo);
+        let events = timeline(&score.parts[0], score.measure_ticks(), score.tempo, 0);
         let ons: Vec<_> = events
             .iter()
             .filter(|e| matches!(e.kind, Kind::On(_)))
@@ -704,12 +705,31 @@ mod tests {
         let mut event = note(120, &[67]);
         event.staccato = true;
         score.parts[0].measures[0].notes = vec![event];
-        let events = timeline(&score.parts[0], score.measure_ticks(), score.tempo);
+        let events = timeline(&score.parts[0], score.measure_ticks(), score.tempo, 0);
         let frames_per_tick = 60.0_f64 * SAMPLE_RATE as f64 / (137.0 * PPQ as f64);
         assert_eq!(events[0].frame, (120.0 * frames_per_tick).round() as usize);
         assert_eq!(
             events[1].frame,
             ((120.0 + 480.0 * 0.48) * frames_per_tick).round() as usize
+        );
+    }
+
+    #[test]
+    fn ordinary_articulations_control_sample_velocity_and_note_release() {
+        use crate::model::Articulation;
+        let mut score = score();
+        let mut event = note(0, &[60]);
+        event.velocity = 80;
+        event.articulations = vec![Articulation::Accent, Articulation::Staccatissimo];
+        score.parts[0].measures[0].notes = vec![event];
+        let events = timeline(&score.parts[0], score.measure_ticks(), score.tempo, 0);
+        assert_eq!(events[0].kind, Kind::On(92));
+        assert_eq!(events[1].kind, Kind::Off);
+        let frames_per_tick =
+            60.0_f64 * f64::from(SAMPLE_RATE) / (f64::from(score.tempo) * f64::from(PPQ));
+        assert_eq!(
+            events[1].frame,
+            (480.0 * 0.30 * frames_per_tick).round() as usize
         );
     }
 
@@ -911,6 +931,34 @@ mod tests {
     }
 
     #[test]
+    fn recorded_articulations_change_attack_and_shorten_a_sustained_instrument() {
+        use crate::model::Articulation;
+        let Some(bank) = integration_bank() else {
+            return;
+        };
+        let mut score = score();
+        score.time_numerator = 1;
+        score.parts[0].measures.truncate(1);
+        score.parts[0].instrument = Instrument::Flute;
+        let mut event = note(0, &[72]);
+        event.velocity = 80;
+        score.parts[0].measures[0].notes = vec![event];
+        let ordinary = bank.render(&score).unwrap();
+        score.parts[0].measures[0].notes[0].articulations = vec![Articulation::Accent];
+        let accented = bank.render(&score).unwrap();
+        assert_ne!(ordinary, accented);
+        score.parts[0].measures[0].notes[0].articulations = vec![Articulation::Staccatissimo];
+        let detached = bank.render(&score).unwrap();
+        assert!(stereo_rms(&detached, 0.40, 0.48) < stereo_rms(&ordinary, 0.40, 0.48) * 0.6);
+        assert!(
+            accented
+                .iter()
+                .chain(&detached)
+                .all(|sample| sample.is_finite())
+        );
+    }
+
+    #[test]
     fn program_aliases_select_the_same_samples_and_calibration() {
         let Some(bank) = integration_bank() else {
             return;
@@ -943,5 +991,46 @@ mod tests {
         assert!(result.is_err());
         let samples = bank.render_note(Instrument::Piano, 60, 100, 0.25).unwrap();
         assert!(samples.iter().any(|sample| sample.abs() > 0.005));
+    }
+    #[test]
+    fn sampled_triplet_commands_use_exact_frames_and_tie_duration() {
+        let mut score = score();
+        score.parts[0].measures[0].notes = (0..3)
+            .map(|index| {
+                let mut note = note(index * 160, &[60]);
+                note.duration = Duration::Eighth;
+                note.tuplet = Some(crate::model::Tuplet::TRIPLET);
+                note
+            })
+            .collect();
+        let events = timeline(&score.parts[0], score.measure_ticks(), 120, 0);
+        let onsets = events
+            .iter()
+            .filter(|event| matches!(event.kind, Kind::On(_)))
+            .map(|event| event.frame)
+            .collect::<Vec<_>>();
+        assert_eq!(onsets, vec![0, 7350, 14700]);
+        assert_eq!(events.last().unwrap().frame, 22050);
+        score.parts[0].measures[0].notes[0].tied = true;
+        score.parts[0].measures[0].notes[1].tied = true;
+        let tied = timeline(&score.parts[0], score.measure_ticks(), 120, 0);
+        assert_eq!(tied.len(), 2);
+        assert_eq!(tied[1].frame, 22050);
+    }
+
+    #[test]
+    fn layers_route_unisons_and_ties_to_independent_sampled_timelines() {
+        let mut score = score();
+        let mut first = note(0, &[60]);
+        first.tied = true;
+        let mut second = note(480, &[60]);
+        second.layer = 1;
+        score.parts[0].measures[0].notes = vec![first, second];
+        let upper = timeline(&score.parts[0], score.measure_ticks(), 120, 0);
+        let lower = timeline(&score.parts[0], score.measure_ticks(), 120, 1);
+        assert_eq!(upper.len(), 2);
+        assert_eq!(lower.len(), 2);
+        assert_eq!((upper[0].frame, upper[1].frame), (0, 22050));
+        assert_eq!((lower[0].frame, lower[1].frame), (22050, 44100));
     }
 }

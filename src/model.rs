@@ -415,37 +415,105 @@ pub enum Clef {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Duration {
+    DoubleWhole,
     Whole,
     Half,
     Quarter,
     Eighth,
     Sixteenth,
+    ThirtySecond,
+    SixtyFourth,
+    OneTwentyEighth,
 }
 impl Duration {
     pub const ALL: &'static [Self] = &[
+        Self::DoubleWhole,
         Self::Whole,
         Self::Half,
         Self::Quarter,
         Self::Eighth,
         Self::Sixteenth,
+        Self::ThirtySecond,
+        Self::SixtyFourth,
+        Self::OneTwentyEighth,
     ];
     pub fn ticks(self) -> u32 {
         match self {
+            Self::DoubleWhole => PPQ * 8,
             Self::Whole => PPQ * 4,
             Self::Half => PPQ * 2,
             Self::Quarter => PPQ,
             Self::Eighth => PPQ / 2,
             Self::Sixteenth => PPQ / 4,
+            Self::ThirtySecond => PPQ / 8,
+            Self::SixtyFourth => PPQ / 16,
+            Self::OneTwentyEighth => PPQ / 32,
         }
     }
     pub fn name(self) -> &'static str {
         match self {
+            Self::DoubleWhole => "Double whole",
             Self::Whole => "Whole",
             Self::Half => "Half",
             Self::Quarter => "Quarter",
             Self::Eighth => "Eighth",
             Self::Sixteenth => "Sixteenth",
+            Self::ThirtySecond => "32nd",
+            Self::SixtyFourth => "64th",
+            Self::OneTwentyEighth => "128th",
         }
+    }
+    pub fn flags(self) -> usize {
+        match self {
+            Self::Eighth => 1,
+            Self::Sixteenth => 2,
+            Self::ThirtySecond => 3,
+            Self::SixtyFourth => 4,
+            Self::OneTwentyEighth => 5,
+            _ => 0,
+        }
+    }
+    pub fn has_stem(self) -> bool {
+        !matches!(self, Self::DoubleWhole | Self::Whole)
+    }
+    pub fn musicxml_type(self) -> &'static str {
+        match self {
+            Self::DoubleWhole => "breve",
+            Self::Whole => "whole",
+            Self::Half => "half",
+            Self::Quarter => "quarter",
+            Self::Eighth => "eighth",
+            Self::Sixteenth => "16th",
+            Self::ThirtySecond => "32nd",
+            Self::SixtyFourth => "64th",
+            Self::OneTwentyEighth => "128th",
+        }
+    }
+    pub fn from_musicxml_type(value: &str) -> Option<Self> {
+        Self::ALL
+            .iter()
+            .copied()
+            .find(|duration| duration.musicxml_type() == value)
+    }
+}
+
+/// An actual:normal time modification: three eighths in the time of two are 3:2.
+/// The native 480-PPQ grid is retained so existing Encore scores keep their timing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Tuplet {
+    pub actual: u8,
+    pub normal: u8,
+}
+impl Tuplet {
+    pub const TRIPLET: Self = Self {
+        actual: 3,
+        normal: 2,
+    };
+    pub fn validate(self) -> Result<(), String> {
+        if !(1..=32).contains(&self.actual) || !(1..=32).contains(&self.normal) {
+            return Err("Tuplet ratios require actual and normal counts between 1 and 32.".into());
+        }
+        Ok(())
     }
 }
 
@@ -592,25 +660,140 @@ pub fn key_alter(step: Step, fifths: i8) -> i8 {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Articulation {
+    Accent,
+    Marcato,
+    Tenuto,
+    Staccatissimo,
+}
+
+impl Articulation {
+    pub const ALL: &'static [Self] = &[
+        Self::Accent,
+        Self::Marcato,
+        Self::Tenuto,
+        Self::Staccatissimo,
+    ];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Accent => "Accent",
+            Self::Marcato => "Marcato",
+            Self::Tenuto => "Tenuto",
+            Self::Staccatissimo => "Staccatissimo",
+        }
+    }
+
+    pub fn musicxml_name(self) -> &'static str {
+        match self {
+            Self::Accent => "accent",
+            Self::Marcato => "strong-accent",
+            Self::Tenuto => "tenuto",
+            Self::Staccatissimo => "staccatissimo",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Note {
+    /// Finale-compatible independent rhythmic layer, numbered 0–3 internally.
+    #[serde(default, skip_serializing_if = "is_layer_zero")]
+    pub layer: u8,
     pub start: u32,
     pub duration: Duration,
     pub dotted: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tuplet: Option<Tuplet>,
     pub pitches: Vec<Pitch>,
     pub velocity: u8,
     pub staccato: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub articulations: Vec<Articulation>,
     /// Tie forward to matching pitches in the next contiguous event.
     pub tied: bool,
 }
+fn is_layer_zero(layer: &u8) -> bool {
+    *layer == 0
+}
 impl Note {
-    pub fn ticks(&self) -> u32 {
-        let ticks = self.duration.ticks();
-        if self.dotted {
-            ticks + ticks / 2
-        } else {
-            ticks
+    /// Ordinary articulation performance is deliberately modest and deterministic.
+    /// Chord-wide accents share one bounded boost; silent entries stay silent.
+    pub fn playback_velocity(&self) -> u8 {
+        if self.velocity == 0 {
+            return 0;
         }
+        let boost = self
+            .articulations
+            .iter()
+            .map(|articulation| match articulation {
+                Articulation::Accent => 12,
+                Articulation::Marcato => 18,
+                Articulation::Tenuto => 3,
+                Articulation::Staccatissimo => 0,
+            })
+            .max()
+            .unwrap_or(0);
+        self.velocity.saturating_add(boost).min(127)
+    }
+
+    /// Fraction removed from the final tied segment for audio playback.
+    /// The legacy 0.52 staccato calculation is retained exactly.
+    pub fn playback_shortening(&self) -> f64 {
+        let mut shortening: f64 = if self.staccato { 0.52 } else { 0.0 };
+        for articulation in &self.articulations {
+            shortening = shortening.max(match articulation {
+                Articulation::Marcato => 0.28,
+                Articulation::Staccatissimo => 0.70,
+                Articulation::Accent | Articulation::Tenuto => 0.0,
+            });
+        }
+        shortening
+    }
+
+    /// MIDI historically used integer half-length staccato, while audio used
+    /// its 0.48 gate. Preserve that behavior and share all new articulation rules.
+    pub fn playback_ticks(&self) -> u32 {
+        if self.articulations.is_empty() {
+            return if self.staccato {
+                self.ticks() / 2
+            } else {
+                self.ticks()
+            };
+        }
+        let mut gate: f64 = if self.staccato { 0.5 } else { 1.0 };
+        for articulation in &self.articulations {
+            gate = gate.min(match articulation {
+                Articulation::Marcato => 0.72,
+                Articulation::Staccatissimo => 0.30,
+                Articulation::Accent | Articulation::Tenuto => 1.0,
+            });
+        }
+        (f64::from(self.ticks()) * gate).floor() as u32
+    }
+
+    /// Exact score time, including dots and tuplets. Invalid fractional-grid
+    /// durations are rejected by `checked_ticks` and score validation.
+    pub fn ticks(&self) -> u32 {
+        self.checked_ticks().unwrap_or(0)
+    }
+    pub fn checked_ticks(&self) -> Result<u32, String> {
+        let ratio = self.tuplet.unwrap_or(Tuplet {
+            actual: 1,
+            normal: 1,
+        });
+        ratio.validate()?;
+        let numerator =
+            self.duration.ticks() * if self.dotted { 3 } else { 2 } * u32::from(ratio.normal);
+        let denominator = 2 * u32::from(ratio.actual);
+        if !numerator.is_multiple_of(denominator) {
+            return Err("Rhythm cannot be represented exactly on Encore's 480-tick grid; choose a different note value or tuplet ratio.".into());
+        }
+        let ticks = numerator / denominator;
+        if ticks == 0 {
+            return Err("A note or rest must have positive duration.".into());
+        }
+        Ok(ticks)
     }
 }
 
@@ -871,7 +1054,7 @@ impl Score {
         for part in &mut self.parts {
             part.measures.resize_with(count, Measure::default);
             for measure in &mut part.measures {
-                measure.notes.sort_by_key(|note| note.start);
+                measure.notes.sort_by_key(|note| (note.start, note.layer));
             }
         }
     }
@@ -883,10 +1066,10 @@ impl Score {
             return Err("Tempo must be between 20 and 400 BPM.".into());
         }
         if !(1..=32).contains(&self.time_numerator)
-            || ![1, 2, 4, 8, 16].contains(&self.time_denominator)
+            || ![1, 2, 4, 8, 16, 32, 64, 128].contains(&self.time_denominator)
         {
             return Err(
-                "Time signature requires 1–32 beats and denominator 1, 2, 4, 8, or 16.".into(),
+                "Time signature requires 1–32 beats and denominator 1, 2, 4, 8, 16, 32, 64, or 128.".into(),
             );
         }
         if !(-7..=7).contains(&self.key_fifths) {
@@ -926,19 +1109,39 @@ impl Score {
                 if total_notes > 200_000 {
                     return Err("Score exceeds the 200,000-event limit.".into());
                 }
-                let mut end = 0;
+                let mut ends = [0; 4];
                 for (ni, note) in measure.notes.iter().enumerate() {
                     let context = format!("{context}, measure {}, event {}", mi + 1, ni + 1);
-                    if note.start < end {
+                    if note.layer > 3 {
+                        return Err(format!("{context}: layer must be 1–4 (0–3 internally)."));
+                    }
+                    if note.articulations.len() > Articulation::ALL.len()
+                        || note
+                            .articulations
+                            .iter()
+                            .enumerate()
+                            .any(|(index, articulation)| {
+                                note.articulations[..index].contains(articulation)
+                            })
+                    {
+                        return Err(format!(
+                            "{context}: articulations must be unique, with at most four marks."
+                        ));
+                    }
+                    let end = &mut ends[usize::from(note.layer)];
+                    if note.start < *end {
                         return Err(format!(
                             "{context}: events overlap or are not in chronological order."
                         ));
                     }
-                    end = note
+                    let ticks = note
+                        .checked_ticks()
+                        .map_err(|error| format!("{context}: {error}"))?;
+                    *end = note
                         .start
-                        .checked_add(note.ticks())
+                        .checked_add(ticks)
                         .ok_or_else(|| format!("{context}: invalid event position."))?;
-                    if end > length {
+                    if *end > length {
                         return Err(format!("{context}: event extends past the bar line."));
                     }
                     if note.velocity > 127 {
@@ -1025,9 +1228,12 @@ impl Score {
 
 fn demo_note(start: u32, duration: Duration, midis: &[u8], velocity: u8) -> Note {
     Note {
+        articulations: Vec::new(),
         start,
         duration,
         dotted: false,
+        tuplet: None,
+        layer: 0,
         pitches: midis.iter().map(|m| Pitch::from_midi(*m)).collect(),
         velocity,
         staccato: false,
@@ -1185,5 +1391,154 @@ mod tests {
         fs::write(&path, serde_json::to_vec(&bad).unwrap()).unwrap();
         assert!(Score::load(&path).is_err());
         let _ = fs::remove_file(path);
+    }
+    #[test]
+    fn extended_rhythm_values_and_tuplets_keep_exact_native_time() {
+        for (duration, ticks) in [
+            (Duration::DoubleWhole, 3840),
+            (Duration::ThirtySecond, 60),
+            (Duration::SixtyFourth, 30),
+            (Duration::OneTwentyEighth, 15),
+        ] {
+            assert_eq!(duration.ticks(), ticks);
+            assert_eq!(
+                Duration::from_musicxml_type(duration.musicxml_type()),
+                Some(duration)
+            );
+        }
+        let mut score = Score::blank();
+        score.parts[0].measures[0].notes = (0..3)
+            .map(|index| {
+                let mut note = demo_note(index * 160, Duration::Eighth, &[60], 80);
+                note.tuplet = Some(Tuplet::TRIPLET);
+                assert_eq!(note.checked_ticks().unwrap(), 160);
+                note
+            })
+            .collect();
+        score.validate().unwrap();
+        let restored: Score =
+            serde_json::from_str(&serde_json::to_string(&score).unwrap()).unwrap();
+        assert_eq!(restored, score);
+        let mut quintuplet = demo_note(0, Duration::Eighth, &[60], 80);
+        quintuplet.tuplet = Some(Tuplet {
+            actual: 5,
+            normal: 4,
+        });
+        assert_eq!(quintuplet.checked_ticks().unwrap(), 192);
+        quintuplet.tuplet = Some(Tuplet {
+            actual: 7,
+            normal: 4,
+        });
+        assert!(quintuplet.checked_ticks().unwrap_err().contains("480-tick"));
+        quintuplet.tuplet = Some(Tuplet {
+            actual: 0,
+            normal: 2,
+        });
+        assert!(quintuplet.checked_ticks().is_err());
+        let mut shortest = demo_note(0, Duration::OneTwentyEighth, &[60], 80);
+        shortest.dotted = true;
+        assert!(shortest.checked_ticks().is_err());
+        // Combined rational arithmetic preserves an exact dotted tuplet even
+        // when its intermediate unmodified dotted value would be fractional.
+        shortest.tuplet = Some(Tuplet::TRIPLET);
+        assert_eq!(shortest.checked_ticks().unwrap(), 15);
+    }
+
+    #[test]
+    fn optional_tuplet_metadata_keeps_existing_native_scores_compatible() {
+        let note = demo_note(0, Duration::Quarter, &[60], 80);
+        let json = serde_json::to_string(&note).unwrap();
+        assert!(!json.contains("tuplet"));
+        assert_eq!(serde_json::from_str::<Note>(&json).unwrap(), note);
+    }
+
+    #[test]
+    fn four_layers_overlap_independently_and_preserve_native_compatibility() {
+        let mut score = Score::blank();
+        score.parts[0].measures[0].notes = (0..4)
+            .map(|layer| {
+                let mut note = demo_note(0, Duration::Whole, &[60 + layer], 80);
+                note.layer = layer;
+                note
+            })
+            .collect();
+        score.validate().unwrap();
+        let json = serde_json::to_string(&score).unwrap();
+        let restored: Score = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored, score);
+        assert!(
+            !serde_json::to_string(&score.parts[0].measures[0].notes[0])
+                .unwrap()
+                .contains("layer")
+        );
+        let mut collision = demo_note(480, Duration::Quarter, &[65], 80);
+        collision.layer = 1;
+        score.parts[0].measures[0].notes.push(collision);
+        score.normalize();
+        assert!(score.validate().unwrap_err().contains("overlap"));
+        score.parts[0].measures[0]
+            .notes
+            .retain(|note| note.start == 0);
+        score.parts[0].measures[0].notes[0].layer = 4;
+        assert!(score.validate().unwrap_err().contains("layer must be"));
+    }
+
+    #[test]
+    fn articulations_preserve_old_native_notes_and_reject_duplicates() {
+        let old = r#"{"start":0,"duration":"Quarter","dotted":false,"pitches":[{"step":"C","octave":4,"alter":0}],"velocity":80,"staccato":true,"tied":false}"#;
+        let restored: Note = serde_json::from_str(old).unwrap();
+        assert!(restored.articulations.is_empty());
+        assert!(
+            !serde_json::to_string(&restored)
+                .unwrap()
+                .contains("articulations")
+        );
+        let mut score = Score::blank();
+        let mut note = restored;
+        note.articulations = Articulation::ALL.to_vec();
+        score.parts[0].measures[0].notes.push(note);
+        score.validate().unwrap();
+        let saved = serde_json::to_string(&score).unwrap();
+        assert_eq!(serde_json::from_str::<Score>(&saved).unwrap(), score);
+        score.parts[0].measures[0].notes[0]
+            .articulations
+            .push(Articulation::Accent);
+        assert!(
+            score
+                .validate()
+                .unwrap_err()
+                .contains("articulations must be unique")
+        );
+        score.parts[0].measures[0].notes[0].articulations = vec![Articulation::Tenuto; 2];
+        assert!(score.validate().is_err());
+    }
+
+    #[test]
+    fn ordinary_articulation_performance_is_bounded_and_legacy_timing_is_exact() {
+        let mut note = demo_note(0, Duration::Quarter, &[60], 80);
+        assert_eq!((note.playback_velocity(), note.playback_ticks()), (80, 480));
+        assert_eq!(note.playback_shortening().to_bits(), 0.0_f64.to_bits());
+        note.staccato = true;
+        assert_eq!(note.playback_ticks(), 240);
+        assert_eq!(note.playback_shortening().to_bits(), 0.52_f64.to_bits());
+        note.staccato = false;
+        for (articulation, velocity, ticks) in [
+            (Articulation::Accent, 92, 480),
+            (Articulation::Marcato, 98, 345),
+            (Articulation::Tenuto, 83, 480),
+            (Articulation::Staccatissimo, 80, 144),
+        ] {
+            note.articulations = vec![articulation];
+            assert_eq!(
+                (note.playback_velocity(), note.playback_ticks()),
+                (velocity, ticks)
+            );
+        }
+        note.articulations = Articulation::ALL.to_vec();
+        assert_eq!((note.playback_velocity(), note.playback_ticks()), (98, 144));
+        note.velocity = 126;
+        assert_eq!(note.playback_velocity(), 127);
+        note.velocity = 0;
+        assert_eq!(note.playback_velocity(), 0);
     }
 }

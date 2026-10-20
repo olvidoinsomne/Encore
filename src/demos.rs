@@ -824,9 +824,12 @@ fn push(
     staccato: bool,
 ) {
     score.parts[part].measures[bar].notes.push(Note {
+        articulations: Vec::new(),
         start,
         duration,
         dotted: false,
+        tuplet: None,
+        layer: 0,
         pitches: pitches
             .iter()
             .map(|pitch| Pitch::from_midi(*pitch))

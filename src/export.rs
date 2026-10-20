@@ -41,8 +41,8 @@ fn flattened(part: &Part, measure_ticks: u32) -> Vec<(u32, &Note)> {
 }
 struct Timeline<'a> {
     notes: Vec<(u32, &'a Note)>,
-    starts: HashMap<u32, usize>,
-    ends: HashMap<u32, usize>,
+    starts: HashMap<(u32, u8), usize>,
+    ends: HashMap<(u32, u8), usize>,
 }
 impl<'a> Timeline<'a> {
     fn new(part: &'a Part, measure_ticks: u32) -> Self {
@@ -50,12 +50,12 @@ impl<'a> Timeline<'a> {
         let starts = notes
             .iter()
             .enumerate()
-            .map(|(i, (t, _))| (*t, i))
+            .map(|(i, (t, note))| ((*t, note.layer), i))
             .collect();
         let ends = notes
             .iter()
             .enumerate()
-            .map(|(i, (t, n))| (*t + n.ticks(), i))
+            .map(|(i, (t, n))| ((*t + n.ticks(), n.layer), i))
             .collect();
         Self {
             notes,
@@ -63,8 +63,8 @@ impl<'a> Timeline<'a> {
             ends,
         }
     }
-    fn tie_in(&self, start: u32, midi: u8) -> bool {
-        self.ends.get(&start).is_some_and(|i| {
+    fn tie_in(&self, start: u32, layer: u8, midi: u8) -> bool {
+        self.ends.get(&(start, layer)).is_some_and(|i| {
             self.notes[*i].1.tied && self.notes[*i].1.pitches.iter().any(|p| p.midi() == midi)
         })
     }
@@ -72,7 +72,7 @@ impl<'a> Timeline<'a> {
         note.tied
             && self
                 .starts
-                .get(&(start + note.ticks()))
+                .get(&(start + note.ticks(), note.layer))
                 .is_some_and(|i| self.notes[*i].1.pitches.iter().any(|p| p.midi() == midi))
     }
 }
@@ -118,7 +118,16 @@ pub fn musicxml(score: &Score) -> String {
     for (pi, part) in score.parts.iter().enumerate() {
         let _ = writeln!(out, "  <part id=\"P{}\">", pi + 1);
         let timeline = Timeline::new(part, measure_ticks);
-        let mut previous_dynamic = None;
+        let mut previous_dynamic: [Option<&str>; 4] = [None; 4];
+        let layers = (0..4)
+            .filter(|layer| {
+                part.measures
+                    .iter()
+                    .flat_map(|measure| &measure.notes)
+                    .any(|note| note.layer == *layer)
+            })
+            .collect::<Vec<_>>();
+        let layers = if layers.is_empty() { vec![0] } else { layers };
         for (mi, measure) in part.measures.iter().enumerate() {
             let _ = writeln!(out, "    <measure number=\"{}\">", mi + 1);
             if mi == 0 {
@@ -138,28 +147,47 @@ pub fn musicxml(score: &Score) -> String {
                     score.tempo, score.tempo
                 );
             }
-            if measure.notes.is_empty() {
-                let _ = writeln!(
-                    out,
-                    "      <note><rest measure=\"yes\"/><duration>{measure_ticks}</duration></note>"
-                );
-            } else {
+            for (layer_index, &layer) in layers.iter().enumerate() {
+                if layer_index > 0 {
+                    let _ = writeln!(
+                        out,
+                        "      <backup><duration>{measure_ticks}</duration></backup>"
+                    );
+                }
+                let layer_notes = measure
+                    .notes
+                    .iter()
+                    .filter(|note| note.layer == layer)
+                    .collect::<Vec<_>>();
+                if layer_notes.is_empty() {
+                    let _ = writeln!(
+                        out,
+                        "      <note><rest measure=\"yes\"/><duration>{measure_ticks}</duration><voice>{}</voice></note>",
+                        layer + 1
+                    );
+                    continue;
+                }
                 let mut cursor = 0;
-                for note in &measure.notes {
+                let tuplet_positions = tuplet_boundaries(&layer_notes);
+                for (note_index, note) in layer_notes.into_iter().enumerate() {
+                    let tuplet_bounds = tuplet_positions[note_index];
                     if note.start > cursor {
-                        write_gap(&mut out, note.start - cursor);
+                        write_gap(&mut out, note.start - cursor, layer);
                     }
                     let start = mi as u32 * measure_ticks + note.start;
                     if note.pitches.is_empty() {
-                        write_xml_note(&mut out, note, None, false, false, false);
+                        write_xml_note(&mut out, note, None, false, false, false, tuplet_bounds);
                     } else {
                         let dynamic = crate::model::dynamic_name(note.velocity);
-                        if note.velocity > 0 && previous_dynamic != Some(dynamic) {
+                        if note.velocity > 0
+                            && previous_dynamic[usize::from(layer)] != Some(dynamic)
+                        {
                             let _ = writeln!(
                                 out,
-                                "      <direction placement=\"below\"><direction-type><dynamics><{dynamic}/></dynamics></direction-type></direction>"
+                                "      <direction placement=\"below\"><direction-type><dynamics><{dynamic}/></dynamics></direction-type><voice>{}</voice></direction>",
+                                layer + 1
                             );
-                            previous_dynamic = Some(dynamic);
+                            previous_dynamic[usize::from(layer)] = Some(dynamic);
                         }
                         for (chord_index, pitch) in note.pitches.iter().enumerate() {
                             write_xml_note(
@@ -167,15 +195,20 @@ pub fn musicxml(score: &Score) -> String {
                                 note,
                                 Some(*pitch),
                                 chord_index > 0,
-                                timeline.tie_in(start, pitch.midi()),
+                                timeline.tie_in(start, note.layer, pitch.midi()),
                                 timeline.tie_out(start, note, pitch.midi()),
+                                if chord_index == 0 {
+                                    tuplet_bounds
+                                } else {
+                                    (false, false)
+                                },
                             );
                         }
                     }
                     cursor = note.start + note.ticks();
                 }
                 if cursor < measure_ticks {
-                    write_gap(&mut out, measure_ticks - cursor);
+                    write_gap(&mut out, measure_ticks - cursor, layer);
                 }
             }
             if mi + 1 == part.measures.len() {
@@ -189,21 +222,50 @@ pub fn musicxml(score: &Score) -> String {
     out
 }
 
-fn write_gap(out: &mut String, mut ticks: u32) {
+fn tuplet_boundaries(notes: &[&Note]) -> Vec<(bool, bool)> {
+    let mut boundaries = vec![(false, false); notes.len()];
+    let mut first = 0;
+    while first < notes.len() {
+        let Some(ratio) = notes[first].tuplet else {
+            first += 1;
+            continue;
+        };
+        let mut end = first + 1;
+        while end < notes.len()
+            && end - first < usize::from(ratio.actual.max(1))
+            && notes[end].tuplet == Some(ratio)
+            && notes[end - 1].start + notes[end - 1].ticks() == notes[end].start
+        {
+            end += 1;
+        }
+        boundaries[first].0 = true;
+        boundaries[end - 1].1 = true;
+        first = end;
+    }
+    boundaries
+}
+
+fn write_gap(out: &mut String, mut ticks: u32, layer: u8) {
     for duration in Duration::ALL {
         for dotted in [true, false] {
-            let size = duration.ticks() + if dotted { duration.ticks() / 2 } else { 0 };
+            if dotted && !duration.ticks().is_multiple_of(2) {
+                continue;
+            }
+            let size = duration.ticks() * if dotted { 3 } else { 2 } / 2;
             while ticks >= size {
                 let note = Note {
+                    articulations: Vec::new(),
                     start: 0,
                     duration: *duration,
                     dotted,
+                    tuplet: None,
+                    layer,
                     pitches: Vec::new(),
                     velocity: 64,
                     staccato: false,
                     tied: false,
                 };
-                write_xml_note(out, &note, None, false, false, false);
+                write_xml_note(out, &note, None, false, false, false, (false, false));
                 ticks -= size;
             }
         }
@@ -212,7 +274,8 @@ fn write_gap(out: &mut String, mut ticks: u32) {
     if ticks > 0 {
         let _ = writeln!(
             out,
-            "      <note><rest/><duration>{ticks}</duration></note>"
+            "      <note><rest/><duration>{ticks}</duration><voice>{}</voice></note>",
+            layer + 1
         );
     }
 }
@@ -223,6 +286,7 @@ fn write_xml_note(
     chord: bool,
     tie_in: bool,
     tie_out: bool,
+    tuplet_bounds: (bool, bool),
 ) {
     if pitch.is_some() {
         let _ = write!(
@@ -256,34 +320,50 @@ fn write_xml_note(
     }
     let _ = write!(
         out,
-        "<type>{}</type>",
-        match note.duration {
-            Duration::Whole => "whole",
-            Duration::Half => "half",
-            Duration::Quarter => "quarter",
-            Duration::Eighth => "eighth",
-            Duration::Sixteenth => "16th",
-        }
+        "<voice>{}</voice><type>{}</type>",
+        note.layer + 1,
+        note.duration.musicxml_type()
     );
     if note.dotted {
         out.push_str("<dot/>");
     }
-    if pitch.is_some() {
-        // Pitch alter is authoritative; accidental display is left to the importer
-        // so it can apply key signatures and same-measure accidental carry correctly.
-        if tie_in || tie_out || note.staccato {
-            out.push_str("<notations>");
-            if tie_in {
-                out.push_str("<tied type=\"stop\"/>");
-            }
-            if tie_out {
-                out.push_str("<tied type=\"start\"/>");
-            }
-            if note.staccato {
-                out.push_str("<articulations><staccato/></articulations>");
-            }
-            out.push_str("</notations>");
+    if let Some(tuplet) = note.tuplet {
+        let _ = write!(
+            out,
+            "<time-modification><actual-notes>{}</actual-notes><normal-notes>{}</normal-notes></time-modification>",
+            tuplet.actual, tuplet.normal
+        );
+    }
+    // Pitch alter is authoritative; accidental display is left to the importer.
+    let has_articulations =
+        pitch.is_some() && (note.staccato || (!chord && !note.articulations.is_empty()));
+    if tie_in || tie_out || has_articulations || tuplet_bounds.0 || tuplet_bounds.1 {
+        out.push_str("<notations>");
+        if tie_in {
+            out.push_str("<tied type=\"stop\"/>");
         }
+        if tie_out {
+            out.push_str("<tied type=\"start\"/>");
+        }
+        if has_articulations {
+            out.push_str("<articulations>");
+            if note.staccato {
+                out.push_str("<staccato/>");
+            }
+            if !chord {
+                for articulation in &note.articulations {
+                    let _ = write!(out, "<{}/>", articulation.musicxml_name());
+                }
+            }
+            out.push_str("</articulations>");
+        }
+        if tuplet_bounds.0 {
+            out.push_str("<tuplet type=\"start\" bracket=\"yes\"/>");
+        }
+        if tuplet_bounds.1 {
+            out.push_str("<tuplet type=\"stop\"/>");
+        }
+        out.push_str("</notations>");
     }
     out.push_str("</note>\n");
 }
@@ -371,63 +451,76 @@ pub fn midi(score: &Score) -> Vec<u8> {
         end,
     )];
     let has_solo = score.parts.iter().any(|part| part.solo);
-    for (pi, part) in score.parts.iter().enumerate() {
-        let channel = channel(pi);
-        let mut events = vec![
-            Event {
-                tick: 0,
-                priority: 0,
-                bytes: meta(0x03, part.name.as_bytes()),
-            },
-            Event {
-                tick: 0,
-                priority: 0,
-                bytes: meta(0x21, &[(pi / 15) as u8]),
-            },
-            Event {
-                tick: 0,
-                priority: 1,
-                bytes: vec![0xc0 | channel, part.instrument.gm_program()],
-            },
-            Event {
-                tick: 0,
-                priority: 1,
-                bytes: vec![0xb0 | channel, 7, (part.volume * 127.0).round() as u8],
-            },
-            Event {
-                tick: 0,
-                priority: 1,
-                bytes: vec![0xb0 | channel, 10, ((part.pan + 1.0) * 63.5).round() as u8],
-            },
-        ];
-        if !part.muted && (!has_solo || part.solo) {
-            let timeline = Timeline::new(part, measure_ticks);
-            for (start, note) in &timeline.notes {
-                for pitch in &note.pitches {
-                    let midi = pitch.midi();
-                    if !timeline.tie_in(*start, midi) {
-                        events.push(Event {
-                            tick: *start,
-                            priority: 3,
-                            bytes: vec![0x90 | channel, midi, note.velocity],
-                        });
-                    }
-                    if !timeline.tie_out(*start, note, midi) {
-                        let ticks = if note.staccato {
-                            note.ticks() / 2
-                        } else {
-                            note.ticks()
-                        };
-                        events.push(Event {
-                            tick: *start + ticks.max(1),
-                            priority: 2,
-                            bytes: vec![0x80 | channel, midi, 0],
-                        });
+    let mut lane_index = 0;
+    for part in &score.parts {
+        let layers = (0..4)
+            .filter(|layer| {
+                part.measures
+                    .iter()
+                    .flat_map(|measure| &measure.notes)
+                    .any(|note| note.layer == *layer)
+            })
+            .collect::<Vec<_>>();
+        let layers = if layers.is_empty() { vec![0] } else { layers };
+        for layer in layers {
+            let channel = channel(lane_index);
+            let mut events = vec![
+                Event {
+                    tick: 0,
+                    priority: 0,
+                    bytes: meta(0x03, part.name.as_bytes()),
+                },
+                Event {
+                    tick: 0,
+                    priority: 0,
+                    bytes: meta(0x21, &[(lane_index / 15) as u8]),
+                },
+                Event {
+                    tick: 0,
+                    priority: 1,
+                    bytes: vec![0xc0 | channel, part.instrument.gm_program()],
+                },
+                Event {
+                    tick: 0,
+                    priority: 1,
+                    bytes: vec![0xb0 | channel, 7, (part.volume * 127.0).round() as u8],
+                },
+                Event {
+                    tick: 0,
+                    priority: 1,
+                    bytes: vec![0xb0 | channel, 10, ((part.pan + 1.0) * 63.5).round() as u8],
+                },
+            ];
+            if !part.muted && (!has_solo || part.solo) {
+                let timeline = Timeline::new(part, measure_ticks);
+                for (start, note) in timeline
+                    .notes
+                    .iter()
+                    .filter(|(_, note)| note.layer == layer)
+                {
+                    for pitch in &note.pitches {
+                        let midi = pitch.midi();
+                        if !timeline.tie_in(*start, note.layer, midi) {
+                            events.push(Event {
+                                tick: *start,
+                                priority: 3,
+                                bytes: vec![0x90 | channel, midi, note.playback_velocity()],
+                            });
+                        }
+                        if !timeline.tie_out(*start, note, midi) {
+                            let ticks = note.playback_ticks();
+                            events.push(Event {
+                                tick: *start + ticks.max(1),
+                                priority: 2,
+                                bytes: vec![0x80 | channel, midi, 0],
+                            });
+                        }
                     }
                 }
             }
+            tracks.push(track(events, end));
+            lane_index += 1;
         }
-        tracks.push(track(events, end));
     }
     let mut out = b"MThd".to_vec();
     out.extend_from_slice(&6u32.to_be_bytes());
@@ -446,9 +539,12 @@ mod tests {
     use crate::model::Instrument;
     fn note(start: u32, pitches: &[u8]) -> Note {
         Note {
+            articulations: Vec::new(),
             start,
             duration: Duration::Quarter,
             dotted: false,
+            tuplet: None,
+            layer: 0,
             pitches: pitches.iter().map(|p| Pitch::from_midi(*p)).collect(),
             velocity: 80,
             staccato: false,
@@ -468,14 +564,50 @@ mod tests {
         assert!(out.contains("<tied type=\"stop\"/>"));
         assert!(out.contains("<staccato/>"));
     }
+
+    #[test]
+    fn articulation_musicxml_marks_once_per_chord_and_midi_performs_the_marks() {
+        use crate::model::Articulation;
+        let mut score = Score::blank();
+        score.parts.truncate(1);
+        let mut event = note(0, &[60, 64]);
+        event.articulations = Articulation::ALL.to_vec();
+        score.parts[0].measures[0].notes = vec![event];
+        let xml = musicxml(&score);
+        for marker in [
+            "<accent/>",
+            "<strong-accent/>",
+            "<tenuto/>",
+            "<staccatissimo/>",
+        ] {
+            assert_eq!(xml.matches(marker).count(), 1, "{marker}");
+        }
+        let bytes = midi(&score);
+        assert!(bytes.windows(3).any(|bytes| bytes == [0x90, 60, 98]));
+        assert_eq!(
+            midi_notes(&bytes),
+            vec![
+                (0, 0x90, 60),
+                (0, 0x90, 64),
+                (144, 0x80, 60),
+                (144, 0x80, 64)
+            ]
+        );
+        score.parts[0].measures[0].notes[0].articulations = vec![Articulation::Tenuto];
+        let bytes = midi(&score);
+        assert!(bytes.windows(3).any(|bytes| bytes == [0x90, 60, 83]));
+        assert_eq!(midi_notes(&bytes)[2].0, 480);
+    }
     #[test]
     fn xml_fills_gaps_and_writes_chords() {
         let mut score = Score::blank();
         score.parts[0].measures[0].notes = vec![note(480, &[60, 64, 67])];
         let out = musicxml(&score);
         assert_eq!(out.matches("<chord/>").count(), 2);
-        assert!(out.contains("<rest/><duration>480</duration><type>quarter</type>"));
-        assert!(out.contains("<rest/><duration>960</duration><type>half</type>"));
+        assert!(
+            out.contains("<rest/><duration>480</duration><voice>1</voice><type>quarter</type>")
+        );
+        assert!(out.contains("<rest/><duration>960</duration><voice>1</voice><type>half</type>"));
     }
 
     #[test]
@@ -632,5 +764,54 @@ mod tests {
         let mut score = Score::blank();
         score.tempo = 0;
         assert!(midi(&score).is_empty());
+    }
+    #[test]
+    fn midi_tuplets_have_exact_note_on_and_off_times() {
+        let mut score = Score::blank();
+        score.parts.truncate(1);
+        score.parts[0].measures.truncate(1);
+        score.parts[0].measures[0].notes = (0..3)
+            .map(|index| {
+                let mut value = note(index * 160, &[60 + index as u8]);
+                value.duration = Duration::Eighth;
+                value.tuplet = Some(crate::model::Tuplet::TRIPLET);
+                value
+            })
+            .collect();
+        assert_eq!(
+            midi_notes(&midi(&score)),
+            vec![
+                (0, 0x90, 60),
+                (160, 0x80, 60),
+                (160, 0x90, 61),
+                (320, 0x80, 61),
+                (320, 0x90, 62),
+                (480, 0x80, 62),
+            ]
+        );
+    }
+
+    #[test]
+    fn midi_layers_have_independent_tracks_and_channels_for_overlapping_unisons() {
+        let mut score = Score::blank();
+        score.parts.truncate(1);
+        score.parts[0].measures.truncate(1);
+        score.parts[0].measures[0].notes = (0..4)
+            .map(|layer| {
+                let mut note = note(0, &[60]);
+                note.layer = layer;
+                note
+            })
+            .collect();
+        let bytes = midi(&score);
+        assert_eq!(u16::from_be_bytes([bytes[10], bytes[11]]), 5);
+        for layer in 0..4 {
+            assert!(
+                bytes
+                    .windows(3)
+                    .any(|event| event == [0x90 | layer, 60, 80])
+            );
+            assert!(bytes.windows(3).any(|event| event == [0x80 | layer, 60, 0]));
+        }
     }
 }

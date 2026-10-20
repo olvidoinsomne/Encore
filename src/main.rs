@@ -1,6 +1,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+mod midi_options;
+mod shortcuts;
 
 use encore::{audio::AudioEngine, engraving, export, model::Score, synth};
 use std::{
@@ -140,14 +142,16 @@ fn cli(parsed: &Arguments) -> Result<(), String> {
         "--help" | "-h" if args.len() == 1 => {
             println!(concat!(
                 "Encore — original Rust music notation and synthesis\n\n",
-                "encore [SCORE]                        Open Encore/MusicXML/MuseScore/Finale MUSX\n",
+                "encore [SCORE]                        Open Encore/MusicXML/MuseScore/Finale/MIDI\n",
                 "encore --demo OUTPUT_DIR             Export First Light in all formats\n",
                 "encore --demo-carol OUTPUT_DIR       Export Carol of the Bells — Epic\n",
                 "encore --demo-all OUTPUT_DIR         Export both demos\n",
                 "encore --compare-carol OUTPUT_DIR    Export procedural/sampled WAV comparisons\n",
                 "encore --export INPUT OUTPUT         Export .pdf/.svg/.musicxml/.mid/.wav\n",
                 "encore --import INPUT OUTPUT.encore   Import a score into an Encore project\n",
-                "encore --validate INPUT              Validate a native score\n",
+                "encore --import-midi INPUT OUTPUT.encore --quantize 16th\n",
+                "                                    Import performance MIDI on a chosen grid\n",
+                "encore --validate INPUT              Validate an importable score\n",
                 "encore --audio-check                 Test the audio output device\n",
                 "encore --instruments OUTPUT_DIR      Render an audition WAV per instrument\n\n",
                 "CLI audio options (place anywhere in a command):\n",
@@ -227,6 +231,28 @@ fn cli(parsed: &Arguments) -> Result<(), String> {
                 output.display(),
                 score.parts.len(),
                 score.measure_count()
+            );
+            Ok(())
+        }
+        "--import-midi" if args.len() == 5 && args[3] == "--quantize" => {
+            let grid = midi_options::parse_grid(&args[4])?;
+            let output = Path::new(&args[2]);
+            if !output
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("encore"))
+            {
+                return Err("Import output must use the .encore extension.".into());
+            }
+            let imported = encore::import::load_midi_quantized(Path::new(&args[1]), grid)?;
+            for warning in &imported.warnings {
+                eprintln!("Import note: {warning}");
+            }
+            imported.score.save(output)?;
+            println!(
+                "Imported {} → {} with explicit {} quantization",
+                args[1],
+                output.display(),
+                args[4]
             );
             Ok(())
         }

@@ -20,7 +20,7 @@ The native application supports Linux, Windows and macOS through eframe and rodi
 
 ## Compose
 
-Use **Light mode / Dark mode** in the header to switch appearance. Encore remembers the choice between launches and keeps score paper white. [Preview the light appearance](examples/Encore-Light.png).
+Use **Light mode / Dark mode** in the header to switch appearance. Monochromatic charcoal, gray and white dark mode is the default. Encore remembers your choice between launches and keeps score paper white. [Preview the light appearance](examples/Encore-Light.png).
 
 Encore opens **First Light**, an original eight-bar ensemble miniature. Press **Space** to listen. **File → New score** starts an empty piano grand staff. Browse sounds with **Instruments** in the top menu or **+** in the Instruments panel. The editor uses dark panels, clear transport controls and a light score page.
 
@@ -28,22 +28,24 @@ Encore opens **First Light**, an original eight-bar ensemble miniature. Press **
 
 The rendered audio, editable project, full score and a reduced opening score are in `examples/` under `Carol of the Bells - Epic` and `Carol of the Bells - Opening`.
 
-- Choose **Write**, select a duration and click a staff to insert a note. **Shift-click** an existing event to add a chord tone with that event's duration.
-- **1–5** selects whole, half, quarter, eighth or sixteenth notes. **R** toggles rest entry; **.** toggles dotted entry. The accidental controls choose the key signature, flat, natural or sharp.
-- **A–G** enters notes at the cursor using the inspector's octave. **Enter** inserts the current rest or a C. Entry advances to the next position and adds a measure when necessary.
-- In **Select** mode, click a note to edit it, or click empty staff space to move the entry cursor. **Left/Right** moves the cursor by the current duration.
-- The Inspector edits note duration, dots, velocity, staccato and ties. **Up/Down** transposes selected notes by one semitone; **Shift+Up/Down** transposes by an octave. **Delete** removes an event.
-- **Ctrl+Z** undoes; **Ctrl+Shift+Z** or **Ctrl+Y** redoes. **Ctrl+S** saves; **Ctrl+Shift+S** saves as; **Ctrl+O** opens; **Ctrl+N** creates a score. On macOS, use Command.
-- **M/S** mutes or solos a staff. Staff volume and pan control its mix. Editing a playing score stops playback so the next play reflects the changes.
-- Click the piano keyboard to audition the active instrument; **Shift-click** a key to enter it into the score. **Space** plays/pauses the score; **Escape** stops.
+- Choose **Write**, a rhythmic **Layer 1–4**, and a duration. Click a staff to insert a note; Shift-click adds a chord tone.
+- The default **Simple Entry · Laptop** profile follows Finale: **0–8** selects 128th through breve, with **5** for a quarter. **A–G** enters notes, **Shift+A–G** adds chord tones, **Tab** enters a rest, and **Alt/Option+R** toggles rest entry.
+- **Period** dots the selected entry; **Shift+Period** toggles dotted entry. **Up/Down** moves its active pitch diatonically; **Shift+Up/Down** moves by an octave. Left/Right selects entries in the active layer.
+- To enter an eighth-note triplet, choose **4**, enter the first note, then press **9**. Two rests appear; enter the next two notes to replace them. The toolbar offers triplet entry; the inspector edits exact custom ratios.
+- Choose **Speedy Entry** for Finale's duration-triggered workflow. Its number keys, rests, ties and navigation differ from Simple Entry. See the full implemented mapping and platform limits in [SHORTCUTS.md](SHORTCUTS.md).
+- **Ctrl+Z** undoes and **Ctrl+Y** redoes on Windows/Linux; macOS uses **Command+Z** and **Command+Shift+Z**. **Ctrl+Shift+Z** on Windows/Linux or **Command+Y** on macOS opens the undo/redo list. Cut/copy/paste currently handles one event at the cursor.
+- The Inspector edits rhythm, layer, dynamics, chord pitches, staccato, accent, marcato, tenuto, staccatissimo and ties. Mixer buttons mute/solo staves; volume and pan control their mix.
+- Click piano keys to audition the active instrument; Shift-click enters notes. Space plays/pauses and Escape stops.
 
-The editor prevents overlapping events and notes extending past a barline. Enter longer notes as tied notes in adjacent measures. Empty space is engraved and exported as rests. Key-signature changes retain existing pitch spellings; new notes use the new signature.
+Each layer prevents overlapping events, while independent layers can sound together. Notes must fit their bar; longer notes can be tied across measures. Empty space is engraved and exported as rests. Tuplets use exact 480-PPQ timing; ratios requiring fractional ticks, nested groups and mixed-duration grouping remain incomplete.
+
+A short [Rhythm and Articulation Study](<examples/Rhythm and Articulation Study.encore>) demonstrates four layers, triplets, quintuplets, short-note spacing and ordinary articulations.
 
 ## Save, print and exchange
 
-**File → Open** now accepts MusicXML (`.musicxml`, `.xml`, `.mxl`), MuseScore (`.mscx`, `.mscz`, versions 2–4), and a supported subset of modern Finale `.musx` files. Imported scores save as new Encore projects; import notes explain feature losses. Legacy Finale `.mus`, Finale `.lib` settings libraries, and Garritan/ARIA plug-ins are not directly supported. See [COMPATIBILITY.md](COMPATIBILITY.md) for the precise limits and Finale 27 migration workflow.
+**File → Open** now accepts MusicXML (`.musicxml`, `.xml`, `.mxl`), MuseScore (`.mscx`, `.mscz`, versions 2–4), MIDI (`.mid`, `.midi`), and a supported subset of modern Finale `.musx` files. Imported scores save as new Encore projects; import notes explain feature losses. MIDI opening offers exact timing or explicit grid quantization, with timing changes reported. Legacy Finale `.mus`, Finale `.lib` settings libraries, and Garritan/ARIA plug-ins are not directly supported. See [COMPATIBILITY.md](COMPATIBILITY.md) for the precise limits and Finale 27 migration workflow.
 
-**.encore** is a validated, readable JSON project format, saved atomically. Existing projects retain their original instrument identities. Projects using the additional `GeneralMidi` instruments require Encore 0.4 or later. The application warns before closing or replacing unsaved work. Undo/redo is kept in memory for the last 100 changes.
+**.encore** is a validated, readable JSON project format, saved atomically. Existing projects retain their original instrument identities. Projects using additional `GeneralMidi` instruments require Encore 0.4 or later; layers and tuplet metadata require 0.6 or later. The application warns before closing or replacing unsaved work. Undo/redo is kept in memory for the last 100 changes.
 
 The **Export** menu produces:
 
@@ -59,7 +61,7 @@ Choose **Part** above the score to view the active staff. PDF and SVG export fol
 
 ## Instruments
 
-Version 0.5 exposes **all 128 melodic General MIDI instruments**, played through the bundled 31 MiB GeneralUser GS SoundFont by default. The collection includes acoustic and electric pianos, mallets, organs, guitars, basses, solo and ensemble strings, choirs, brass, saxophones, woodwinds, synthesizer leads and pads, world instruments, pitched percussion and sound effects. All 128 use SoundFont sample playback; electronic and effect presets are sampled or synthesized sound designs, rather than recordings of 128 acoustic instruments. No network access or additional asset download is required during use.
+Version 0.6 exposes **all 128 melodic General MIDI instruments**, played through the bundled 31 MiB GeneralUser GS SoundFont by default. The collection includes acoustic and electric pianos, mallets, organs, guitars, basses, solo and ensemble strings, choirs, brass, saxophones, woodwinds, synthesizer leads and pads, world instruments, pitched percussion and sound effects. All 128 use SoundFont sample playback; electronic and effect presets are sampled or synthesized sound designs, rather than recordings of 128 acoustic instruments. No network access or additional asset download is required during use.
 
 Open **Instruments** in the top menu, **+** in the Instruments panel, or **Instrument lab** above the piano keyboard to open the **Instrument library**. Search by name or filter by family. Select a sound to see its actual SoundFont preset, character notes and concert-pitch audition guide. Use the pitch, velocity and hold controls for a single note, or play a four-bar test phrase. **Add staff** creates a new part; **Use on active staff** changes the current part's sound and clef while preserving its notes. **Export phrase…** saves the audition as a WAV. Additional GM voices have useful keyboard audition ranges, which are not claims about an acoustic instrument's physical compass.
 
@@ -89,6 +91,7 @@ The score keyboard starts in a useful register for the active staff; **Octave �
 ./run-encore --export examples/First\ Light.encore exports/performance.wav
 ./run-encore --validate examples/First\ Light.encore
 ./run-encore --import source.mscz converted.encore
+./run-encore --import-midi performance.mid converted.encore --quantize 16th
 ./run-encore --export source.mxl score.pdf
 ./run-encore --instruments exports/instruments
 ./run-encore --audio-check
@@ -99,7 +102,7 @@ The demo commands write native scores, PDF, SVG pages, MusicXML, MIDI and WAV. T
 
 ## Verification
 
-The Linux build passes 125 automated tests and Clippy with warnings denied. Import coverage includes a licensed real Finale 27.4.1.146 file and a public MuseScore score checked against all 64 original pitches. Theme switching, preference storage and source-file preservation are also tested. Coverage includes score persistence, all 128 program identities and native round trips, MIDI/MusicXML timing and program exports, engraving, the original 18 procedural voices, and the complete sampled catalog. Recorded-bank checks verify finite audible output for all 128 presets, bowed-bass sustain and release, low timpani resonance, velocity response, mute/solo behavior, ties, staccato, malformed or incomplete banks and recovery of the shared bank after an interrupted renderer. UI checks cover library search and family filters, instrument replacement and undo, engine errors, stale playback cancellation, keyboard input and Escape stopping auditions while the library is open. Both editor and library are rendered with actual egui meshes and fonts in display-independent tests.
+The Linux build passes its automated tests and Clippy with warnings denied. Import coverage includes a licensed real Finale 27.4.1.146 file and a public MuseScore score checked against all 64 original pitches. Theme switching, preference storage and source-file preservation are also tested. Coverage includes score persistence, all 128 program identities and native round trips, MIDI/MusicXML timing and program exports, engraving, the original 18 procedural voices, and the complete sampled catalog. Recorded-bank checks verify finite audible output for all 128 presets, bowed-bass sustain and release, low timpani resonance, velocity response, mute/solo behavior, ties, staccato, malformed or incomplete banks and recovery of the shared bank after an interrupted renderer. UI checks cover library search and family filters, instrument replacement and undo, engine errors, stale playback cancellation, keyboard input and Escape stopping auditions while the library is open. Both editor and library are rendered with actual egui meshes and fonts in display-independent tests.
 
 The sampled Carol render contains 80 seconds of music plus a three-second release tail. The procedural comparison retains its 1.8-second tail and is byte-for-byte identical to the previous procedural render. Both are 44.1 kHz, 16-bit stereo with no clipped PCM samples. Printed notation and the editable score are unchanged.
 
@@ -113,9 +116,11 @@ ENCORE_LAB_SCREENSHOT=/tmp/encore-lab.ppm cargo test --bin encore headless_instr
 
 ## Current scope
 
-Encore 0.5 supports one rhythmic voice per staff, with chords; piano uses separate right- and left-hand staves. Add another staff for independent rhythms. All notation and playback use **concert pitch**.
+Encore 0.6 supports four independent rhythmic layers per staff, chords, breve through 128th notes, exact representable tuplets, four additional ordinary articulations, and MIDI score import alongside its native and notation formats. Piano uses separate right- and left-hand staves. Notation and playback use **concert pitch**.
 
-This version does not yet support tuplets, lyrics, slurs, repeat playback, percussion maps, transposing-instrument parts, MIDI keyboard input or MIDI import. Foreign-score import is bounded by the same model; direct Finale support covers a subset of `.musx`, while legacy `.mus` requires conversion through MusicXML. Ties are forward connections to matching pitches at the next contiguous event. Large ensembles are divided into staff groups across pages. Audio renders up to ten minutes in memory; notation and MIDI can be longer. The native model supports up to 64 staves, 1,024 measures and 200,000 events, with up to 16 pitches in a chord. Project files are limited to 16 MiB.
+Encore is still substantially short of Finale 27.4.1 parity. [FINALE_PARITY.md](FINALE_PARITY.md) tracks the audited gaps and acceptance checks. Lyrics, slurs, repeat playback, percussion maps, transposing-instrument parts, MIDI keyboard input, plug-in hosting, advanced linked parts and production page-layout editing remain pending. Each layer currently has one voice, rather than Finale's two voices per layer.
+
+Foreign import has explicit feature limits; legacy Finale `.mus` requires MusicXML conversion. Ties connect matching pitches in contiguous events within the same layer. Audio renders up to ten minutes in memory; notation and MIDI can be longer. Native projects support up to 64 staves, 1,024 measures and 200,000 events, with 16 pitches per chord and a 16 MiB file limit.
 
 ## Source
 
@@ -129,8 +134,8 @@ This version does not yet support tuplets, lyrics, slurs, repeat playback, percu
 | `src/instruments.rs` | Concert-pitch and keyboard audition guides, character notes and phrases |
 | `src/demos.rs` | Winter Ascendant orchestration and section map |
 | `src/export.rs` | MusicXML and MIDI |
-| `src/import.rs`, `src/import/` | Bounded MusicXML, MuseScore and modern Finale readers with import notes |
-| `src/app.rs` | Native editor, input, inspector, mixer, history, transport |
+| `src/import.rs`, `src/import/` | Bounded MusicXML, MuseScore, modern Finale and MIDI readers with import notes |
+| `src/app.rs`, `src/app/`, `src/shortcuts.rs` | Native editor, Finale entry profiles, clipboard, inspector, mixer, history, transport |
 | `src/main.rs` | Desktop startup and command-line exports |
 
 Encore code is MIT licensed. Bundled Liberation Serif/Sans fonts are distributed under the SIL Open Font License in `assets/Serif-LICENSE.txt`; their outlines are used for portable printed text. Noto Music provides interface symbols under `assets/Music-LICENSE.txt`. The GeneralUser GS bank and its documentation retain their original license in `assets/soundfonts/GeneralUser-GS-LICENSE.txt`; see `assets/soundfonts/NOTICE.md` for source and checksum. OxiSynth is LGPL-2.1; its license and source/rebuild information are included under `assets/third-party/`. Other Rust libraries retain their respective licenses.

@@ -1,3 +1,4 @@
+use crate::shortcuts::{self, EntryCommand, EntryProfile};
 use eframe::egui::{self, Color32, FontFamily, FontId, Pos2, Rect, RichText, Sense, Stroke, Vec2};
 use encore::{
     audio::AudioEngine,
@@ -9,7 +10,9 @@ use encore::{
 };
 use std::{path::PathBuf, sync::mpsc, time::Duration as StdDuration};
 
-const INK: Color32 = Color32::from_rgb(35, 44, 48);
+mod clipboard;
+mod entry;
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum Theme {
     #[default]
@@ -46,6 +49,9 @@ struct Palette {
     selected: Color32,
     workspace: Color32,
     hovered: Color32,
+    key_ink: Color32,
+    key_hover: Color32,
+    playhead: Color32,
 }
 
 impl Palette {
@@ -53,15 +59,18 @@ impl Palette {
         let rgb = Color32::from_rgb;
         match theme {
             Theme::Dark => Self {
-                text: rgb(231, 236, 245),
-                muted: rgb(151, 165, 187),
-                accent: rgb(121, 224, 194),
-                surface: rgb(24, 31, 44),
-                raised: rgb(32, 42, 58),
-                border: rgb(48, 61, 81),
-                selected: rgb(31, 65, 66),
-                workspace: rgb(14, 20, 30),
-                hovered: rgb(48, 65, 85),
+                text: Color32::from_gray(236),
+                muted: Color32::from_gray(172),
+                accent: Color32::from_gray(225),
+                surface: Color32::from_gray(26),
+                raised: Color32::from_gray(36),
+                border: Color32::from_gray(62),
+                selected: Color32::from_gray(64),
+                workspace: Color32::from_gray(17),
+                hovered: Color32::from_gray(49),
+                key_ink: Color32::from_gray(35),
+                key_hover: Color32::from_gray(221),
+                playhead: Color32::from_rgba_unmultiplied(95, 95, 95, 180),
             },
             Theme::Light => Self {
                 text: rgb(32, 44, 61),
@@ -73,6 +82,9 @@ impl Palette {
                 selected: rgb(212, 237, 226),
                 workspace: rgb(221, 228, 238),
                 hovered: rgb(219, 231, 241),
+                key_ink: rgb(35, 44, 48),
+                key_hover: rgb(211, 234, 224),
+                playhead: Color32::from_rgba_unmultiplied(40, 150, 120, 180),
             },
         }
     }
@@ -108,6 +120,7 @@ pub struct EncoreApp {
     skip_history: bool,
     selected: Option<Selection>,
     active_part: usize,
+    active_layer: u8,
     cursor_measure: usize,
     cursor_tick: u32,
     duration: Duration,
@@ -115,6 +128,10 @@ pub struct EncoreApp {
     rest: bool,
     accidental: Option<i8>,
     octave: i8,
+    entry_pitch: Pitch,
+    entry_profile: EntryProfile,
+    tuplet: Option<Tuplet>,
+    tuplet_remaining: Option<u8>,
     write_mode: bool,
     zoom: f32,
     part_view: bool,
@@ -123,11 +140,15 @@ pub struct EncoreApp {
     needs_native_save: bool,
     import_warnings: Vec<String>,
     show_import_report: bool,
+    midi_import: Option<PathBuf>,
+    midi_grid: Option<u32>,
+    midi_import_error: Option<String>,
     playback: Option<synth::Playback>,
     worker: Option<mpsc::Receiver<JobResult>>,
     rendering_audio: bool,
     pending: Option<Action>,
     help: bool,
+    show_history: bool,
     properties: bool,
     status: String,
     cached_pages: Vec<Page>,
@@ -161,11 +182,16 @@ impl EncoreApp {
             "Welcome to Encore. Press Space to hear First Light, or create a new score.".into(),
         );
         if let Some(path) = path
-            && let Err(error) = app.open_document(path)
+            && let Err(error) = app.begin_open_document(path)
         {
             app.status = format!("Could not open score: {error}");
         }
         app.theme = Theme::from_storage(cc.storage);
+        app.entry_profile = EntryProfile::from_key(
+            cc.storage
+                .and_then(|s| s.get_string("encore.entry-profile"))
+                .as_deref(),
+        );
         apply_theme(&cc.egui_ctx, app.theme);
         let (engine, warning) = AudioEngine::load_default();
         if let AudioEngine::Sampled(bank) = &engine {
@@ -188,6 +214,7 @@ impl EncoreApp {
             skip_history: false,
             selected: None,
             active_part: 0,
+            active_layer: 0,
             cursor_measure: 0,
             cursor_tick: 0,
             duration: Duration::Quarter,
@@ -195,6 +222,10 @@ impl EncoreApp {
             rest: false,
             accidental: None,
             octave: 4,
+            entry_pitch: Pitch::from_midi(60),
+            entry_profile: EntryProfile::default(),
+            tuplet: None,
+            tuplet_remaining: None,
             write_mode: false,
             zoom: 0.9,
             part_view: false,
@@ -203,11 +234,15 @@ impl EncoreApp {
             needs_native_save: false,
             import_warnings: Vec::new(),
             show_import_report: false,
+            midi_import: None,
+            midi_grid: None,
+            midi_import_error: None,
             playback: None,
             worker: None,
             rendering_audio: false,
             pending: None,
             help: false,
+            show_history: false,
             properties: false,
             status,
             cached_pages: Vec::new(),
@@ -261,15 +296,16 @@ impl EncoreApp {
                         "Scores",
                         &[
                             "encore", "json", "musicxml", "xml", "mxl", "mscx", "mscz", "musx",
-                            "mus",
+                            "mus", "mid", "midi",
                         ],
                     )
                     .add_filter("Encore projects", &["encore", "json"])
                     .add_filter("MusicXML", &["musicxml", "xml", "mxl"])
                     .add_filter("MuseScore", &["mscx", "mscz"])
                     .add_filter("Finale", &["musx", "mus"])
+                    .add_filter("MIDI performance", &["mid", "midi"])
                     .pick_file()
-                    && let Err(error) = self.open_document(path)
+                    && let Err(error) = self.begin_open_document(path)
                 {
                     self.status = format!("Could not open score: {error}");
                 }
@@ -295,8 +331,20 @@ impl EncoreApp {
         self.needs_native_save = false;
         self.import_warnings.clear();
         self.show_import_report = false;
+        self.midi_import = None;
+        self.midi_import_error = None;
         self.selected = None;
         self.active_part = 0;
+        self.active_layer = 0;
+        self.duration = Duration::Quarter;
+        self.dotted = false;
+        self.rest = false;
+        self.accidental = None;
+        self.entry_pitch = Pitch::from_midi(60);
+        self.octave = 4;
+        self.tuplet = None;
+        self.tuplet_remaining = None;
+        self.show_history = false;
         self.cursor_measure = 0;
         self.cursor_tick = 0;
         self.undo.clear();
@@ -305,8 +353,28 @@ impl EncoreApp {
         self.status = "Ready. Choose Write and click a staff, or enter notes with A–G.".into();
     }
 
+    fn begin_open_document(&mut self, path: PathBuf) -> Result<(), String> {
+        if crate::midi_options::is_midi(&path) {
+            self.midi_import = Some(path);
+            self.midi_grid = None;
+            self.midi_import_error = None;
+            self.properties = false;
+            self.help = false;
+            self.show_history = false;
+            self.show_import_report = false;
+            Ok(())
+        } else {
+            self.open_document(path)
+        }
+    }
+
     fn open_document(&mut self, path: PathBuf) -> Result<(), String> {
         let result = encore::import::load(&path)?;
+        self.accept_import(path, result);
+        Ok(())
+    }
+
+    fn accept_import(&mut self, path: PathBuf, result: encore::import::ImportResult) {
         let native = path
             .extension()
             .and_then(|s| s.to_str())
@@ -332,7 +400,6 @@ impl EncoreApp {
                 }
             )
         };
-        Ok(())
     }
 
     fn save(&mut self, choose: bool) -> bool {
@@ -674,12 +741,33 @@ impl EncoreApp {
             self.status = "Pitch is outside the supported MIDI range (C−1 to G9).".into();
             return;
         }
-        let ticks = self.duration.ticks() * if self.dotted { 3 } else { 2 } / 2;
+        let proposed = Note {
+            start,
+            duration: self.duration,
+            dotted: self.dotted,
+            tuplet: self.tuplet,
+            layer: self.active_layer,
+            pitches: if self.rest { vec![] } else { vec![pitch] },
+            velocity: 88,
+            staccato: false,
+            articulations: vec![],
+            tied: false,
+        };
+        let ticks = match proposed.checked_ticks() {
+            Ok(ticks) => ticks,
+            Err(error) => {
+                self.status = error;
+                return;
+            }
+        };
         let measure_ticks = self.score.measure_ticks();
         let m = &mut self.score.parts[part].measures[measure];
         if chord
             && !self.rest
-            && let Some(i) = m.notes.iter().position(|n| n.start == start)
+            && let Some(i) = m
+                .notes
+                .iter()
+                .position(|n| n.start == start && n.layer == self.active_layer)
         {
             if !m.notes[i].pitches.iter().any(|p| p.midi() == pitch.midi())
                 && m.notes[i].pitches.len() < 16
@@ -698,27 +786,26 @@ impl EncoreApp {
             self.status = "That duration crosses the barline. Choose a shorter note or enter tied notes in the next measure.".into();
             return;
         }
-        if m.notes
-            .iter()
-            .any(|n| n.start != start && start < n.start + n.ticks() && start + ticks > n.start)
-        {
+        if m.notes.iter().any(|n| {
+            n.layer == self.active_layer
+                && n.start != start
+                && start < n.start + n.ticks()
+                && start + ticks > n.start
+        }) {
             self.status =
                 "This note overlaps another event. Delete that event or choose a shorter duration."
                     .into();
             return;
         }
-        m.notes.retain(|n| n.start != start);
-        m.notes.push(Note {
-            start,
-            duration: self.duration,
-            dotted: self.dotted,
-            pitches: if self.rest { vec![] } else { vec![pitch] },
-            velocity: 88,
-            staccato: false,
-            tied: false,
-        });
+        m.notes
+            .retain(|n| n.start != start || n.layer != self.active_layer);
+        m.notes.push(proposed);
         m.notes.sort_by_key(|n| n.start);
-        let i = m.notes.iter().position(|n| n.start == start).unwrap();
+        let i = m
+            .notes
+            .iter()
+            .position(|n| n.start == start && n.layer == self.active_layer)
+            .unwrap();
         self.selected = Some(Selection {
             part,
             measure,
@@ -736,6 +823,16 @@ impl EncoreApp {
             if self.cursor_measure >= self.score.measure_count() {
                 self.cursor_measure = self.score.measure_count() - 1;
                 self.cursor_tick = self.score.measure_ticks();
+            }
+        }
+        self.entry_pitch = pitch;
+        self.octave = pitch.octave;
+        if let Some(remaining) = self.tuplet_remaining {
+            if remaining <= 1 {
+                self.tuplet = None;
+                self.tuplet_remaining = None;
+            } else {
+                self.tuplet_remaining = Some(remaining - 1);
             }
         }
         self.status = format!(
@@ -769,138 +866,165 @@ impl EncoreApp {
     fn keyboard(&mut self, ctx: &egui::Context) {
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
             self.stop();
+            self.properties = false;
+            self.help = false;
+            self.show_history = false;
+            self.show_import_report = false;
+            if self.midi_import.take().is_some() {
+                self.midi_import_error = None;
+                return;
+            }
             if !self.lab_open && self.pending.is_none() {
                 self.selected = None;
+                self.write_mode = false;
             }
-        }
-        if self.pending.is_some() || self.lab_open {
             return;
         }
-        let command = ctx.input(|i| i.modifiers.command);
-        if command && ctx.input(|i| i.key_pressed(egui::Key::S)) {
+        if self.pending.is_some() || self.lab_open || self.midi_import.is_some() {
+            return;
+        }
+        if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::S)) {
             self.save(ctx.input(|i| i.modifiers.shift));
-        }
-        if ctx.wants_keyboard_input() {
             return;
         }
-        if command {
-            if ctx.input(|i| i.key_pressed(egui::Key::N)) {
-                self.request(Action::New, ctx);
-            }
-            if ctx.input(|i| i.key_pressed(egui::Key::O)) {
-                self.request(Action::Open, ctx);
-            }
-            if ctx.input(|i| i.key_pressed(egui::Key::Z)) {
-                if ctx.input(|i| i.modifiers.shift) {
-                    self.redo();
-                } else {
-                    self.undo();
-                }
-            }
-            if ctx.input(|i| i.key_pressed(egui::Key::Y)) {
-                self.redo();
-            }
+        if ctx.wants_keyboard_input()
+            || self.properties
+            || self.help
+            || self.show_history
+            || self.show_import_report
+        {
             return;
         }
-        if ctx.input(|i| i.key_pressed(egui::Key::Space)) {
-            self.toggle_play();
-        }
-        if ctx.input(|i| i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace)) {
-            self.delete_selected();
-        }
-        if ctx.input(|i| i.key_pressed(egui::Key::ArrowUp)) {
-            self.transpose(if ctx.input(|i| i.modifiers.shift) {
-                12
-            } else {
-                1
-            });
-        }
-        if ctx.input(|i| i.key_pressed(egui::Key::ArrowDown)) {
-            self.transpose(if ctx.input(|i| i.modifiers.shift) {
-                -12
-            } else {
-                -1
-            });
-        }
-        if ctx.input(|i| i.key_pressed(egui::Key::ArrowRight)) {
-            self.cursor_tick += self.duration.ticks();
-            if self.cursor_tick >= self.score.measure_ticks() {
-                self.cursor_tick = 0;
-                self.cursor_measure = (self.cursor_measure + 1).min(self.score.measure_count() - 1);
+        let events = ctx.input(|i| i.events.clone());
+        let mac = cfg!(target_os = "macos");
+        for event in events {
+            if self.pending.is_some()
+                || self.midi_import.is_some()
+                || self.lab_open
+                || self.properties
+                || self.help
+                || self.show_history
+                || self.show_import_report
+            {
+                break;
             }
-        }
-        if ctx.input(|i| i.key_pressed(egui::Key::ArrowLeft)) {
-            if self.cursor_tick == 0 && self.cursor_measure > 0 {
-                self.cursor_measure -= 1;
-                self.cursor_tick = self
-                    .score
-                    .measure_ticks()
-                    .saturating_sub(self.duration.ticks());
-            } else {
-                self.cursor_tick = self.cursor_tick.saturating_sub(self.duration.ticks());
+            match &event {
+                egui::Event::Copy => {
+                    self.copy_selection(ctx, false);
+                    continue;
+                }
+                egui::Event::Cut => {
+                    self.copy_selection(ctx, true);
+                    continue;
+                }
+                egui::Event::Paste(text) => {
+                    self.paste_selection(text);
+                    continue;
+                }
+                _ => {}
             }
-        }
-        for (key, d) in [
-            (egui::Key::Num1, Duration::Whole),
-            (egui::Key::Num2, Duration::Half),
-            (egui::Key::Num3, Duration::Quarter),
-            (egui::Key::Num4, Duration::Eighth),
-            (egui::Key::Num5, Duration::Sixteenth),
-        ] {
-            if ctx.input(|i| i.key_pressed(key)) {
-                self.duration = d;
-            }
-        }
-        if ctx.input(|i| i.key_pressed(egui::Key::R)) {
-            self.rest = !self.rest;
-        }
-        if ctx.input(|i| i.key_pressed(egui::Key::Period)) {
-            self.dotted = !self.dotted;
-        }
-        if self.write_mode {
-            for (key, step) in [
-                (egui::Key::A, Step::A),
-                (egui::Key::B, Step::B),
-                (egui::Key::C, Step::C),
-                (egui::Key::D, Step::D),
-                (egui::Key::E, Step::E),
-                (egui::Key::F, Step::F),
-                (egui::Key::G, Step::G),
-            ] {
-                if ctx.input(|i| i.key_pressed(key)) {
-                    let natural = Pitch {
-                        step,
-                        octave: self.octave,
-                        alter: 0,
-                    };
-                    let pitch = Pitch::from_staff_step(natural.staff_step(), self.score.key_fifths);
-                    self.enter_note(
-                        self.active_part,
-                        self.cursor_measure,
-                        self.cursor_tick,
-                        pitch,
-                        false,
-                    );
+            let egui::Event::Key {
+                key,
+                pressed: true,
+                modifiers,
+                ..
+            } = event
+            else {
+                continue;
+            };
+            if modifiers.command && !modifiers.alt {
+                let handled = match key {
+                    egui::Key::N => {
+                        self.request(Action::New, ctx);
+                        true
+                    }
+                    egui::Key::O => {
+                        self.request(Action::Open, ctx);
+                        true
+                    }
+                    egui::Key::Q => {
+                        self.request(Action::Quit, ctx);
+                        true
+                    }
+                    egui::Key::Z if modifiers.shift && !mac => {
+                        self.show_history = true;
+                        true
+                    }
+                    egui::Key::Z if modifiers.shift => {
+                        self.redo();
+                        true
+                    }
+                    egui::Key::Z => {
+                        self.undo();
+                        true
+                    }
+                    egui::Key::Y if mac => {
+                        self.show_history = true;
+                        true
+                    }
+                    egui::Key::Y => {
+                        self.redo();
+                        true
+                    }
+                    egui::Key::C => {
+                        self.copy_selection(ctx, false);
+                        true
+                    }
+                    egui::Key::X => {
+                        self.copy_selection(ctx, true);
+                        true
+                    }
+                    _ => false,
+                };
+                if handled {
+                    if self.skip_history {
+                        return;
+                    }
+                    continue;
                 }
             }
-            if ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
-                self.enter_note(
-                    self.active_part,
-                    self.cursor_measure,
-                    self.cursor_tick,
-                    Pitch {
-                        step: Step::C,
-                        octave: self.octave,
-                        alter: 0,
-                    },
-                    false,
-                );
+            if key == egui::Key::Space && !modifiers.command && !modifiers.alt {
+                self.toggle_play();
+                continue;
+            }
+            if key == egui::Key::F1 {
+                self.help = true;
+                continue;
+            }
+            if !self.write_mode {
+                if key == egui::Key::Delete {
+                    self.delete_selected();
+                }
+                continue;
+            }
+            if let Some(command) = shortcuts::entry_command(self.entry_profile, key, modifiers, mac)
+            {
+                self.apply_entry_command(command);
+                ctx.input_mut(|input| {
+                    input.consume_key(modifiers, key);
+                });
+                ctx.memory_mut(|memory| memory.move_focus(egui::FocusDirection::None));
             }
         }
     }
 
     fn top(&mut self, ctx: &egui::Context) {
         let colors = Palette::for_context(ctx);
+        let primary = if cfg!(target_os = "macos") {
+            "Cmd"
+        } else {
+            "Ctrl"
+        };
+        let redo_key = if cfg!(target_os = "macos") {
+            "Cmd+Shift+Z"
+        } else {
+            "Ctrl+Y"
+        };
+        let history_key = if cfg!(target_os = "macos") {
+            "Cmd+Y"
+        } else {
+            "Ctrl+Shift+Z"
+        };
         egui::TopBottomPanel::top("header")
             .frame(
                 egui::Frame::new()
@@ -925,19 +1049,42 @@ impl EncoreApp {
                     ui.add_space(18.0);
                     egui::MenuBar::new().ui(ui, |ui| {
                         ui.menu_button("File", |ui| {
-                            if ui.button("New score          Ctrl+N").clicked() {
+                            if ui
+                                .add(
+                                    egui::Button::new("New score")
+                                        .shortcut_text(format!("{primary}+N")),
+                                )
+                                .clicked()
+                            {
                                 ui.close();
                                 self.request(Action::New, ctx);
                             }
-                            if ui.button("Open…                Ctrl+O").clicked() {
+                            if ui
+                                .add(
+                                    egui::Button::new("Open…")
+                                        .shortcut_text(format!("{primary}+O")),
+                                )
+                                .clicked()
+                            {
                                 ui.close();
                                 self.request(Action::Open, ctx);
                             }
-                            if ui.button("Save                    Ctrl+S").clicked() {
+                            if ui
+                                .add(
+                                    egui::Button::new("Save").shortcut_text(format!("{primary}+S")),
+                                )
+                                .clicked()
+                            {
                                 ui.close();
                                 self.save(false);
                             }
-                            if ui.button("Save as…").clicked() {
+                            if ui
+                                .add(
+                                    egui::Button::new("Save as…")
+                                        .shortcut_text(format!("{primary}+Shift+S")),
+                                )
+                                .clicked()
+                            {
                                 ui.close();
                                 self.save(true);
                             }
@@ -960,7 +1107,7 @@ impl EncoreApp {
                             if ui
                                 .add_enabled(
                                     !self.undo.is_empty(),
-                                    egui::Button::new("Undo    Ctrl+Z"),
+                                    egui::Button::new("Undo").shortcut_text(format!("{primary}+Z")),
                                 )
                                 .clicked()
                             {
@@ -970,11 +1117,53 @@ impl EncoreApp {
                             if ui
                                 .add_enabled(
                                     !self.redo.is_empty(),
-                                    egui::Button::new("Redo    Ctrl+Shift+Z"),
+                                    egui::Button::new("Redo").shortcut_text(redo_key),
                                 )
                                 .clicked()
                             {
                                 self.redo();
+                                ui.close();
+                            }
+                            if ui
+                                .add(
+                                    egui::Button::new("Undo/Redo list…").shortcut_text(history_key),
+                                )
+                                .clicked()
+                            {
+                                self.show_history = true;
+                                ui.close();
+                            }
+                            ui.separator();
+                            if ui
+                                .add_enabled(
+                                    self.selected.is_some(),
+                                    egui::Button::new("Cut event")
+                                        .shortcut_text(format!("{primary}+X")),
+                                )
+                                .clicked()
+                            {
+                                self.copy_selection(ctx, true);
+                                ui.close();
+                            }
+                            if ui
+                                .add_enabled(
+                                    self.selected.is_some(),
+                                    egui::Button::new("Copy event")
+                                        .shortcut_text(format!("{primary}+C")),
+                                )
+                                .clicked()
+                            {
+                                self.copy_selection(ctx, false);
+                                ui.close();
+                            }
+                            if ui
+                                .add(
+                                    egui::Button::new("Paste event at cursor")
+                                        .shortcut_text(format!("{primary}+V")),
+                                )
+                                .clicked()
+                            {
+                                ctx.send_viewport_cmd(egui::ViewportCommand::RequestPaste);
                                 ui.close();
                             }
                             if ui
@@ -1141,22 +1330,77 @@ impl EncoreApp {
                 ui.horizontal_wrapped(|ui| {
                     ui.selectable_value(&mut self.write_mode, false, "Select")
                         .on_hover_text("Click a note to inspect or edit it");
-                    ui.selectable_value(&mut self.write_mode, true, "Write")
+                    let write = ui
+                        .selectable_value(&mut self.write_mode, true, "Write")
                         .on_hover_text(
                             "Click a staff to insert; Shift-click an event to add a chord tone",
                         );
+                    if write.clicked() {
+                        write.surrender_focus();
+                    }
                     ui.separator();
-                    for (i, d) in Duration::ALL.iter().enumerate() {
+                    egui::ComboBox::from_id_salt("active-layer")
+                        .selected_text(format!("Layer {}", self.active_layer + 1))
+                        .show_ui(ui, |ui| {
+                            for layer in 0..4 {
+                                if ui
+                                    .selectable_value(
+                                        &mut self.active_layer,
+                                        layer,
+                                        format!("Layer {}", layer + 1),
+                                    )
+                                    .changed()
+                                {
+                                    self.selected = None;
+                                }
+                            }
+                        });
+                    for d in Duration::ALL {
                         ui.selectable_value(
                             &mut self.duration,
                             *d,
-                            format!("{} {}", i + 1, d.name()),
+                            format!(
+                                "{} {}",
+                                shortcuts::duration_digit(*d),
+                                match d {
+                                    Duration::DoubleWhole => "Breve",
+                                    Duration::Eighth => "8th",
+                                    Duration::Sixteenth => "16th",
+                                    _ => d.name(),
+                                }
+                            ),
                         )
                         .on_hover_text("Duration for new notes");
                     }
                     ui.separator();
                     ui.toggle_value(&mut self.dotted, "Dotted");
-                    ui.toggle_value(&mut self.rest, "Rest  R");
+                    ui.toggle_value(&mut self.rest, "Rest · Alt+R");
+                    let mut triplet = self.tuplet.is_some();
+                    if ui.toggle_value(&mut triplet, "Triplet 3:2").changed() {
+                        self.tuplet = triplet.then_some(Tuplet {
+                            actual: 3,
+                            normal: 2,
+                        });
+                        self.tuplet_remaining = None;
+                    }
+                    if ui.available_width() < 165.0 {
+                        ui.end_row();
+                    }
+                    egui::ComboBox::from_id_salt("entry-profile")
+                        .width(150.0)
+                        .selected_text(match self.entry_profile {
+                            EntryProfile::SimpleLaptop => "Simple · Laptop",
+                            EntryProfile::Speedy => "Speedy Entry",
+                        })
+                        .show_ui(ui, |ui| {
+                            for profile in [EntryProfile::SimpleLaptop, EntryProfile::Speedy] {
+                                ui.selectable_value(
+                                    &mut self.entry_profile,
+                                    profile,
+                                    profile.name(),
+                                );
+                            }
+                        });
                     ui.separator();
                     for (a, name) in [
                         (None, "Key"),
@@ -1320,14 +1564,30 @@ impl EncoreApp {
                     ui.label(RichText::new(format!("Measure {}  ·  Beat {:.2}", s.measure+1,n.start as f32 / PPQ as f32 + 1.0)).size(12.0).color(colors.muted));
                     ui.add_space(14.0);
                     let original = n.clone();
+                    if n.pitches.len()>1 {egui::ComboBox::from_id_salt("chord-pitch").selected_text(format!("Edit pitch: {}",self.entry_pitch.name())).show_ui(ui,|ui|{for pitch in &n.pitches{if ui.selectable_value(&mut self.entry_pitch,*pitch,pitch.name()).changed(){self.octave=pitch.octave;}}});}
                     egui::ComboBox::from_label("Duration").selected_text(n.duration.name()).show_ui(ui, |ui| { for &d in Duration::ALL { ui.selectable_value(&mut n.duration, d, d.name()); } });
-                    ui.checkbox(&mut n.dotted, "Dotted"); ui.checkbox(&mut n.staccato, "Staccato"); ui.add_enabled(!n.pitches.is_empty(), egui::Checkbox::new(&mut n.tied, "Tie to next note"));
+                    egui::ComboBox::from_id_salt("note-layer").selected_text(format!("Layer {}",n.layer+1)).show_ui(ui,|ui|{for layer in 0..4{ui.selectable_value(&mut n.layer,layer,format!("Layer {}",layer+1));}});
+                    ui.checkbox(&mut n.dotted, "Dotted");
+                    let mut is_tuplet=n.tuplet.is_some();
+                    if ui.checkbox(&mut is_tuplet,"Tuplet").changed() {n.tuplet=is_tuplet.then_some(Tuplet{actual:3,normal:2});}
+                    if let Some(ratio)=&mut n.tuplet {ui.horizontal(|ui| {
+                        ui.add(egui::DragValue::new(&mut ratio.actual).range(2..=16));ui.label("in the time of");ui.add(egui::DragValue::new(&mut ratio.normal).range(1..=16));
+                    });}
+                    if let Err(error)=n.checked_ticks() {*n=original.clone();self.status=error;}
+                    ui.checkbox(&mut n.staccato, "Staccato");
+                    for articulation in [Articulation::Accent,Articulation::Marcato,Articulation::Tenuto,Articulation::Staccatissimo] {
+                        let mut enabled=n.articulations.contains(&articulation);
+                        if ui.checkbox(&mut enabled,articulation.name()).changed() {
+                            if enabled {n.articulations.push(articulation);} else {n.articulations.retain(|a|*a!=articulation);}
+                        }
+                    }
+                    ui.add_enabled(!n.pitches.is_empty(), egui::Checkbox::new(&mut n.tied, "Tie to next note"));
                     ui.add_space(10.0); ui.label("Dynamics"); ui.add(egui::Slider::new(&mut n.velocity, 1..=127).text("velocity"));
                     ui.horizontal_wrapped(|ui| { for (name,v) in [("pp",32),("p",48),("mp",64),("mf",80),("f",100),("ff",116)] { if ui.small_button(name).clicked() { n.velocity=v; } } });
                     if n.ticks() + n.start > self.score.measure_ticks() { self.score.parts[s.part].measures[s.measure].notes[s.note] = original.clone(); self.status = "That duration extends past the barline.".into(); }
                     let m = &self.score.parts[s.part].measures[s.measure];
                     let n = &m.notes[s.note];
-                    if m.notes.iter().enumerate().any(|(i,x)| i!=s.note && n.start < x.start+x.ticks() && n.start+n.ticks()>x.start) { self.score.parts[s.part].measures[s.measure].notes[s.note] = original; self.status = "That duration overlaps the next event.".into(); }
+                    if m.notes.iter().enumerate().any(|(i,x)| i!=s.note && n.layer==x.layer && n.start < x.start+x.ticks() && n.start+n.ticks()>x.start) { self.score.parts[s.part].measures[s.measure].notes[s.note] = original; self.status = "That duration overlaps the next event.".into(); }
                     ui.add_space(12.0); ui.horizontal(|ui| { if ui.button("− semitone").clicked() { self.transpose(-1); }
  if ui.button("+").clicked() { self.transpose(1); } });
                     ui.horizontal(|ui| { if ui.button("− octave").clicked() { self.transpose(-12); }
@@ -1337,7 +1597,7 @@ impl EncoreApp {
             } else {
                 ui.label(RichText::new("Make your mark.").size(19.0).strong());
                 ui.add_space(8.0); ui.label("Choose Write, then click a staff to enter a note. Select a note to edit its expression here.");
-                ui.add_space(12.0); ui.label(RichText::new("Shift-click adds a chord tone.\nA–G enters notes at the cursor.\n1–5 chooses note duration.\n↑ / ↓ changes selected pitch.").size(12.0).color(colors.muted));
+                ui.add_space(12.0); ui.label(RichText::new("Shift-click adds a chord tone.\nA–G enters notes at the cursor.\n0–8 chooses duration (5 = quarter).\n↑ / ↓ moves by a diatonic step.").size(12.0).color(colors.muted));
             }
             if remove { self.delete_selected(); }
             ui.add_space(20.0); ui.separator(); ui.add_space(14.0);
@@ -1487,7 +1747,7 @@ impl EncoreApp {
                             r,
                             2.0,
                             if response.hovered() {
-                                Color32::from_rgb(211, 234, 224)
+                                colors.key_hover
                             } else {
                                 Color32::WHITE
                             },
@@ -1504,7 +1764,7 @@ impl EncoreApp {
                                 egui::Align2::LEFT_BOTTOM,
                                 format!("C{}", midi as i16 / 12 - 1),
                                 FontId::proportional(9.0),
-                                INK.gamma_multiply(0.65),
+                                colors.key_ink.gamma_multiply(0.65),
                             );
                         }
                         if response.clicked() {
@@ -1527,7 +1787,7 @@ impl EncoreApp {
                             if response.hovered() {
                                 colors.accent
                             } else {
-                                INK
+                                colors.key_ink
                             },
                         );
                         if response.clicked() {
@@ -1614,11 +1874,9 @@ impl EncoreApp {
                                     for staff in page.staves.iter().filter(|s| s.measure == measure)
                                     {
                                         let x = rect.left()
-                                            + (staff.content_x
-                                                + (tick % self.score.measure_ticks() as f32)
-                                                    / self.score.measure_ticks() as f32
-                                                    * staff.content_width)
-                                                * self.zoom;
+                                            + staff.x_at_tick(
+                                                tick % self.score.measure_ticks() as f32,
+                                            ) * self.zoom;
                                         ui.painter().line_segment(
                                             [
                                                 Pos2::new(
@@ -1632,16 +1890,14 @@ impl EncoreApp {
                                                             * self.zoom,
                                                 ),
                                             ],
-                                            Stroke::new(
-                                                2.0_f32,
-                                                Color32::from_rgba_unmultiplied(40, 150, 120, 180),
-                                            ),
+                                            Stroke::new(2.0_f32, colors.playhead),
                                         );
                                     }
                                 }
                                 if response.clicked()
                                     && let Some(pos) = response.interact_pointer_pos()
                                 {
+                                    response.surrender_focus();
                                     click = Some((
                                         page_index,
                                         (pos - rect.min) / self.zoom,
@@ -1682,6 +1938,17 @@ impl EncoreApp {
                     let sel = h.selection;
                     self.selected = Some(sel);
                     self.active_part = sel.part;
+                    self.active_layer =
+                        self.score.parts[sel.part].measures[sel.measure].notes[sel.note].layer;
+                    if let Some(pitch) = self.score.parts[sel.part].measures[sel.measure].notes
+                        [sel.note]
+                        .pitches
+                        .first()
+                        .copied()
+                    {
+                        self.entry_pitch = pitch;
+                        self.octave = pitch.octave;
+                    }
                     self.cursor_measure = sel.measure;
                     self.cursor_tick =
                         self.score.parts[sel.part].measures[sel.measure].notes[sel.note].start;
@@ -1698,16 +1965,14 @@ impl EncoreApp {
                 {
                     self.active_part = staff.part;
                     self.cursor_measure = staff.measure;
-                    self.cursor_tick = (((pos.x - staff.content_x) / staff.content_width
-                        * self.score.measure_ticks() as f32
-                        / self.duration.ticks() as f32)
-                        .floor() as u32
-                        * self.duration.ticks())
-                    .min(
-                        self.score
-                            .measure_ticks()
-                            .saturating_sub(self.duration.ticks()),
-                    );
+                    self.cursor_tick =
+                        ((staff.tick_at_x(pos.x) / self.entry_ticks() as f32).floor() as u32
+                            * self.entry_ticks())
+                        .min(
+                            self.score
+                                .measure_ticks()
+                                .saturating_sub(self.entry_ticks()),
+                        );
                     self.selected = None;
                 }
             } else {
@@ -1739,15 +2004,12 @@ impl EncoreApp {
                         if let Some(s) = hit.filter(|s| s.part == part && s.measure == measure) {
                             self.score.parts[part].measures[measure].notes[s.note].start
                         } else {
-                            (((pos.x - staff.content_x).max(0.0) / staff.content_width
-                                * self.score.measure_ticks() as f32
-                                / self.duration.ticks() as f32)
-                                .round() as u32
-                                * self.duration.ticks())
+                            ((staff.tick_at_x(pos.x) / self.entry_ticks() as f32).round() as u32
+                                * self.entry_ticks())
                             .min(
                                 self.score
                                     .measure_ticks()
-                                    .saturating_sub(self.duration.ticks()),
+                                    .saturating_sub(self.entry_ticks()),
                             )
                         };
                     self.enter_note(part, measure, start, pitch, chord);
@@ -2010,6 +2272,85 @@ impl EncoreApp {
                     });
                 });
         }
+        if let Some(path) = self.midi_import.clone() {
+            let mut open = true;
+            let mut import = false;
+            let mut cancel = false;
+            egui::Window::new("Import MIDI performance").open(&mut open).resizable(false).default_width(440.0).show(ctx,|ui| {
+                ui.label(path.file_name().unwrap_or_default().to_string_lossy());
+                ui.label("Choose how performance timing becomes written rhythm. Exact timing preserves the source; a rhythmic grid snaps notes to that precision.");
+                ui.radio_value(&mut self.midi_grid,None,"Exact timing · reject unsupported rhythms");
+                egui::ComboBox::from_label("Quantize to").selected_text(self.midi_grid.and_then(|grid|crate::midi_options::GRIDS.iter().find(|(_,_,ticks)|*ticks==grid).map(|(_,label,_)|*label)).unwrap_or("Choose a grid…")).show_ui(ui,|ui| {
+                    for (_,label,grid) in crate::midi_options::GRIDS {ui.selectable_value(&mut self.midi_grid,Some(*grid),*label);}
+                });
+                if self.midi_grid.is_some(){ui.label("Timing changes are listed in the import notes. Use MusicXML to retain written rhythms and articulation marks.");}
+                if let Some(error)=&self.midi_import_error {ui.separator();ui.label(error);}
+                ui.horizontal(|ui|{import=ui.button("Import").clicked();cancel=ui.button("Cancel").clicked();});
+            });
+            if cancel || !open {
+                self.midi_import = None;
+                self.midi_import_error = None;
+            } else if import {
+                let result = match self.midi_grid {
+                    Some(grid) => encore::import::load_midi_quantized(&path, grid),
+                    None => encore::import::load(&path),
+                };
+                match result {
+                    Ok(imported) => self.accept_import(path, imported),
+                    Err(error) => self.midi_import_error = Some(error),
+                }
+            }
+        }
+        if self.show_history {
+            let mut open = true;
+            let mut undo_count = 0;
+            let mut redo_count = 0;
+            egui::Window::new("Undo/Redo list")
+                .open(&mut open)
+                .default_width(380.0)
+                .show(ctx, |ui| {
+                    ui.label("Choose how many score changes to undo or redo.");
+                    egui::ScrollArea::vertical()
+                        .max_height(320.0)
+                        .show(ui, |ui| {
+                            for count in 1..=self.undo.len() {
+                                if ui
+                                    .button(format!(
+                                        "Undo {count} {}",
+                                        if count == 1 { "change" } else { "changes" }
+                                    ))
+                                    .clicked()
+                                {
+                                    undo_count = count;
+                                }
+                            }
+                            if !self.undo.is_empty() && !self.redo.is_empty() {
+                                ui.separator();
+                            }
+                            for count in 1..=self.redo.len() {
+                                if ui
+                                    .button(format!(
+                                        "Redo {count} {}",
+                                        if count == 1 { "change" } else { "changes" }
+                                    ))
+                                    .clicked()
+                                {
+                                    redo_count = count;
+                                }
+                            }
+                            if self.undo.is_empty() && self.redo.is_empty() {
+                                ui.label("No score changes yet.");
+                            }
+                        });
+                });
+            for _ in 0..undo_count {
+                self.undo();
+            }
+            for _ in 0..redo_count {
+                self.redo();
+            }
+            self.show_history = open && undo_count == 0 && redo_count == 0;
+        }
         if self.properties {
             let mut open = true;
             egui::Window::new("Score properties").open(&mut open).resizable(false).show(ctx,|ui| {
@@ -2020,8 +2361,8 @@ impl EncoreApp {
                     ui.label("Key signature"); egui::ComboBox::from_id_salt("key-signature").selected_text(key_name(self.score.key_fifths)).show_ui(ui,|ui|{for f in -7..=7{ui.selectable_value(&mut self.score.key_fifths,f,key_name(f));}}); ui.end_row();
                     ui.label("Time signature"); ui.horizontal(|ui| {
                         let previous=(self.score.time_numerator,self.score.time_denominator);
-                        ui.add(egui::DragValue::new(&mut self.score.time_numerator).range(1..=12)); ui.label("/");
-                        egui::ComboBox::from_id_salt("denominator").selected_text(self.score.time_denominator.to_string()).show_ui(ui,|ui|{for d in [2,4,8,16]{ui.selectable_value(&mut self.score.time_denominator,d,d.to_string());}});
+                        ui.add(egui::DragValue::new(&mut self.score.time_numerator).range(1..=32)); ui.label("/");
+                        egui::ComboBox::from_id_salt("denominator").selected_text(self.score.time_denominator.to_string()).show_ui(ui,|ui|{for d in [1,2,4,8,16,32,64,128]{ui.selectable_value(&mut self.score.time_denominator,d,d.to_string());}});
                         let limit=self.score.measure_ticks();
                         if self.score.parts.iter().any(|p|p.measures.iter().any(|m|m.notes.iter().any(|n|n.start+n.ticks()>limit))) { self.score.time_numerator=previous.0; self.score.time_denominator=previous.1; self.status="Existing notes extend past this time signature. Shorten those measures first.".into(); }
                     }); ui.end_row();
@@ -2036,8 +2377,8 @@ impl EncoreApp {
         }
         egui::Window::new("Getting started with Encore").open(&mut self.help).default_width(520.0).show(ctx,|ui| {
             ui.heading("From an idea to a printed score"); ui.add_space(8.0);
-            for text in ["1. File → New score creates a piano grand staff. Add orchestral staves with + in Instruments.","2. Select Write, choose a duration (1–5), and click a staff. Shift-click an existing event to add a chord tone. R toggles rests; the dot button adds half the duration.","3. A–G enters notes at the cursor and advances it. Set the octave in Inspector. Click a blank staff in Select mode to move the cursor. Left/Right moves by the current duration.","4. Select a note to edit its duration, dynamics, tie, or articulation. Up/Down transposes by a semitone; Shift adds an octave. Delete removes the event. Ctrl+Z undoes.","5. Space plays or pauses the score; Escape stops. M and S mute or solo staves. Click piano keys to audition the active instrument; Shift-click enters a note.","6. Open MusicXML, MuseScore, or supported Finale .musx files with File → Open. Review import notes and save a new Encore project.","7. Save your .encore project, then export PDF for printing, SVG for vector art, MusicXML for notation interchange, MIDI for a sequencer, or WAV for audio."] { ui.label(text); ui.add_space(9.0); }
-            ui.separator(); ui.label("This version supports one rhythmic voice per staff, with chords and explicit or automatic rests. Add another staff for an independent voice. Instruments play concert pitch. Instrument library offers 128 SoundFont instruments, with searchable families and note or phrase auditions. Procedural mode provides optional approximations.");
+            for text in ["1. File → New score creates a piano grand staff. Add orchestral staves with + in Instruments.","2. Select Write, choose a duration (0–8; 5 is a quarter note), and click a staff. Shift-click an existing event to add a chord tone. Tab enters a rest; Alt+R toggles the rest tool. Period dots the selected entry; Shift+Period toggles dotted entry.","3. A–G enters notes at the cursor and advances it. Set the octave in Inspector. Click a blank staff in Select mode to move the cursor. Left/Right selects the previous or next entry.","4. Select a note to edit its duration, dynamics, tie, or articulation. In Simple Entry, Up/Down moves by a diatonic step; Shift adds an octave. Delete removes the event. Ctrl/Command+Z undoes.","5. Space plays or pauses the score; Escape stops. Use the M/S mixer buttons to mute or solo staves. Click piano keys to audition the active instrument; Shift-click enters a note.","6. Open MusicXML, MIDI, MuseScore, or supported Finale .musx files with File → Open. Review import notes and save a new Encore project.","7. Save your .encore project, then export PDF for printing, SVG for vector art, MusicXML for notation interchange, MIDI for a sequencer, or WAV for audio."] { ui.label(text); ui.add_space(9.0); }
+            ui.separator(); ui.label("Four independent rhythmic layers can share each staff, with chords and explicit or automatic rests. Select the active layer in the notation toolbar. Instruments play concert pitch. Instrument library offers 128 SoundFont instruments, with searchable families and note or phrase auditions. Procedural mode provides optional approximations.");
         });
     }
 
@@ -2070,6 +2411,16 @@ impl EncoreApp {
         if self.keyboard_instrument != instrument {
             self.keyboard_instrument = instrument;
             self.keyboard_base = keyboard_base_for(instrument);
+        }
+        if let Some(s) = self.selected
+            && let Some(note) = self
+                .score
+                .parts
+                .get(s.part)
+                .and_then(|p| p.measures.get(s.measure))
+                .and_then(|m| m.notes.get(s.note))
+        {
+            self.active_layer = note.layer;
         }
         self.keyboard(ctx);
         self.top(ctx);
@@ -2126,6 +2477,7 @@ impl EncoreApp {
 impl eframe::App for EncoreApp {
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         storage.set_string("encore.theme", self.theme.key().into());
+        storage.set_string("encore.entry-profile", self.entry_profile.key().into());
     }
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.ui(ctx);
@@ -2168,6 +2520,10 @@ fn apply_theme(ctx: &egui::Context, theme: Theme) {
     style.visuals.selection.bg_fill = colors.selected;
     style.visuals.selection.stroke.color = colors.accent;
     style.visuals.hyperlink_color = colors.accent;
+    if theme == Theme::Dark {
+        style.visuals.warn_fg_color = colors.accent;
+        style.visuals.error_fg_color = colors.text;
+    }
     style.visuals.slider_trailing_fill = true;
     style.visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0_f32, colors.border);
     for widget in [
@@ -2282,7 +2638,8 @@ fn key_name(f: i8) -> &'static str {
 
 fn paint_page(painter: &egui::Painter, page: &Page, origin: Pos2, scale: f32) {
     let pos = |x: f32, y: f32| Pos2::new(origin.x + x * scale, origin.y + y * scale);
-    let color = |c: [u8; 3]| Color32::from_rgb(c[0], c[1], c[2]);
+    let dark = painter.ctx().style().visuals.dark_mode;
+    let color = |c| page_preview_color(c, dark);
     for item in &page.items {
         match item {
             Primitive::Line {
@@ -2378,6 +2735,19 @@ fn paint_page(painter: &egui::Painter, page: &Page, origin: Pos2, scale: f32) {
                 );
             }
         }
+    }
+}
+
+fn page_preview_color(color: [u8; 3], dark: bool) -> Color32 {
+    if dark {
+        // Keep selection and engraving neutral on the white score without
+        // changing colors in the document or exported files.
+        let gray =
+            (u32::from(color[0]) * 2126 + u32::from(color[1]) * 7152 + u32::from(color[2]) * 722)
+                / 10_000;
+        Color32::from_gray(gray as u8)
+    } else {
+        Color32::from_rgb(color[0], color[1], color[2])
     }
 }
 

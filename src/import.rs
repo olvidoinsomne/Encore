@@ -1,7 +1,7 @@
 //! Bounded readers for public score interchange and MuseScore's XML format.
 //!
 //! Import is deliberately explicit about the limits of Encore's score model.
-//! Independent voices become separate staves; unsupported rhythmic timing is
+//! Up to four notation voices share each staff as layers; unsupported timing is
 //! rejected instead of rounded, and display-only losses are reported.
 use crate::model::{Duration, MAX_MEASURES, MAX_PARTS, Measure, Note, Part, Pitch, Score};
 use roxmltree::{Document, Node};
@@ -11,6 +11,7 @@ use std::io::{Cursor, Read};
 use std::path::Path;
 
 mod finale;
+mod midi;
 mod musescore;
 mod musicxml;
 
@@ -26,7 +27,7 @@ pub struct ImportResult {
     pub warnings: Vec<String>,
 }
 
-/// Open an Encore, MusicXML, MuseScore, or modern Finale score.
+/// Open an Encore, MusicXML, MuseScore, modern Finale, or MIDI score.
 pub fn load(path: &Path) -> Result<ImportResult, String> {
     let extension = path
         .extension()
@@ -42,21 +43,24 @@ pub fn load(path: &Path) -> Result<ImportResult, String> {
     if extension == "mus" {
         return Err("Legacy Finale .mus files cannot be read directly. Export MusicXML (.musicxml or .mxl) from Finale or another compatible notation program, then open that file in Encore.".into());
     }
-    if !["xml", "musicxml", "mxl", "mscx", "mscz", "musx"].contains(&extension.as_str()) {
-        return Err("Open an .encore, .musicxml, .xml, .mxl, .mscx, .mscz, or .musx score.".into());
+    if ![
+        "xml", "musicxml", "mxl", "mscx", "mscz", "musx", "mid", "midi",
+    ]
+    .contains(&extension.as_str())
+    {
+        return Err(
+            "Open an .encore, .musicxml, .xml, .mxl, .mscx, .mscz, .musx, .mid, or .midi score."
+                .into(),
+        );
     }
-    let file = File::open(path).map_err(|e| format!("Cannot open score: {e}"))?;
-    if file.metadata().map_err(|e| e.to_string())?.len() > MAX_ARCHIVE_BYTES as u64 {
-        return Err("Imported score exceeds the 64 MiB file limit.".into());
-    }
-    let mut bytes = Vec::new();
-    file.take(MAX_ARCHIVE_BYTES as u64 + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|e| format!("Cannot read score: {e}"))?;
-    if bytes.len() > MAX_ARCHIVE_BYTES {
-        return Err("Imported score exceeds the 64 MiB file limit.".into());
-    }
-    let mut imported = if extension == "musx" {
+    let bytes = read_import_bytes(
+        path,
+        MAX_ARCHIVE_BYTES,
+        "Imported score exceeds the 64 MiB file limit.",
+    )?;
+    let mut imported = if extension == "mid" || extension == "midi" {
+        midi::parse(&bytes)?
+    } else if extension == "musx" {
         finale::parse(&bytes)?
     } else {
         let xml = if ["mxl", "mscz"].contains(&extension.as_str()) {
@@ -78,6 +82,40 @@ pub fn load(path: &Path) -> Result<ImportResult, String> {
         .validate()
         .map_err(|e| format!("Imported score cannot be represented safely: {e}"))?;
     Ok(imported)
+}
+
+/// Import a MIDI performance with an explicitly selected quantization grid.
+///
+/// Normal `load` remains strict. This optional path rounds note starts and
+/// releases to the nearest grid (halfway positions round forward), preserves a
+/// minimum one-grid duration, and reports all timing changes in import warnings.
+/// The source file is read without modification. Grid sizes are in 480-PPQ ticks.
+pub fn load_midi_quantized(path: &Path, grid_ticks: u32) -> Result<ImportResult, String> {
+    midi::validate_quantization_grid(grid_ticks)?;
+    let extension = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("");
+    if !extension.eq_ignore_ascii_case("mid") && !extension.eq_ignore_ascii_case("midi") {
+        return Err("Choose a .mid or .midi file for quantized MIDI import.".into());
+    }
+    let bytes = read_import_bytes(path, midi::MAX_BYTES, "MIDI file exceeds the 16 MiB limit.")?;
+    midi::parse_with_quantization(&bytes, Some(grid_ticks))
+}
+
+fn read_import_bytes(path: &Path, limit: usize, limit_message: &str) -> Result<Vec<u8>, String> {
+    let file = File::open(path).map_err(|e| format!("Cannot open score: {e}"))?;
+    if file.metadata().map_err(|e| e.to_string())?.len() > limit as u64 {
+        return Err(limit_message.into());
+    }
+    let mut bytes = Vec::new();
+    file.take(limit as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("Cannot read score: {e}"))?;
+    if bytes.len() > limit {
+        return Err(limit_message.into());
+    }
+    Ok(bytes)
 }
 
 fn decode_xml(bytes: Vec<u8>) -> Result<String, String> {
@@ -304,7 +342,8 @@ pub(super) fn finish_parts(
 }
 
 /// Preserve exact event time by decomposing longer/multiple-dot values into
-/// conventional notes. Encore currently cannot represent 32nds or tuplets.
+/// conventional notes down to 128ths. Tuplet notation requires explicit source
+/// metadata and is handled by `push_rhythmic_event`, never guessed from timing.
 pub(super) fn push_event(
     notes: &mut Vec<Note>,
     start: u32,
@@ -331,25 +370,21 @@ pub(super) fn push_event(
         let choice = Duration::ALL
             .iter()
             .flat_map(|d| [(*d, true), (*d, false)])
-            .map(|(d, dotted)| {
-                (
-                    d,
-                    dotted,
-                    d.ticks() + if dotted { d.ticks() / 2 } else { 0 },
-                )
-            })
-            .find(|(_, _, size)| {
-                *size <= remaining && (remaining == *size || remaining - size >= 120)
-            });
+            .map(|(d, dotted)| (d, dotted, d.ticks() * if dotted { 3 } else { 2 } / 2))
+            .filter(|(d, dotted, _)| !dotted || d.ticks().is_multiple_of(2))
+            .find(|(_, _, size)| *size <= remaining && (remaining - size).is_multiple_of(15));
         let Some((duration, dotted, size)) = choice else {
             return Err(format!(
-                "A {ticks}-tick rhythm cannot be represented exactly. Tuplets and notes shorter than a sixteenth are not supported yet; simplify them in the source score before importing."
+                "A {ticks}-tick rhythm cannot be represented exactly by ordinary note values on Encore's 480-tick grid. Tuplets require explicit time-modification metadata in the source score."
             ));
         };
         pieces.push(Note {
+            articulations: Vec::new(),
             start: position,
             duration,
             dotted,
+            tuplet: None,
+            layer: 0,
             pitches: pitches.clone(),
             velocity,
             staccato,
@@ -368,6 +403,22 @@ pub(super) fn push_event(
         }
     }
     notes.extend(pieces);
+    Ok(())
+}
+
+/// Preserve a source's explicit written value and time modification, and reject
+/// contradictory playback duration instead of changing the notation silently.
+pub(super) fn push_rhythmic_event(
+    notes: &mut Vec<Note>,
+    note: Note,
+    ticks: u32,
+) -> Result<(), String> {
+    if note.checked_ticks()? != ticks {
+        return Err(format!(
+            "Written note value and tuplet ratio disagree with the source duration ({ticks} ticks)."
+        ));
+    }
+    notes.push(note);
     Ok(())
 }
 

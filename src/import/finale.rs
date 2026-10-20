@@ -191,7 +191,7 @@ fn read_meter(measure: Node<'_, '_>) -> Result<(u8, u8), String> {
         );
     };
     let numerator = numerator.ok_or("Invalid Finale time signature.")?;
-    if !(1..=16).contains(&numerator) || ![2, 4, 8, 16].contains(&denominator) {
+    if !(1..=32).contains(&numerator) || ![1, 2, 4, 8, 16, 32, 64, 128].contains(&denominator) {
         return Err("Finale time signature is outside Encore's supported range.".into());
     }
     Ok((numerator as u8, denominator as u8))
@@ -475,140 +475,141 @@ fn parse_enigma(xml: &str, metadata: Option<&[u8]>) -> Result<ImportResult, Stri
             let assigned: Vec<_> = (1..=4)
                 .filter_map(|layer| value(hold, &format!("frame{layer}")).map(|id| (layer, id)))
                 .collect();
-            if assigned.len() > 1 {
-                return Err(format!(
-                    "{} measure {} uses multiple Finale layers; Encore currently imports one rhythmic layer per staff. Export MusicXML with separate staves for the voices.",
-                    part.name,
-                    measure_index + 1
-                ));
-            }
-            let Some((_, frame_id)) = assigned.first() else {
-                continue;
-            };
-            let frame_id: u32 = frame_id
-                .parse()
-                .map_err(|_| "Invalid Finale frame identifier.")?;
-            let candidates = frames
-                .get(&frame_id)
-                .ok_or_else(|| format!("Finale frame {frame_id} is missing."))?;
-            if candidates.len() != 1 {
-                return Err(format!("Finale frame {frame_id} is missing or ambiguous."));
-            }
-            let frame = candidates[0];
-            if frame.children().any(|node| {
-                node.is_element() && !["startEntry", "endEntry"].contains(&node.tag_name().name())
-            }) {
-                return Err("Finale frame uses unsupported timing offsets or mirror references; export MusicXML from Finale.".into());
-            }
-            let first = number(frame, "startEntry", 0)?;
-            let last = number(frame, "endEntry", 0)?;
-            if first <= 0 || last <= 0 {
-                return Err("Finale frame has invalid entry bounds.".into());
-            }
-            let mut current = first as u32;
-            let mut visited = HashSet::new();
-            let mut position = 0u32;
-            loop {
-                if !visited.insert(current) || visited.len() > MAX_ENTRIES {
-                    return Err(
-                        "Finale entry chain contains a cycle or exceeds the entry limit.".into(),
-                    );
+            for (layer, frame_id) in assigned {
+                let frame_id: u32 = frame_id
+                    .parse()
+                    .map_err(|_| "Invalid Finale frame identifier.")?;
+                let candidates = frames
+                    .get(&frame_id)
+                    .ok_or_else(|| format!("Finale frame {frame_id} is missing."))?;
+                if candidates.len() != 1 {
+                    return Err(format!("Finale frame {frame_id} is missing or ambiguous."));
                 }
-                let entry = *entries
-                    .get(&current)
-                    .ok_or_else(|| format!("Finale frame refers to missing entry {current}."))?;
-                for unsupported in [
-                    "v2",
-                    "controller",
-                    "graceNote",
-                    "tupletStart",
-                    "crossStaff",
-                    "dummy",
-                ] {
-                    if child(entry, unsupported).is_some() {
+                let frame = candidates[0];
+                if frame.children().any(|node| {
+                    node.is_element()
+                        && !["startEntry", "endEntry"].contains(&node.tag_name().name())
+                }) {
+                    return Err("Finale frame uses unsupported timing offsets or mirror references; export MusicXML from Finale.".into());
+                }
+                let first = number(frame, "startEntry", 0)?;
+                let last = number(frame, "endEntry", 0)?;
+                if first <= 0 || last <= 0 {
+                    return Err("Finale frame has invalid entry bounds.".into());
+                }
+                let mut current = first as u32;
+                let mut visited = HashSet::new();
+                let mut position = 0u32;
+                loop {
+                    if !visited.insert(current) || visited.len() > MAX_ENTRIES {
+                        return Err(
+                            "Finale entry chain contains a cycle or exceeds the entry limit."
+                                .into(),
+                        );
+                    }
+                    let entry = *entries.get(&current).ok_or_else(|| {
+                        format!("Finale frame refers to missing entry {current}.")
+                    })?;
+                    for unsupported in [
+                        "v2",
+                        "controller",
+                        "graceNote",
+                        "tupletStart",
+                        "crossStaff",
+                        "dummy",
+                    ] {
+                        if child(entry, unsupported).is_some() {
+                            return Err(format!(
+                                "{} measure {} contains unsupported Finale voices, tuplets, grace notes, or cross-staff rhythms; export MusicXML or simplify those passages first.",
+                                part.name,
+                                measure_index + 1
+                            ));
+                        }
+                    }
+                    let dura = number(entry, "dura", 0)?;
+                    if dura <= 0 {
+                        return Err("Finale note duration must be positive.".into());
+                    }
+                    let tick_units = (dura as u32)
+                        .checked_mul(480)
+                        .ok_or("Invalid Finale duration.")?;
+                    if tick_units % 1024 != 0 {
+                        return Err("Finale note duration is not exactly representable in Encore's tick resolution.".into());
+                    }
+                    let mut ticks = tick_units / 1024;
+                    let notes: Vec<_> = entry
+                        .children()
+                        .filter(|node| node.has_tag_name((NS, "note")))
+                        .collect();
+                    let is_note = child(entry, "isNote").is_some();
+                    // Finale uses a whole rest for a complete empty measure in any
+                    // meter; its displayed duration is not the elapsed bar length.
+                    if !is_note && dura == 4096 && current == first as u32 && current == last as u32
+                    {
+                        ticks = score.measure_ticks();
+                    }
+                    let end_position = position
+                        .checked_add(ticks)
+                        .ok_or("Invalid Finale measure duration.")?;
+                    if end_position > score.measure_ticks() {
                         return Err(format!(
-                            "{} measure {} contains unsupported Finale voices, tuplets, grace notes, or cross-staff rhythms; export MusicXML or simplify those passages first.",
+                            "{} measure {} extends past its bar line; pickups or irregular Finale measure timing cannot be imported yet.",
                             part.name,
                             measure_index + 1
                         ));
                     }
-                }
-                let dura = number(entry, "dura", 0)?;
-                if dura <= 0 {
-                    return Err("Finale note duration is not representable by Encore's sixteenth-note rhythm grid.".into());
-                }
-                let tick_units = (dura as u32)
-                    .checked_mul(480)
-                    .ok_or("Invalid Finale duration.")?;
-                if tick_units % 1024 != 0 {
-                    return Err("Finale note duration is not exactly representable in Encore's tick resolution.".into());
-                }
-                let mut ticks = tick_units / 1024;
-                let notes: Vec<_> = entry
-                    .children()
-                    .filter(|node| node.has_tag_name((NS, "note")))
-                    .collect();
-                let is_note = child(entry, "isNote").is_some();
-                // Finale uses a whole rest for a complete empty measure in any
-                // meter; its displayed duration is not the elapsed bar length.
-                if !is_note && dura == 4096 && current == first as u32 && current == last as u32 {
-                    ticks = score.measure_ticks();
-                }
-                let end_position = position
-                    .checked_add(ticks)
-                    .ok_or("Invalid Finale measure duration.")?;
-                if end_position > score.measure_ticks() {
-                    return Err(format!(
-                        "{} measure {} extends past its bar line; pickups or irregular Finale measure timing cannot be imported yet.",
-                        part.name,
-                        measure_index + 1
-                    ));
-                }
-                let mut pitches = Vec::new();
-                let mut tied_count = 0usize;
-                if is_note {
-                    if notes.is_empty() || notes.len() > 16 {
-                        return Err("Finale note entry must contain 1–16 pitches.".into());
-                    }
-                    for note in &notes {
-                        if child(*note, "crossStaff").is_some() {
-                            return Err("Finale cross-staff notes are not supported yet.".into());
+                    let mut pitches = Vec::new();
+                    let mut tied_count = 0usize;
+                    if is_note {
+                        if notes.is_empty() || notes.len() > 16 {
+                            return Err("Finale note entry must contain 1–16 pitches.".into());
                         }
-                        pitches.push(read_pitch(*note, key)?);
-                        if child(*note, "tieStart").is_some() {
-                            tied_count += 1;
+                        for note in &notes {
+                            if child(*note, "crossStaff").is_some() {
+                                return Err(
+                                    "Finale cross-staff notes are not supported yet.".into()
+                                );
+                            }
+                            pitches.push(read_pitch(*note, key)?);
+                            if child(*note, "tieStart").is_some() {
+                                tied_count += 1;
+                            }
+                        }
+                        if tied_count != 0 && tied_count != notes.len() {
+                            return Err("Finale partial-chord ties cannot be represented yet; export MusicXML with separate staves for the voices.".into());
                         }
                     }
-                    if tied_count != 0 && tied_count != notes.len() {
-                        return Err("Finale partial-chord ties cannot be represented yet; export MusicXML with separate staves for the voices.".into());
+                    let previous_count = part.measures[measure_index].notes.len();
+                    push_event(
+                        &mut part.measures[measure_index].notes,
+                        position,
+                        ticks,
+                        pitches,
+                        velocity as u8,
+                        false,
+                        tied_count > 0,
+                    )?;
+                    for note in &mut part.measures[measure_index].notes[previous_count..] {
+                        note.layer = (layer - 1) as u8;
                     }
-                }
-                let previous_count = part.measures[measure_index].notes.len();
-                push_event(
-                    &mut part.measures[measure_index].notes,
-                    position,
-                    ticks,
-                    pitches,
-                    velocity as u8,
-                    false,
-                    tied_count > 0,
-                )?;
-                imported_events += part.measures[measure_index].notes.len() - previous_count;
-                if imported_events > MAX_ENTRIES {
-                    return Err("Imported Finale score exceeds the 200,000-event limit.".into());
-                }
-                position = end_position;
-                if current == last as u32 {
-                    break;
-                }
-                current = attribute(entry, "next")?;
-                if current == 0 {
-                    return Err("Finale entry chain ends before its frame boundary.".into());
+                    imported_events += part.measures[measure_index].notes.len() - previous_count;
+                    if imported_events > MAX_ENTRIES {
+                        return Err("Imported Finale score exceeds the 200,000-event limit.".into());
+                    }
+                    position = end_position;
+                    if current == last as u32 {
+                        break;
+                    }
+                    current = attribute(entry, "next")?;
+                    if current == 0 {
+                        return Err("Finale entry chain ends before its frame boundary.".into());
+                    }
                 }
             }
         }
         score.parts.push(part);
     }
+    score.normalize();
     score
         .validate()
         .map_err(|error| format!("Finale score cannot be represented in Encore: {error}"))?;
@@ -928,11 +929,10 @@ mod tests {
         for changed in [
             fixture().replace("next=\"3\"", "next=\"40\""),
             fixture().replace("next=\"3\"", "next=\"12345\""),
-            fixture().replace("<dura>1024</dura>", "<dura>128</dura>"),
+            fixture().replace("<dura>1024</dura>", "<dura>16</dura>"),
             fixture().replace("<dura>1024</dura>", "<dura>1024</dura><tupletStart/>"),
             fixture().replace("<dura>1024</dura>", "<dura>1024</dura><v2/>"),
             fixture().replace("<dura>1024</dura>", "<dura>1024</dura><graceNote/>"),
-            fixture().replace("<frame1>9</frame1>", "<frame1>9</frame1><frame2>9</frame2>"),
         ] {
             assert!(parse(&archive(&changed)).is_err());
         }
@@ -1006,5 +1006,32 @@ mod tests {
                 .iter()
                 .any(|measure| !measure.notes.is_empty())
         }));
+    }
+    #[test]
+    fn imports_all_four_finale_layers_on_the_original_staff() {
+        let xml = fixture().replace(
+            "<frame1>9</frame1>",
+            "<frame1>9</frame1><frame2>9</frame2><frame3>9</frame3><frame4>9</frame4>",
+        );
+        let score = parse(&archive(&xml)).unwrap().score;
+        assert_eq!(score.parts.len(), 1);
+        for layer in 0..4 {
+            let notes = score.parts[0].measures[0]
+                .notes
+                .iter()
+                .filter(|note| note.layer == layer)
+                .collect::<Vec<_>>();
+            assert_eq!(notes.len(), 2);
+            assert_eq!(
+                (
+                    notes[0].start,
+                    notes[0].ticks(),
+                    notes[1].start,
+                    notes[1].ticks()
+                ),
+                (0, 480, 480, 1440)
+            );
+            assert!(notes[0].tied);
+        }
     }
 }

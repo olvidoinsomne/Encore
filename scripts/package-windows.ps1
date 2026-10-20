@@ -23,11 +23,18 @@ $encorePackage = Join-Path $encoreStage $encoreName
 New-Item -ItemType Directory -Path $encorePackage -Force | Out-Null
 try {
     Copy-Item -LiteralPath $BinaryPath -Destination (Join-Path $encorePackage "Encore.exe")
-    foreach ($encoreItem in @("assets", "src", "scripts", "Cargo.toml", "Cargo.lock", "LICENSE", "README.md", "ARCHITECTURE.md", "BUILDING.md", "COMPATIBILITY.md", ".gitlab-ci.yml")) {
+    foreach ($encoreItem in @("assets", "src", "scripts", "Cargo.toml", "Cargo.lock", "LICENSE", "README.md", "ARCHITECTURE.md", "BUILDING.md", "COMPATIBILITY.md", "FINALE_PARITY.md", "SHORTCUTS.md", ".gitlab-ci.yml")) {
         Copy-Item -LiteralPath (Join-Path $encoreRoot $encoreItem) -Destination $encorePackage -Recurse
     }
     if (Test-Path -LiteralPath (Join-Path $encoreRoot "tests") -PathType Container) {
         Copy-Item -LiteralPath (Join-Path $encoreRoot "tests") -Destination $encorePackage -Recurse
+    }
+    $encoreExamples = Join-Path $encorePackage "examples"
+    New-Item -ItemType Directory -Path $encoreExamples -Force | Out-Null
+    foreach ($encorePattern in @("*.encore", "*.pdf", "*.png")) {
+        Get-ChildItem -LiteralPath (Join-Path $encoreRoot "examples") -Filter $encorePattern -File | ForEach-Object {
+            Copy-Item -LiteralPath $_.FullName -Destination $encoreExamples
+        }
     }
     $encoreArchive = Join-Path $encoreOutput "$encoreName.zip"
     Compress-Archive -LiteralPath $encorePackage -DestinationPath $encoreArchive -Force
