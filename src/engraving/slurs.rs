@@ -41,7 +41,7 @@ fn is_above(score: &Score, s: &Slur) -> bool {
 }
 fn endpoint(
     score: &Score,
-    index: &crate::lines::PitchIndex,
+    index: &display::Index,
     anchor: &Anchor,
     region: &StaffRegion,
     above: bool,
@@ -50,13 +50,7 @@ fn endpoint(
         .map(|n| {
             n.pitches
                 .iter()
-                .map(|p| {
-                    pitch_y(
-                        &index.written_pitch(*anchor, *p),
-                        score.parts[anchor.part].clef,
-                        region.y,
-                    )
-                })
+                .map(|p| index.y(*anchor, *p, region.y))
                 .reduce(|a, b| if above { a.min(b) } else { a.max(b) })
                 .unwrap_or(region.y + 20.0)
         })
@@ -96,7 +90,7 @@ fn fragments<'a>(score: &'a Score, regions: &[StaffRegion]) -> Vec<Fragment<'a>>
     if score.notation.slurs.is_empty() {
         return Vec::new();
     }
-    let pitch_index = crate::lines::PitchIndex::new(score);
+    let pitch_index = display::Index::new(score);
     let mut phrases = BTreeMap::<usize, Vec<&Slur>>::new();
     for slur in &score.notation.slurs {
         phrases.entry(slur.start.part).or_default().push(slur);
@@ -131,7 +125,11 @@ fn fragments<'a>(score: &'a Score, regions: &[StaffRegion]) -> Vec<Fragment<'a>>
             } else {
                 (
                     first.content_x - 5.0,
-                    first.y + if above { -14.0 } else { 54.0 },
+                    if above {
+                        first.top_line_y() - 14.0
+                    } else {
+                        first.bottom_line_y() + 14.0
+                    },
                 )
             };
             let b = if let Some(r) = end_region {
@@ -142,7 +140,11 @@ fn fragments<'a>(score: &'a Score, regions: &[StaffRegion]) -> Vec<Fragment<'a>>
             } else {
                 (
                     last.x + last.width - 7.0,
-                    last.y + if above { -14.0 } else { 54.0 },
+                    if above {
+                        last.top_line_y() - 14.0
+                    } else {
+                        last.bottom_line_y() + 14.0
+                    },
                 )
             };
             if b.0 <= a.0 + 2.0 {
@@ -176,11 +178,7 @@ fn fragments<'a>(score: &'a Score, regions: &[StaffRegion]) -> Vec<Fragment<'a>>
                             }
                             let linear = a.1 + (b.1 - a.1) * t;
                             for p in &n.pitches {
-                                let y = pitch_y(
-                                    &pitch_index.written_pitch(anchor, *p),
-                                    score.parts[part].clef,
-                                    r.y,
-                                );
+                                let y = pitch_index.y(anchor, *p, r.y);
                                 let needed = if above {
                                     linear - y + 14.0
                                 } else {

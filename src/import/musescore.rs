@@ -19,6 +19,7 @@ struct StaffInfo {
     pan: f32,
     muted: bool,
     transpose: i16,
+    percussion: Option<crate::percussion::Staff>,
 }
 
 pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
@@ -99,11 +100,9 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
     for definition in source.children().filter(|n| n.has_tag_name("Part")) {
         let instrument_node = child(definition, "Instrument");
         let channel = instrument_node.and_then(|n| child(n, "Channel"));
-        if instrument_node.is_some_and(|n| {
+        let is_drums = instrument_node.is_some_and(|n| {
             value(n, "useDrumset") == Some("1") || n.children().any(|n| n.has_tag_name("Drum"))
-        }) {
-            return Err("MuseScore drumsets and unpitched percussion are not supported yet. Pitched percussion such as timpani can be imported.".into());
-        }
+        });
         let program = channel
             .and_then(|n| child(n, "program"))
             .and_then(|n| n.attribute("value"))
@@ -174,11 +173,9 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
                 .to_owned();
             if child(staff, "StaffType")
                 .and_then(|n| n.attribute("group"))
-                .is_some_and(|s| s != "pitched")
+                .is_some_and(|s| s != "pitched" && s != "percussion")
             {
-                return Err(
-                    "MuseScore tablature and percussion staves are not supported yet.".into(),
-                );
+                return Err("MuseScore tablature staves are not supported yet.".into());
             }
             let clef = value(staff, "defaultConcertClef")
                 .or_else(|| value(staff, "defaultClef"))
@@ -192,6 +189,23 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
                             .and_then(|n| n.text())
                     })
                 });
+            let percussion = if is_drums
+                || child(staff, "StaffType").and_then(|n| n.attribute("group"))
+                    == Some("percussion")
+            {
+                let lines = child(staff, "StaffType")
+                    .map(|n| number::<u8>(n, "lines"))
+                    .transpose()?
+                    .flatten()
+                    .unwrap_or(5);
+                Some(super::percussion::muse(
+                    instrument_node.ok_or("A percussion staff needs an instrument definition.")?,
+                    lines,
+                    &mut warnings,
+                )?)
+            } else {
+                None
+            };
             let clef = parse_clef(
                 clef.unwrap_or("G"),
                 instrument.default_clef(),
@@ -208,6 +222,7 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
                         pan,
                         muted,
                         transpose,
+                        percussion,
                     },
                 )
                 .is_some()
@@ -248,6 +263,7 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
                 pan: 0.0,
                 muted: false,
                 transpose: 0,
+                percussion: None,
             }
         });
         let measures: Vec<_> = staff
@@ -442,7 +458,7 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
                         }
                         "Chord" | "Rest" => {
                             if item.children().any(|n| matches!(n.tag_name().name(), "acciaccatura" | "appoggiatura" | "grace4" | "grace16" | "grace32" | "grace8after" | "grace16after" | "grace32after")) {
-                                let pitches=item.children().filter(|n|n.has_tag_name("Note")).map(|note|{let midi=number::<u8>(note,"pitch")?.ok_or("MuseScore grace note has no pitch.")?;if midi>127{return Err("MuseScore grace pitch exceeds MIDI127.".into());}Ok(spelled_pitch(midi,number::<i32>(note,"tpc")?))}).collect::<Result<Vec<_>,String>>()?;
+                                let pitches=item.children().filter(|n|n.has_tag_name("Note")).map(|note|{let midi=number::<u8>(note,"pitch")?.ok_or("MuseScore grace note has no pitch.")?;if midi>127{return Err("MuseScore grace pitch exceeds MIDI127.".into());}Ok(if info.percussion.is_some(){crate::percussion::token(midi)}else{spelled_pitch(midi,number::<i32>(note,"tpc")?)})}).collect::<Result<Vec<_>,String>>()?;
                                 grace.muse(item,SourceAnchor{staff:source_staff,voice:voice_index.to_string(),measure:measure_index,tick:cursor.try_into().map_err(|_|"Invalid grace position.")?},pitches,&mut warnings)?;continue;
                             }
                             let tuplet = if let Some(id) = value(item, "Tuplet") {
@@ -474,7 +490,7 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
                             for note in &note_nodes {
                                 let midi = number::<u8>(*note, "pitch")?.ok_or("MuseScore note has no MIDI pitch.")?;
                                 if midi > 127 { return Err("MuseScore pitch exceeds MIDI 127.".into()); }
-                                pitches.push(spelled_pitch(midi, number::<i32>(*note, "tpc")?));
+                                pitches.push(if info.percussion.is_some(){crate::percussion::token(midi)}else{spelled_pitch(midi, number::<i32>(*note, "tpc")?)});
                                 let outgoing = child(*note, "Tie").is_some() || note.children().any(|n| n.has_tag_name("Spanner") && n.attribute("type") == Some("Tie") && child(n, "next").is_some());
                                 if tied.is_some_and(|prior| prior != outgoing) { return Err(format!("{context}: partially tied chords are not supported yet; separate pitches into voices before importing.")); }
                                 tied = Some(outgoing);
@@ -598,6 +614,7 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
                 info.name.clone()
             },
             instrument: info.instrument,
+            percussion: info.percussion.clone(),
             clef,
             measures: combined,
             volume: info.volume,
@@ -645,9 +662,8 @@ fn parse_clef(name: &str, fallback: Clef, warnings: &mut Warnings) -> Result<Cle
         "G" | "0" => Ok(Clef::Treble),
         "F" | "4" => Ok(Clef::Bass),
         "C3" => Ok(Clef::Alto),
-        "PERC" | "PERC2" | "TAB" | "TAB4" => {
-            Err("MuseScore percussion and tablature clefs are not supported yet.".into())
-        }
+        "PERC" | "PERC2" => Ok(Clef::Treble),
+        "TAB" | "TAB4" => Err("MuseScore tablature clefs are not supported yet.".into()),
         _ => {
             warnings.add("An unsupported clef was replaced by the instrument's default clef; sounding pitches are preserved.");
             Ok(fallback)

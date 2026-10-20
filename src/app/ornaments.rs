@@ -28,6 +28,10 @@ impl Default for Editor {
 }
 impl EncoreApp {
     pub(super) fn open_ornaments(&mut self) {
+        if self.active_percussion().is_some() {
+            self.status="Pitch ornaments and chord rolls are unavailable on unpitched percussion. Use grace notes for flams.".into();
+            return;
+        }
         if let Some(anchor) = self
             .selected
             .and_then(|s| Anchor::from_selection(&self.score, s))
@@ -85,7 +89,7 @@ impl EncoreApp {
             }
             egui::ComboBox::from_id_salt("ornament-placement").selected_text(format!("{:?}",mark.placement)).show_ui(ui,|ui|{for p in [SlurDirection::Auto,SlurDirection::Above,SlurDirection::Below]{ui.selectable_value(&mut mark.placement,p,format!("{p:?}"));}});
             ui.horizontal_wrapped(|ui|{ui.add(egui::DragValue::new(&mut mark.offset[0]).range(-160.0..=160.0).prefix("X "));ui.add(egui::DragValue::new(&mut mark.offset[1]).range(-160.0..=160.0).prefix("Y "));});
-            if ui.add_enabled(anchor.is_some(),egui::Button::new("Assign to selected entry")).clicked(){let mut mark=self.ornaments_editor.mark.clone();mark.anchor=anchor.unwrap();match encore::ornaments::assign(&mut self.score,mark){Ok(())=>self.status="Ornament assigned.".into(),Err(error)=>self.status=error}}
+            if ui.add_enabled(anchor.is_some(),egui::Button::new("Assign to selected entry")).clicked(){let mut mark=self.ornaments_editor.mark.clone();mark.anchor=anchor.unwrap();let mut candidate=self.score.clone();match encore::ornaments::assign(&mut candidate,mark).and_then(|()|candidate.validate()){Ok(())=>{self.score=candidate;self.status="Ornament assigned.".into();},Err(error)=>self.status=error}}
             ui.separator();
             for(index,mark)in self.score.notation.ornaments.clone().iter().enumerate(){ui.horizontal_wrapped(|ui|{ui.label(format!("{} · M{} beat {:.2} · L{} V{}",mark.kind.name(),mark.anchor.measure+1,mark.anchor.tick as f32/PPQ as f32+1.,mark.anchor.layer+1,mark.anchor.voice+1));if ui.small_button("Edit").clicked(){self.edit_ornament(mark);}
             if ui.small_button("Remove").clicked(){self.score.notation.ornaments.remove(index);}});}

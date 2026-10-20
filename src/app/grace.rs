@@ -19,7 +19,7 @@ impl EncoreApp {
             .selected
             .and_then(|selection| Anchor::from_selection(&self.score, selection))
         else {
-            self.status = "Select a pitched principal note before editing grace notes.".into();
+            self.status = "Select a principal note before editing grace notes.".into();
             return;
         };
         self.open_grace_at(anchor, GracePlacement::Before, 0);
@@ -28,7 +28,7 @@ impl EncoreApp {
         let Some(note) =
             encore::document::note_at(&self.score, &anchor).filter(|n| !n.pitches.is_empty())
         else {
-            self.status = "Grace groups attach to pitched principal notes.".into();
+            self.status = "Grace groups attach to principal notes.".into();
             return;
         };
         let existing = grace::at(&self.score, &anchor, placement).cloned();
@@ -105,6 +105,7 @@ impl EncoreApp {
         let mut remove = false;
         let mut switch = None;
         let anchor = group.anchor;
+        let drum_map = self.score.parts[anchor.part].percussion.clone();
         egui::Window::new("Grace notes")
             .open(&mut open)
             .default_width(520.0)
@@ -182,7 +183,11 @@ impl EncoreApp {
                             i + 1,
                             note.pitches
                                 .iter()
-                                .map(|p| self.written_pitch_at(*p, anchor).unwrap_or(*p).name())
+                                .map(|p| if drum_map.is_some() {
+                                    self.percussion_name(anchor.part, *p)
+                                } else {
+                                    self.written_pitch_at(*p, anchor).unwrap_or(*p).name()
+                                })
                                 .collect::<Vec<_>>()
                                 .join(" + ")
                         );
@@ -247,6 +252,29 @@ impl EncoreApp {
                 let mut remove_pitch = None;
                 let multiple_pitches = note.pitches.len() > 1;
                 for (i, pitch) in note.pitches.iter_mut().enumerate() {
+                    if let Some(map) = &drum_map {
+                        ui.horizontal(|ui| {
+                            ui.label(format!("Sound {}", i + 1));
+                            egui::ComboBox::from_id_salt(("grace-sound", i))
+                                .selected_text(self.percussion_name(anchor.part, *pitch))
+                                .show_ui(ui, |ui| {
+                                    for sound in &map.sounds {
+                                        ui.selectable_value(
+                                            pitch,
+                                            encore::percussion::token(sound.id),
+                                            &sound.name,
+                                        );
+                                    }
+                                });
+                            if ui
+                                .add_enabled(multiple_pitches, egui::Button::new("−"))
+                                .clicked()
+                            {
+                                remove_pitch = Some(i);
+                            }
+                        });
+                        continue;
+                    }
                     let mut written = self.written_pitch_at(*pitch, anchor).unwrap_or(*pitch);
                     ui.horizontal(|ui| {
                         ui.label(format!("Pitch {}", i + 1));
@@ -293,12 +321,20 @@ impl EncoreApp {
                     .add_enabled(note.pitches.len() < 16, egui::Button::new("Add chord tone"))
                     .clicked()
                 {
-                    let midi = note.pitches.last().map_or(60, |p| p.midi());
-                    let next = (0u16..128)
-                        .map(|d| (u16::from(midi) + d) % 128)
-                        .find(|m| !note.pitches.iter().any(|p| u16::from(p.midi()) == *m))
-                        .unwrap_or(60);
-                    note.pitches.push(Pitch::from_midi(next as u8));
+                    if let Some(map) = &drum_map {
+                        if let Some(sound) = map.sounds.iter().find(|sound| {
+                            !note.pitches.iter().any(|pitch| pitch.midi() == sound.id)
+                        }) {
+                            note.pitches.push(encore::percussion::token(sound.id));
+                        }
+                    } else {
+                        let midi = note.pitches.last().map_or(60, |p| p.midi());
+                        let next = (0u16..128)
+                            .map(|d| (u16::from(midi) + d) % 128)
+                            .find(|m| !note.pitches.iter().any(|p| u16::from(p.midi()) == *m))
+                            .unwrap_or(60);
+                        note.pitches.push(Pitch::from_midi(next as u8));
+                    }
                 }
                 ui.horizontal(|ui| {
                     let mut own = note.velocity.is_some();

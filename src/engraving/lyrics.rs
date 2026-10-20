@@ -14,7 +14,7 @@ fn lines(score: &Score, part: usize) -> Vec<(LyricKind, u16, u8)> {
         .into_iter()
         .collect()
 }
-fn base(score: &Score, regions: &[&StaffRegion]) -> f32 {
+fn base(score: &Score, regions: &[&StaffRegion], display: &display::Index) -> f32 {
     let first = regions[0];
     let mut baseline = first.y + 85.0;
     for region in regions {
@@ -24,8 +24,14 @@ fn base(score: &Score, regions: &[&StaffRegion]) -> f32 {
                 .iter()
                 .any(|n| m.notes.first().is_some_and(|p| p.lane() != n.lane()));
             baseline = baseline.max(
-                staff_dynamic_baseline(&m.notes, score.parts[region.part].clef, region.y, multiple)
-                    + 25.0,
+                staff_dynamic_baseline(
+                    &m.notes,
+                    display,
+                    region.part,
+                    region.measure,
+                    region.y,
+                    multiple,
+                ) + 25.0,
             );
         }
     }
@@ -92,6 +98,7 @@ pub(super) fn extra_below(score: &Score, part: usize, measure: usize, bars: usiz
 /// Draw text and its joining graphics after all staff regions are known. Each
 /// system receives its own continuation fragment, including across page breaks.
 pub(super) fn draw(page: &mut Page, score: &Score) {
+    let display = display::Index::new(score);
     let mut next_syllables = BTreeMap::new();
     let mut syllable_lines: BTreeMap<(usize, u8, LyricKind, u16), Vec<&Lyric>> = BTreeMap::new();
     for lyric in &score.notation.lyrics {
@@ -126,7 +133,7 @@ pub(super) fn draw(page: &mut Page, score: &Score) {
             .enumerate()
             .map(|(i, key)| (key, i))
             .collect::<BTreeMap<_, _>>();
-        let base = base(score, &refs);
+        let base = base(score, &refs, &display);
         let first = &regions[0];
         let last = regions.last().unwrap();
         let start_pos = (first.measure, 0);

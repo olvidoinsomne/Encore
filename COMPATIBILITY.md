@@ -1,6 +1,6 @@
 # Platforms and score compatibility
 
-Encore 0.11 targets Linux, macOS and Windows. Linux builds and packaging are
+Encore 0.12 targets Linux, macOS and Windows. Linux builds and packaging are
 verified on the development machine. Native macOS and Windows validation is
 still required; their build commands, packaging scripts and manual GitLab CI
 jobs are in [BUILDING.md](BUILDING.md). A Rust target alone does not supply the
@@ -39,7 +39,7 @@ information. They convert transposing instruments to concert pitch. Playback
 uses retained tempo marks and supported ramps. Key changes use the
 initial signature while preserving explicit note pitches. Lyrics and same-layer
 slurs now retain the subset described below. Page layout, pedal/other expression lines
-and advanced articulations are not fully retained. Breve through 128th values and exact representable tuplets are supported. Nested tuplets, fractional-grid ratios, percussion maps and changing time signatures still need simplification in the source program first.
+and advanced articulations are not fully retained. Breve through 128th values and exact representable tuplets are supported. Nested tuplets, fractional-grid ratios and changing time signatures still need simplification in the source program first.
 When no explicit tempo is stored, import uses 120 quarter notes per minute and
 reports that choice in the import notes.
 
@@ -258,7 +258,7 @@ The direct reader uses independent public
 and the public MUSX container description. No Finale executable, proprietary
 implementation, fonts or sample libraries are bundled.
 
-MIDI import accepts format 0/1 files with PPQ divisions, running status, track/channel/program assignments, initial tempo/key/meter and available volume/pan information. It infers ordinary and exact conventional tuplet notation, separates overlapping independent rhythms when needed, and retains later tempo steps and warns about ignored controllers. SMPTE timing, unpitched drum maps and performances that cannot be represented exactly are rejected. File → Open offers **Exact timing** or an explicit rhythmic quantization grid. Exact mode rejects unnotatable performance timing. Choosing a grid changes note positions/durations and reports the affected-note count and maximum timing shift in the import notes. The original MIDI file is never changed. Detached playback gates can prevent exact reimport of MIDI exported from notation; MusicXML preserves the original written rhythm and articulation marks. This does not add real-time MIDI keyboard input.
+MIDI import accepts format 0/1 files with PPQ divisions, running status, track/channel/program assignments, initial tempo/key/meter and available volume/pan information. It infers ordinary and exact conventional tuplet notation, separates overlapping independent rhythms when needed, and retains later tempo steps and warns about ignored controllers. SMPTE timing and performances that cannot be represented exactly are rejected. MIDI channel 10 imports as a percussion kit with canonical sound IDs and its selected program. File → Open offers **Exact timing** or an explicit rhythmic quantization grid. Exact mode rejects unnotatable performance timing. Choosing a grid changes note positions/durations and reports the affected-note count and maximum timing shift in the import notes. The original MIDI file is never changed. Detached playback gates can prevent exact reimport of MIDI exported from notation; MusicXML preserves the original written rhythm and articulation marks. This does not add real-time MIDI keyboard input.
 
 ```sh
 ./run-encore --import-midi performance.mid converted.encore --quantize 16th
@@ -415,3 +415,44 @@ Event clipboard v6 additionally retains ornament controls; region v3 also
 preserves advanced slur styles/controls. Earlier supported versions remain
 readable. Voiced-part copying is routed through standalone extraction or source
 editing to avoid copying hidden voices unintentionally.
+
+
+## Unpitched percussion interchange
+
+Native percussion staves keep sound IDs, printed positions/heads, optional
+playback MIDI keys, kit programs and one/five-line layouts separately. Timpani
+and mallet instruments remain pitched. Transposition of linked parts or regions
+skips drum IDs, including grace notes and per-sound tie/style keys. Unknown
+playback mappings remain explicit; they are never inferred from a printed
+position. Used unmapped sounds produce an audio/MIDI error while remaining valid
+editable notation. See [percussion workflow and limits](PERCUSSION.md).
+
+MusicXML reads standard unpitched display positions, instrument identities,
+noteheads, MIDI channel 10 and one-based `midi-unpitched` values. Its supported
+native extension preserves exact Encore maps, custom IDs, unused sounds and
+unmapped keys. Ordinary foreign notes may create separate sound identities when
+one instrument uses differing positions or heads. Supported staff counts are one
+or five lines; unpitched and pitched notes cannot share the same Encore staff.
+Unsupported head shapes use a reported normal-head approximation. No playback
+key is guessed when a foreign instrument lacks a usable mapping. Direct Finale
+MUSX percussion layouts/maps still require export through MusicXML.
+
+MuseScore imports `useDrumset`/percussion staff definitions, drum keys, names,
+positions and supported heads while preserving its four rhythmic voices. An
+omitted built-in map selects the standard GM map with an import warning. Custom
+duration-specific glyphs, articulation-triggered sound variants, per-sound entry
+shortcuts and saved external input maps are not imported. MIDI channel 10 uses
+its stored kit program and key numbers; ordinary MIDI timing/quantization limits
+still apply. MIDI does not preserve custom notation layouts or Encore sound IDs.
+
+Event clipboard v7 and region clipboard v4 carry percussion context and accept
+earlier supported versions as pitched content. Paste rejects pitched/unpitched
+crossing and differing names or playback mappings for used sound IDs before
+changing the destination. Compatible maps may retain their own visual positions,
+heads and kit selection.
+
+The standard XML representation follows the
+[MusicXML percussion tutorial](https://www.w3.org/2021/06/musicxml40/tutorial/percussion/)
+and [MIDI key numbering](https://www.w3.org/2021/06/musicxml40/musicxml-reference/elements/midi-unpitched/).
+MuseScore field interpretation follows its public
+[drum-map serialization format](https://github.com/musescore/MuseScore/blob/v3.6.2/libmscore/drumset.cpp).

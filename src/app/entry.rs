@@ -103,6 +103,18 @@ impl EncoreApp {
         pitch: Pitch,
         anchor: encore::document::Anchor,
     ) -> Result<Pitch, String> {
+        if let Some(map) = self
+            .score
+            .parts
+            .get(anchor.part)
+            .and_then(|part| part.percussion.as_ref())
+        {
+            let id = encore::percussion::token_id(pitch)?;
+            return map
+                .sound(id)
+                .map(|_| pitch)
+                .ok_or_else(|| format!("Percussion sound ID {id} is absent from this staff map."));
+        }
         self.entry_transposition()
             .written_pitch(encore::lines::written_pitch(&self.score, anchor, pitch))
     }
@@ -111,6 +123,14 @@ impl EncoreApp {
         written: Pitch,
         anchor: encore::document::Anchor,
     ) -> Result<Pitch, String> {
+        if self
+            .score
+            .parts
+            .get(anchor.part)
+            .is_some_and(|part| part.percussion.is_some())
+        {
+            return self.written_pitch_at(written, anchor);
+        }
         let mut source = self.entry_transposition().concert_pitch(written)?;
         let display = encore::lines::written_pitch(&self.score, anchor, source);
         source.octave = source.octave.saturating_add(source.octave - display.octave);
@@ -130,6 +150,12 @@ impl EncoreApp {
     }
 
     fn set_pitch_accidental(&mut self, value: i8, relative: bool) {
+        if self.active_percussion().is_some() {
+            self.status =
+                "Percussion sounds do not use pitch accidentals. Choose a named sound below."
+                    .into();
+            return;
+        }
         let Some(index) = self.active_pitch_index() else {
             self.accidental = Some(if relative {
                 self.accidental
@@ -266,6 +292,29 @@ impl EncoreApp {
     }
 
     fn enter_caret(&mut self, rest: bool, chord: bool) {
+        if self.active_percussion().is_some() {
+            self.reconcile_percussion_caret();
+            let (part, measure, start) = if chord {
+                self.selected
+                    .map(|selection| {
+                        (
+                            selection.part,
+                            selection.measure,
+                            self.score.parts[selection.part].measures[selection.measure].notes
+                                [selection.note]
+                                .start,
+                        )
+                    })
+                    .unwrap_or((self.active_part, self.cursor_measure, self.cursor_tick))
+            } else {
+                (self.active_part, self.cursor_measure, self.cursor_tick)
+            };
+            let prior = self.rest;
+            self.rest = rest;
+            self.enter_note(part, measure, start, self.entry_pitch, chord);
+            self.rest = prior;
+            return;
+        }
         let anchor = if chord {
             self.selected_or_caret_anchor()
         } else {
@@ -381,6 +430,36 @@ impl EncoreApp {
     }
 
     fn change_entry_pitch(&mut self, steps: i32, octave: bool) {
+        if let Some(map) = self.active_percussion() {
+            if octave {
+                self.status =
+                    "Percussion sounds have no octave. Use Up/Down to choose a mapped sound."
+                        .into();
+                return;
+            }
+            let mut sounds = map.sounds.iter().collect::<Vec<_>>();
+            sounds.sort_by_key(|sound| (sound.position, sound.id));
+            let current = sounds
+                .iter()
+                .position(|sound| sound.id == self.entry_pitch.midi())
+                .unwrap_or(0);
+            let next = (current as i32 + steps).clamp(0, sounds.len() as i32 - 1) as usize;
+            let pitch = encore::percussion::token(sounds[next].id);
+            let name = sounds[next].name.clone();
+            if self.entry_profile == EntryProfile::SimpleLaptop && self.selected.is_some() {
+                let index = self.active_pitch_index();
+                if !self.edit_entry(|note| {
+                    if let Some(index) = index {
+                        note.pitches[index] = pitch;
+                    }
+                }) {
+                    return;
+                }
+            }
+            self.entry_pitch = pitch;
+            self.status = format!("Percussion sound: {name}");
+            return;
+        }
         let fifths = match self.written_key() {
             Ok(fifths) => fifths,
             Err(error) => {
@@ -554,6 +633,10 @@ impl EncoreApp {
                 }
             }
             Pitch(step, chord) => {
+                if self.active_percussion().is_some() {
+                    self.status="Choose a percussion sound below, then press Enter; Shift-click adds it directly.".into();
+                    return;
+                }
                 let fifths = match self.written_key() {
                     Ok(fifths) => fifths,
                     Err(error) => {
@@ -641,6 +724,10 @@ impl EncoreApp {
             }
             Chord => self.enter_caret(false, true),
             Interval(interval) => {
+                if self.active_percussion().is_some() {
+                    self.status="Intervals do not apply to percussion sound IDs. Select another sound and add it to the chord.".into();
+                    return;
+                }
                 let Some(base) = self
                     .active_pitch_index()
                     .and_then(|index| self.selected_entry().map(|note| note.pitches[index]))
@@ -719,7 +806,13 @@ impl EncoreApp {
             }
             Accidental(change) => self.set_pitch_accidental(change, change != 0),
             SetAccidental(alter) => self.set_pitch_accidental(alter, false),
-            ToolAccidental(alter) => self.accidental = Some(alter),
+            ToolAccidental(alter) => {
+                if self.active_percussion().is_none() {
+                    self.accidental = Some(alter);
+                } else {
+                    self.status = "Unpitched percussion has no pitch accidentals.".into();
+                }
+            }
             Boundary(direction) => {
                 let measure = &self.score.parts[self.active_part].measures[self.cursor_measure];
                 if direction < 0 {

@@ -53,6 +53,14 @@ pub(super) struct Annotations {
     extensions: BTreeMap<(u32, String, LyricKind, u16), usize>,
 }
 impl Annotations {
+    pub(super) fn percussion_note(
+        &mut self,
+        at: &SourceAnchor,
+        pitch: crate::model::Pitch,
+        tied: bool,
+    ) {
+        self.styles.percussion_note(at, pitch, tied);
+    }
     pub(super) fn xml_excluding_slurs(
         &mut self,
         node: Node<'_, '_>,

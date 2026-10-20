@@ -3,6 +3,212 @@ use super::*;
 use std::collections::HashMap;
 
 #[test]
+fn percussion_keyboard_uses_named_sound_and_map_window_suppresses_note_entry() {
+    let ctx = egui::Context::default();
+    configure_context(&ctx);
+    let mut score = Score::blank();
+    score.parts[0].percussion = Some(encore::percussion::Staff::general_midi());
+    let mut app = controller(score);
+    app.write_mode = true;
+    app.entry_pitch = Pitch::from_midi(46);
+    app.open_percussion();
+    let before = app.score.clone();
+    let plain = egui::Modifiers::NONE;
+    let _ = ctx.run(raw_input(0, vec![], plain), |ctx| app.ui(ctx));
+    let _ = ctx.run(
+        raw_input(1, vec![key(egui::Key::Enter, true, plain)], plain),
+        |ctx| app.ui(ctx),
+    );
+    assert_eq!(app.score, before);
+    assert!(app.undo.is_empty());
+    app.percussion_editor.open = false;
+    let _ = ctx.run(
+        raw_input(2, vec![key(egui::Key::Enter, false, plain)], plain),
+        |ctx| app.ui(ctx),
+    );
+    let _ = ctx.run(
+        raw_input(3, vec![key(egui::Key::Enter, true, plain)], plain),
+        |ctx| app.ui(ctx),
+    );
+    assert_eq!(
+        app.score.parts[0].measures[0].notes[0].pitches,
+        vec![Pitch::from_midi(46)]
+    );
+    assert_eq!(app.undo.len(), 1);
+    app.undo();
+    assert_eq!(app.score, before);
+}
+
+#[test]
+fn percussion_map_primary_actions_and_playback_fields_are_reachable_at_minimum_window_size() {
+    let ctx = egui::Context::default();
+    configure_context(&ctx);
+    let mut score = Score::blank();
+    score.parts[0].percussion = Some(encore::percussion::Staff::general_midi());
+    let mut app = controller(score.clone());
+    app.open_percussion();
+    let plain = egui::Modifiers::NONE;
+    let input = |frame, events| {
+        let mut input = raw_input(frame, events, plain);
+        input.screen_rect = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(980.0, 680.0)));
+        input
+    };
+    let mut save = None;
+    for frame in 0..5 {
+        let output = ctx.run(input(frame, vec![]), |ctx| app.ui(ctx));
+        save = visible_text_rect(&output, "Save percussion map");
+    }
+    let save = save.expect("Save must be visible before scrolling");
+    assert!(save.min.y >= 0.0 && save.max.y <= 680.0);
+    let mut audition = None;
+    for frame in 5..25 {
+        let output = ctx.run(
+            input(
+                frame,
+                vec![
+                    egui::Event::PointerMoved(Pos2::new(720.0, 470.0)),
+                    egui::Event::MouseWheel {
+                        unit: egui::MouseWheelUnit::Point,
+                        delta: Vec2::new(0.0, -120.0),
+                        modifiers: plain,
+                    },
+                ],
+            ),
+            |ctx| app.ui(ctx),
+        );
+        audition = visible_text_rect(&output, "Audition sound").or(audition);
+    }
+    let audition = audition.expect("Playback mapping and audition must be reachable by scrolling");
+    assert!(audition.min.y >= 0.0 && audition.max.y <= 680.0);
+    assert_eq!(app.score, score);
+    assert!(app.undo.is_empty());
+}
+
+#[test]
+fn one_line_percussion_mouse_entry_uses_position_and_selected_alias() {
+    let ctx = egui::Context::default();
+    configure_context(&ctx);
+    let mut score = Score::blank();
+    let mut map = encore::percussion::Staff::general_midi();
+    map.lines = 1;
+    map.sounds.retain(|sound| [38, 42, 46].contains(&sound.id));
+    for sound in &mut map.sounds {
+        sound.position = if sound.id == 38 { -2 } else { 2 };
+    }
+    score.parts[0].percussion = Some(map);
+    let mut app = controller(score);
+    app.write_mode = true;
+    app.entry_pitch = Pitch::from_midi(46);
+    app.duration = Duration::Quarter;
+    let plain = egui::Modifiers::NONE;
+    let mut paper = None;
+    for frame in 0..3 {
+        let output = ctx.run(raw_input(frame, vec![], plain), |ctx| app.ui(ctx));
+        paper = output.shapes.iter().find_map(|shape| match &shape.shape {
+            egui::Shape::Rect(rect)
+                if rect.fill == Color32::WHITE
+                    && rect.rect.width() > 700.0
+                    && rect.rect.height() > 900.0 =>
+            {
+                Some(rect.rect)
+            }
+            _ => None,
+        });
+    }
+    let staff = &app.cached_pages[0].staves[0];
+    assert_eq!(staff.lines, 1);
+    let position = paper.unwrap().min
+        + Vec2::new(
+            staff.x_at_tick(480.0),
+            staff.bottom_line_y() - staff.spacing,
+        ) * app.zoom;
+    for (frame, pressed) in [(3, true), (4, false)] {
+        let _ = ctx.run(
+            raw_input(
+                frame,
+                vec![
+                    egui::Event::PointerMoved(position),
+                    egui::Event::PointerButton {
+                        pos: position,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: plain,
+                    },
+                ],
+                plain,
+            ),
+            |ctx| app.ui(ctx),
+        );
+    }
+    let note = app.score.parts[0].measures[0]
+        .notes
+        .iter()
+        .find(|note| note.start == 480)
+        .unwrap();
+    assert_eq!(note.pitches, vec![Pitch::from_midi(46)]);
+    app.score.validate().unwrap();
+}
+
+#[test]
+fn individual_drum_chord_heads_select_the_clicked_sound_in_a_reordered_part() {
+    let ctx = egui::Context::default();
+    configure_context(&ctx);
+    let mut score = Score::blank();
+    score.parts[1].percussion = Some(encore::percussion::Staff::general_midi());
+    score.parts[1].measures[0]
+        .notes
+        .push(event(0, Duration::Quarter, &[36, 42]));
+    let mut definition = encore::parts::definitions(&score).pop().unwrap();
+    definition.staves = vec![1, 0];
+    definition.id = "reordered-drums".into();
+    score.notation.parts = vec![definition];
+    let mut app = controller(score);
+    app.part_view = true;
+    let plain = egui::Modifiers::NONE;
+    let mut paper = None;
+    for frame in 0..3 {
+        let output = ctx.run(raw_input(frame, vec![], plain), |ctx| app.ui(ctx));
+        paper = output.shapes.iter().find_map(|shape| match &shape.shape {
+            egui::Shape::Rect(rect)
+                if rect.fill == Color32::WHITE
+                    && rect.rect.width() > 700.0
+                    && rect.rect.height() > 900.0 =>
+            {
+                Some(rect.rect)
+            }
+            _ => None,
+        });
+    }
+    let hit = app.cached_pages[0]
+        .sound_hits
+        .iter()
+        .find(|hit| hit.sound_id == 42)
+        .unwrap();
+    assert_eq!(hit.anchor.part, 1);
+    let position = paper.unwrap().min + Vec2::new(hit.x, hit.y) * app.zoom;
+    for (frame, pressed) in [(3, true), (4, false)] {
+        let _ = ctx.run(
+            raw_input(
+                frame,
+                vec![
+                    egui::Event::PointerMoved(position),
+                    egui::Event::PointerButton {
+                        pos: position,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: plain,
+                    },
+                ],
+                plain,
+            ),
+            |ctx| app.ui(ctx),
+        );
+    }
+    assert_eq!(app.selected.unwrap().part, 1);
+    assert_eq!(app.entry_pitch, Pitch::from_midi(42));
+}
+
+#[test]
 fn midi_import_requires_a_timing_choice_and_reports_quantization_without_changing_the_source() {
     let directory = ImportTestDirectory::new();
     let path = directory.0.join("Detached performance.mid");
@@ -10,7 +216,7 @@ fn midi_import_requires_a_timing_choice_and_reports_quantization_without_changin
     let mut short = event(0, Duration::SixtyFourth, &[60]);
     short.articulations = vec![Articulation::Staccatissimo];
     score.parts[0].measures[0].notes = vec![short, event(30, Duration::SixtyFourth, &[62])];
-    let bytes = encore::export::midi(&score);
+    let bytes = encore::export::midi(&score).unwrap();
     std::fs::write(&path, &bytes).unwrap();
     let ctx = egui::Context::default();
     configure_context(&ctx);
@@ -1199,6 +1405,16 @@ fn headless_full_editor_renders_notation_and_font_textures() {
         app.part_view = true;
         app.selected_linked_part = index.parse().unwrap();
     }
+    if std::env::var_os("ENCORE_HEADLESS_PERCUSSION").is_some()
+        && let Some(part) = app
+            .score
+            .parts
+            .iter()
+            .position(|staff| staff.percussion.is_some())
+    {
+        app.active_part = part;
+        app.open_percussion();
+    }
     app.show_layout = std::env::var_os("ENCORE_HEADLESS_LAYOUT").is_some();
     if std::env::var_os("ENCORE_HEADLESS_STYLE").is_some() {
         app.show_entry_style = true;
@@ -1325,6 +1541,7 @@ fn headless_full_editor_renders_notation_and_font_textures() {
             || app.chord_editor.open
             || app.lines_editor.open
             || app.ornaments_editor.open
+            || app.percussion_editor.open
             || app.notation_editor.open
             || app.show_parts
             || app.playback_editor.open

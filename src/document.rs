@@ -122,6 +122,7 @@ pub fn note_at<'a>(score: &'a Score, anchor: &Anchor) -> Option<&'a Note> {
 }
 
 pub fn validate(score: &Score) -> Result<(), String> {
+    crate::percussion::validate(score)?;
     let n = &score.notation;
     let anchors = n
         .ornaments

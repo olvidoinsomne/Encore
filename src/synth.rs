@@ -42,6 +42,9 @@ pub fn render(score: &Score) -> Vec<f32> {
 
 /// Dry procedural rendering before the shared room and output limiter.
 pub(crate) fn render_dry(score: &Score) -> Vec<f32> {
+    if crate::performance::active_percussion(score) {
+        return Vec::new();
+    }
     if crate::performance::needed(score) {
         return render_decorated(score);
     }
@@ -185,6 +188,16 @@ fn render_decorated(score: &Score) -> Vec<f32> {
     let Ok(timeline) = crate::performance::Timeline::new(score) else {
         return Vec::new();
     };
+    render_decorated_with(score, &timeline)
+}
+pub(crate) fn render_decorated_with(
+    score: &Score,
+    timeline: &crate::performance::Timeline,
+) -> Vec<f32> {
+    let seconds = duration_seconds(score);
+    if !seconds.is_finite() || seconds > MAX_RENDER_SECONDS {
+        return Vec::new();
+    }
     let mut output = vec![0.0; ((seconds + TAIL_SECONDS) * SAMPLE_RATE as f32).ceil() as usize * 2];
     let mut envelopes = std::collections::BTreeMap::<(usize, u8), Vec<(usize, f32)>>::new();
     for c in &timeline.controls {

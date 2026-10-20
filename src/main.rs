@@ -443,7 +443,7 @@ pub(crate) fn export_to_with_layout(
     let data = match ext.as_str() {
         "encore" | "json" => return score.save(path),
         "musicxml" | "xml" => export::musicxml(score).into_bytes(),
-        "mid" | "midi" => export::midi(score),
+        "mid" | "midi" => export::midi(score)?,
         "wav" => synth::wav(&engine.render(score)?),
         "pdf" | "svg" => {
             let pages = engraving::engrave(

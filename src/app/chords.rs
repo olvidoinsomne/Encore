@@ -82,6 +82,9 @@ impl EncoreApp {
             slot: self.chord_editor.slot,
             ..Default::default()
         };
+        if self.score.parts[anchor.part].percussion.is_some() {
+            editor.play = false;
+        }
         if let Some(mut symbol) = found {
             if let Err(error) = chords::transpose_symbol(&mut symbol, self.entry_transposition()) {
                 editor.error = error;
@@ -352,7 +355,7 @@ impl EncoreApp {
 if response.changed(){self.chord_editor.frame=None;}
 if response.lost_focus()&&ui.input(|input|input.key_pressed(egui::Key::Enter)){apply=true;}
         ui.horizontal(|ui|{for label in["C","Am","Fmaj7","G7","Dm7","N.C."]{if ui.small_button(label).clicked(){self.chord_editor.draft=label.into();self.chord_editor.frame=None;}}});
-        ui.horizontal(|ui|{ui.checkbox(&mut self.chord_editor.visible,"Print symbol");ui.checkbox(&mut self.chord_editor.play,"Play harmony");ui.checkbox(&mut self.chord_editor.show_frame,"Print fretboard");});
+        ui.horizontal(|ui|{ui.checkbox(&mut self.chord_editor.visible,"Print symbol");ui.add_enabled(self.score.parts[anchor.part].percussion.is_none(),egui::Checkbox::new(&mut self.chord_editor.play,"Play harmony"));ui.checkbox(&mut self.chord_editor.show_frame,"Print fretboard");});
         ui.horizontal(|ui|{ui.label("Bass position");ui.selectable_value(&mut self.chord_editor.bass_style,BassStyle::Slash,"Slash");ui.selectable_value(&mut self.chord_editor.bass_style,BassStyle::Under,"Under");ui.selectable_value(&mut self.chord_editor.bass_style,BassStyle::LowerRight,"Lower right");});
         ui.horizontal(|ui|{ui.add(egui::DragValue::new(&mut self.chord_editor.offset[0]).range(-200.0..=200.0).prefix("Horizontal "));ui.add(egui::DragValue::new(&mut self.chord_editor.offset[1]).range(-200.0..=200.0).prefix("Vertical "));});
         ui.separator();ui.horizontal(|ui|{if ui.button("Suggest guitar shapes").clicked(){match chords::parse(&self.chord_editor.draft){Ok(chord)=>{self.chord_editor.suggestions=chords::suggest_fretboards(&chord);self.chord_editor.suggestion=0;self.chord_editor.frame=self.chord_editor.suggestions.first().cloned();
@@ -393,6 +396,35 @@ if ui.button("Type on score").clicked(){self.chord_editor.open=false;}});ui.smal
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn silent_harmony_over_drums_uses_written_part_pitch_while_drum_tokens_stay_fixed() {
+        let mut score = Score::blank();
+        score.parts[0].percussion = Some(encore::percussion::Staff::general_midi());
+        let mut definition = encore::parts::default_definitions(&score)[0].clone();
+        definition.staves = vec![0, 1];
+        definition.transposition = encore::parts::Transposition {
+            semitones: 2,
+            diatonic_steps: 1,
+        };
+        score.notation.parts = vec![definition];
+        let mut app = EncoreApp::from_score(score, None, "Ready".into());
+        app.part_view = true;
+        app.active_part = 0;
+        app.entry_pitch = encore::percussion::token(38);
+        app.apply_entry_command(EntryCommand::Enter);
+        app.open_chords();
+        app.chord_editor.draft = "D7/F#".into();
+        assert!(!app.chord_editor.play);
+        assert!(app.apply_chord_draft());
+        assert_eq!(app.score.notation.chords[0].chord.label(), "C7/E");
+        assert_eq!(
+            app.score.parts[0].measures[0].notes[0].pitches,
+            vec![encore::percussion::token(38)]
+        );
+        app.load_chord_draft();
+        assert_eq!(app.chord_editor.draft, "D7/F#");
+        app.score.validate().unwrap();
+    }
     #[test]
     fn written_chord_entry_keeps_source_concert_and_undo_snapshots() {
         let mut app = EncoreApp::from_score(Score::blank(), None, "Ready".into());

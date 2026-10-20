@@ -93,6 +93,7 @@ pub fn carol_of_the_bells() -> Score {
         .map(|(instrument, name, volume, pan)| Part {
             name: name.into(),
             instrument,
+            percussion: None,
             clef: instrument.default_clef(),
             measures: vec![Measure::default(); BARS],
             volume,

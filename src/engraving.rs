@@ -7,12 +7,15 @@ use std::sync::Arc;
 
 mod articulations;
 mod chords;
+mod display;
 mod entry_style;
 mod expressions;
 mod grace;
 mod lines;
 mod lyrics;
 mod ornaments;
+#[cfg(test)]
+mod percussion_tests;
 mod repeats;
 mod slurs;
 #[cfg(test)]
@@ -75,8 +78,9 @@ pub struct StaffRegion {
     pub part: usize,
     pub measure: usize,
     pub x: f32,
-    /// Top staff line, in page coordinates.
+    /// Top of the logical five-line frame. A one-line staff uses its center.
     pub y: f32,
+    pub lines: u8,
     pub width: f32,
     pub spacing: f32,
     pub content_x: f32,
@@ -87,6 +91,28 @@ pub struct StaffRegion {
 }
 
 impl StaffRegion {
+    pub fn bottom_line_y(&self) -> f32 {
+        self.y
+            + if self.lines == 1 {
+                self.spacing * 2.0
+            } else {
+                self.spacing * 4.0
+            }
+    }
+    pub fn top_line_y(&self) -> f32 {
+        if self.lines == 1 {
+            self.y + self.spacing * 2.0
+        } else {
+            self.y
+        }
+    }
+    pub fn center_y(&self) -> f32 {
+        self.y + self.spacing * 2.0
+    }
+    /// Relative mapped sound position in half-spaces, positive upwards.
+    pub fn position_at_y(&self, y: f32) -> f32 {
+        (self.bottom_line_y() - y) / (self.spacing * 0.5).max(0.01)
+    }
     /// Voice collisions may move a head horizontally without moving its beat.
     pub fn x_at_anchor(&self, anchor: &crate::document::Anchor) -> f32 {
         self.x_at_tick(anchor.tick as f32)
@@ -165,6 +191,18 @@ fn temporal_spacing(
             }
         }
     }
+    let mut drum_widths = BTreeMap::<u32, f32>::new();
+    for part in parts {
+        if let Some(bar) = score.parts[*part].measures.get(measure) {
+            for note in &bar.notes {
+                let span = display::percussion_span(&score.parts[*part], &note.pitches);
+                drum_widths
+                    .entry(note.start)
+                    .and_modify(|w| *w = w.max(span))
+                    .or_insert(span);
+            }
+        }
+    }
     let mut lyric_widths = BTreeMap::<u32, f32>::new();
     let grace_widths = grace::widths(score, parts, measure);
     let ornament_widths = ornaments.widths(parts, measure);
@@ -221,6 +259,8 @@ fn temporal_spacing(
                 cumulative += grace_space;
             }
             cumulative += ornament_space;
+            cumulative += drum_widths.get(&previous).copied().unwrap_or(0.0)
+                + drum_widths.get(&time).copied().unwrap_or(0.0);
         }
         anchors.push((time as f32, cumulative));
         previous = time;
@@ -269,6 +309,13 @@ pub struct SlurHit {
     pub x: f32,
     pub y: f32,
 }
+#[derive(Clone, Debug)]
+pub struct SoundHit {
+    pub anchor: crate::document::Anchor,
+    pub sound_id: u8,
+    pub x: f32,
+    pub y: f32,
+}
 
 #[derive(Clone, Debug)]
 pub struct Page {
@@ -280,6 +327,7 @@ pub struct Page {
     pub grace_hits: Vec<GraceHit>,
     pub chord_hits: Vec<ChordHit>,
     pub slur_hits: Vec<SlurHit>,
+    pub sound_hits: Vec<SoundHit>,
 }
 
 impl Page {
@@ -293,6 +341,7 @@ impl Page {
             grace_hits: vec![],
             chord_hits: vec![],
             slur_hits: vec![],
+            sound_hits: vec![],
         }
     }
     fn line(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, width: f32, color: [u8; 3]) {
@@ -418,7 +467,7 @@ type VoiceOffsets = BTreeMap<(usize, usize), MeasureOffsets>;
 struct RenderContext<'a> {
     spacing: Vec<Arc<[(f32, f32)]>>,
     styles: EntryStyles<'a>,
-    pitches: crate::lines::PitchIndex,
+    pitches: display::Index,
     offsets: VoiceOffsets,
     ornaments: ornaments::Index<'a>,
 }
@@ -465,7 +514,7 @@ fn automatic_slur_above(score: &Score, anchor: crate::document::Anchor) -> bool 
 fn collision_offsets(
     score: &Score,
     parts: &[usize],
-    pitches: &crate::lines::PitchIndex,
+    pitches: &display::Index,
     styles: &EntryStyles<'_>,
     marks: &ornaments::Index<'_>,
 ) -> VoiceOffsets {
@@ -475,9 +524,9 @@ fn collision_offsets(
     for group in &score.notation.grace {
         let span = ornaments.entry(group.anchor).or_default();
         if group.placement == crate::grace::GracePlacement::Before {
-            span.0 = grace::width(group) + 6.0;
+            span.0 = grace::width(score, group) + 6.0;
         } else {
-            span.1 = grace::width(group) + 18.0;
+            span.1 = grace::width(score, group) + 18.0;
         }
     }
     for &part in parts {
@@ -506,15 +555,21 @@ fn collision_offsets(
                     let positions = n
                         .pitches
                         .iter()
-                        .map(|p| pitches.written_pitch(a, *p).staff_step())
+                        .map(|p| pitches.position(a, *p))
                         .collect::<Vec<_>>();
                     let style = styles.get(&a);
                     if style.is_some_and(|s| !s.visible) {
                         continue;
                     }
                     let scale = style.map_or(1.0, |s| s.scale);
-                    let chord_seconds = positions.windows(2).any(|p| (p[1] - p[0]).abs() == 1);
-                    let accidental = if style.is_some_and(|s| !s.accidentals.is_empty()) {
+                    let drum_span =
+                        display::percussion_span(&score.parts[part], &n.pitches) * scale;
+                    let chord_seconds = positions.windows(2).any(|p| {
+                        (p[1] - p[0]).abs() == 1 || (pitches.unpitched(part) && p[0] == p[1])
+                    });
+                    let accidental = if pitches.unpitched(part) {
+                        0.0
+                    } else if style.is_some_and(|s| !s.accidentals.is_empty()) {
                         30.0
                     } else if n
                         .pitches
@@ -530,7 +585,13 @@ fn collision_offsets(
                     let has_ornament =
                         ornament.0 > 0.0 || ornament.1 > 0.0 || mark.0 > 0.0 || mark.1 > 0.0;
                     let left = (6.0 * scale
-                        + if chord_seconds { 10.0 * scale } else { 0.0 }
+                        + if pitches.unpitched(part) {
+                            drum_span
+                        } else if chord_seconds {
+                            10.0 * scale
+                        } else {
+                            0.0
+                        }
                         + accidental
                         + ornament.0
                         + if ornament.0 > 0.0 {
@@ -539,9 +600,16 @@ fn collision_offsets(
                             0.0
                         })
                     .max(mark.0);
-                    let right =
-                        (7.0 * scale + if chord_seconds { 10.0 * scale } else { 0.0 } + ornament.1)
-                            .max(mark.1);
+                    let right = (7.0 * scale
+                        + if pitches.unpitched(part) {
+                            drum_span
+                        } else if chord_seconds {
+                            10.0 * scale
+                        } else {
+                            0.0
+                        }
+                        + ornament.1)
+                        .max(mark.1);
                     let mut offset = 0.0f32;
                     for (other, x, prior_right, prior_ornament) in &prior {
                         if has_ornament
@@ -609,7 +677,7 @@ pub fn engrave(score: &Score, options: &EngravingOptions) -> Vec<Page> {
     }
     let count = score.measure_count().max(1);
     let ticks = score.measure_ticks().max(1);
-    let pitches = crate::lines::PitchIndex::new(score);
+    let pitches = display::Index::new(score);
     let styles = score
         .notation
         .entries
@@ -628,7 +696,11 @@ pub fn engrave(score: &Score, options: &EngravingOptions) -> Vec<Page> {
         styles,
         ornaments,
     };
-    let key = score.key_fifths.clamp(-7, 7);
+    let key = if parts.iter().any(|p| score.parts[*p].percussion.is_none()) {
+        score.key_fifths.clamp(-7, 7)
+    } else {
+        0
+    };
     let label_x = layout.margins.left / scale;
     let left = label_x + if parts.len() == 1 { 46.0 } else { 85.0 };
     let right = (physical_w - layout.margins.right) / scale;
@@ -751,13 +823,18 @@ pub fn engrave(score: &Score, options: &EngravingOptions) -> Vec<Page> {
                     true,
                 );
             }
-            let first_y = cursor_y + staff_offsets[0];
-            let last_y = cursor_y + staff_offsets[chunk.len() - 1] + 40.0;
+            let first_y = context.pitches.top(chunk[0], cursor_y + staff_offsets[0]);
+            let last_y = context.pitches.bottom(
+                *chunk.last().unwrap(),
+                cursor_y + staff_offsets[chunk.len() - 1],
+            );
             if chunk.len() > 1 {
                 page.line(left - 4.0, first_y, left - 4.0, last_y, 1.3, INK);
                 if chunk.len() == 2
                     && score.parts[chunk[0]].instrument == crate::model::Instrument::Piano
                     && score.parts[chunk[1]].instrument == crate::model::Instrument::Piano
+                    && score.parts[chunk[0]].percussion.is_none()
+                    && score.parts[chunk[1]].percussion.is_none()
                 {
                     brace(page, left - 14.0, first_y, last_y);
                 } else {
@@ -771,6 +848,8 @@ pub fn engrave(score: &Score, options: &EngravingOptions) -> Vec<Page> {
                     if score.parts[chunk[pair]].instrument == crate::model::Instrument::Piano
                         && score.parts[chunk[pair + 1]].instrument
                             == crate::model::Instrument::Piano
+                        && score.parts[chunk[pair]].percussion.is_none()
+                        && score.parts[chunk[pair + 1]].percussion.is_none()
                         && score.parts[chunk[pair]].clef == Clef::Treble
                         && score.parts[chunk[pair + 1]].clef == Clef::Bass
                     {
@@ -808,19 +887,30 @@ pub fn engrave(score: &Score, options: &EngravingOptions) -> Vec<Page> {
                 if !name2.is_empty() {
                     page.text(label_x, y + 31.0, name2, 11.0, INK, true);
                 }
-                for line in 0..5 {
-                    page.line(
-                        left,
-                        y + line as f32 * SPACING,
-                        right,
-                        y + line as f32 * SPACING,
-                        0.7,
-                        STAFF,
-                    );
+                let one_line = context.pitches.lines(part_index) == 1;
+                let line_top = context.pitches.top(part_index, y);
+                let line_bottom = context.pitches.bottom(part_index, y);
+                for line in 0..if one_line { 1 } else { 5 } {
+                    let line_y = if one_line {
+                        y + 20.0
+                    } else {
+                        y + line as f32 * SPACING
+                    };
+                    page.line(left, line_y, right, line_y, 0.7, STAFF);
                 }
-                page.line(left, y, left, y + 40.0, 1.0, INK);
-                clef(page, left + 17.0, y, part.clef);
-                key_signature(page, left + 38.0, y, part.clef, key);
+                let bar_top = if one_line { line_top - 5.0 } else { line_top };
+                let bar_bottom = if one_line {
+                    line_bottom + 5.0
+                } else {
+                    line_bottom
+                };
+                page.line(left, bar_top, left, bar_bottom, 1.0, INK);
+                if part.percussion.is_some() {
+                    percussion_clef(page, left + 17.0, y + 20.0);
+                } else {
+                    clef(page, left + 17.0, y, part.clef);
+                    key_signature(page, left + 38.0, y, part.clef, key);
+                }
                 if measure == 0 {
                     time_signature(
                         page,
@@ -836,6 +926,7 @@ pub fn engrave(score: &Score, options: &EngravingOptions) -> Vec<Page> {
                     let content_x = x
                         + if offset == 0 { header } else { 13.0 }
                         + grace::prefix(score, &parts, m)
+                        + percussion_prefix(score, &parts, m)
                         + context
                             .ornaments
                             .widths(&parts, m)
@@ -843,6 +934,7 @@ pub fn engrave(score: &Score, options: &EngravingOptions) -> Vec<Page> {
                             .map_or(0.0, |w| w.0);
                     let content_width = (width - (content_x - x) - 12.0).max(20.0);
                     let region = StaffRegion {
+                        lines: context.pitches.lines(part_index),
                         part: part_index,
                         measure: m,
                         x,
@@ -871,10 +963,24 @@ pub fn engrave(score: &Score, options: &EngravingOptions) -> Vec<Page> {
                     draw_measure(page, score, &region, options, &context);
                     page.staves.push(region);
                     if m + 1 == count {
-                        page.line(x + width - 5.0, y, x + width - 5.0, y + 40.0, 0.8, INK);
-                        page.line(x + width - 1.5, y, x + width - 1.5, y + 40.0, 2.8, INK);
+                        page.line(
+                            x + width - 5.0,
+                            bar_top,
+                            x + width - 5.0,
+                            bar_bottom,
+                            0.8,
+                            INK,
+                        );
+                        page.line(
+                            x + width - 1.5,
+                            bar_top,
+                            x + width - 1.5,
+                            bar_bottom,
+                            2.8,
+                            INK,
+                        );
                     } else {
-                        page.line(x + width, y, x + width, y + 40.0, 0.9, INK);
+                        page.line(x + width, bar_top, x + width, bar_bottom, 0.9, INK);
                     }
                     x += width;
                 }
@@ -913,6 +1019,19 @@ pub fn engrave(score: &Score, options: &EngravingOptions) -> Vec<Page> {
     }
     finish_layout_pages(&mut pages, score, &layout, scale);
     pages
+}
+
+fn percussion_prefix(score: &Score, parts: &[usize], measure: usize) -> f32 {
+    parts
+        .iter()
+        .filter_map(|p| score.parts[*p].measures.get(measure).map(|m| (*p, m)))
+        .flat_map(|(p, m)| {
+            m.notes
+                .iter()
+                .filter(|n| n.start == 0)
+                .map(move |n| display::percussion_span(&score.parts[p], &n.pitches))
+        })
+        .fold(0.0, f32::max)
 }
 
 fn system_measure_widths(
@@ -1011,6 +1130,10 @@ fn scale_page(page: &mut Page, scale: f32) {
         hit.height *= scale;
     }
     for hit in &mut page.slur_hits {
+        hit.x *= scale;
+        hit.y *= scale;
+    }
+    for hit in &mut page.sound_hits {
         hit.x *= scale;
         hit.y *= scale;
     }
@@ -1144,7 +1267,14 @@ fn system_layout(
                     .any(|note| !note.pitches.is_empty() && note.velocity > 0)
                 {
                     below = below.max(
-                        staff_dynamic_baseline(&bar.notes, part.clef, 0.0, multiple_layers) + 7.0,
+                        staff_dynamic_baseline(
+                            &bar.notes,
+                            &context.pitches,
+                            p,
+                            m,
+                            0.0,
+                            multiple_layers,
+                        ) + 7.0,
                     );
                 }
                 for note in &bar.notes {
@@ -1173,9 +1303,7 @@ fn system_layout(
                     let ys: Vec<f32> = note
                         .pitches
                         .iter()
-                        .map(|p| {
-                            pitch_y(&context.pitches.written_pitch(anchor, *p), part.clef, 0.0)
-                        })
+                        .map(|p| context.pitches.y(anchor, *p, 0.0))
                         .collect();
                     let automatic = default_stem_up(
                         paired,
@@ -1260,12 +1388,14 @@ fn system_layout(
                     let content_x = x
                         + if offset == 0 { header } else { 13.0 }
                         + grace::prefix(score, parts, m)
+                        + percussion_prefix(score, parts, m)
                         + context
                             .ornaments
                             .widths(parts, m)
                             .get(&0)
                             .map_or(0.0, |w| w.0);
                     let region = StaffRegion {
+                        lines: context.pitches.lines(p),
                         part: p,
                         measure: m,
                         x,
@@ -1373,7 +1503,11 @@ fn draw_measure(
         whole_rest(
             page,
             region.content_x + region.content_width * 0.5,
-            region.y + 10.0,
+            if region.lines == 1 {
+                region.center_y()
+            } else {
+                region.y + 10.0
+            },
         );
         return;
     }
@@ -1407,7 +1541,14 @@ fn draw_measure(
                 .last_key_value()
                 .map(|(_, note)| crate::model::dynamic_name(note.velocity))
         });
-    let baseline = staff_dynamic_baseline(&measure.notes, part.clef, region.y, layers.len() > 1);
+    let baseline = staff_dynamic_baseline(
+        &measure.notes,
+        &context.pitches,
+        region.part,
+        region.measure,
+        region.y,
+        layers.len() > 1,
+    );
     for (start, mark) in staff_dynamic_changes(&measure.notes, &mut previous) {
         let x = region.x_at_tick(start as f32);
         dynamic(page, x - 4.0, baseline, mark);
@@ -1438,7 +1579,11 @@ fn draw_measure_layer(
         whole_rest(
             page,
             region.content_x + region.content_width * 0.5,
-            region.y + 10.0,
+            if region.lines == 1 {
+                region.center_y()
+            } else {
+                region.y + 10.0
+            },
         );
         return;
     }
@@ -1496,13 +1641,7 @@ fn draw_measure_layer(
         let ys: Vec<f32> = note
             .pitches
             .iter()
-            .map(|p| {
-                pitch_y(
-                    &context.pitches.written_pitch(anchor, *p),
-                    part.clef,
-                    region.y,
-                )
-            })
+            .map(|p| context.pitches.y(anchor, *p, region.y))
             .collect();
         let mid = if ys.is_empty() {
             rest_region.y + 20.0
@@ -1529,57 +1668,91 @@ fn draw_measure_layer(
             );
         }
         if note.pitches.is_empty() {
-            rest(page, x, rest_region.y, note.duration, note.dotted);
+            rest(
+                page,
+                x,
+                rest_y(&rest_region, note.duration),
+                note.duration,
+                note.dotted,
+            );
         } else {
             let top = ys.iter().copied().fold(f32::INFINITY, f32::min);
             let bottom = ys.iter().copied().fold(f32::NEG_INFINITY, f32::max);
             let automatic = default_stem_up(paired, note, mid - region.y, multiple_layers);
             let up = entry_style::stem_up(style, automatic);
             let mut sorted: Vec<usize> = (0..note.pitches.len()).collect();
-            sorted.sort_by_key(|&i| note.pitches[i].staff_step());
+            sorted.sort_by_key(|&i| context.pitches.position(anchor, note.pitches[i]));
             let mut last_step = None;
             let mut displaced = false;
+            let drum_columns = context.pitches.columns(anchor, &note.pitches);
             for &i in &sorted {
                 let source_pitch = &note.pitches[i];
                 let written_pitch = context.pitches.written_pitch(anchor, *source_pitch);
                 let pitch = &written_pitch;
                 let py = ys[i];
-                if last_step.is_some_and(|s: i32| (pitch.staff_step() - s).abs() == 1) {
+                let position = context.pitches.position(anchor, *source_pitch);
+                if last_step.is_some_and(|s: i32| {
+                    (position - s).abs() == 1
+                        || (context.pitches.unpitched(anchor.part) && position == s)
+                }) {
                     displaced = !displaced;
                 } else {
                     displaced = false;
                 }
-                let hx = x + if displaced {
-                    if up { 10.0 } else { -10.0 }
+                let hx = if context.pitches.unpitched(region.part) {
+                    x + drum_columns[i] * 10.0 * style.scale * if up { 1.0 } else { -1.0 }
                 } else {
-                    0.0
+                    x + if displaced {
+                        if up { 10.0 } else { -10.0 }
+                    } else {
+                        0.0
+                    }
                 };
-                ledger_lines(page, hx, py, region.y);
-                let expected = *accidental_state
-                    .get(&(pitch.staff_step(), pitch.octave))
-                    .unwrap_or(&key_alter(pitch.step, score.key_fifths));
-                let display = style.accidental(source_pitch.midi());
-                let parenthesis_space = if matches!(
-                    display,
-                    crate::entry_style::AccidentalDisplay::Courtesy
-                        | crate::entry_style::AccidentalDisplay::Parenthesized
-                ) {
-                    10.0
+                if context.pitches.unpitched(region.part) {
+                    page.sound_hits.push(SoundHit {
+                        anchor,
+                        sound_id: source_pitch.midi(),
+                        x: hx,
+                        y: py,
+                    });
+                }
+                if !context.pitches.unpitched(region.part) {
+                    ledger_lines(page, hx, py, region.y);
+                    let expected = *accidental_state
+                        .get(&(pitch.staff_step(), pitch.octave))
+                        .unwrap_or(&key_alter(pitch.step, score.key_fifths));
+                    let display = style.accidental(source_pitch.midi());
+                    let parenthesis_space = if matches!(
+                        display,
+                        crate::entry_style::AccidentalDisplay::Courtesy
+                            | crate::entry_style::AccidentalDisplay::Parenthesized
+                    ) {
+                        10.0
+                    } else {
+                        0.0
+                    };
+                    entry_style::draw_accidental(
+                        page,
+                        display,
+                        x - 14.0 - parenthesis_space - (i % 2) as f32 * 3.0,
+                        py,
+                        pitch.alter,
+                        expected != pitch.alter,
+                    );
+                    accidental_state.insert((pitch.staff_step(), pitch.octave), pitch.alter);
+                }
+                let mapped = context.pitches.head(anchor, *source_pitch, style.notehead);
+                let mut mapped_style;
+                let head_style = if mapped == style.notehead {
+                    style
                 } else {
-                    0.0
+                    mapped_style = style.clone();
+                    mapped_style.notehead = mapped;
+                    &mapped_style
                 };
-                entry_style::draw_accidental(
-                    page,
-                    display,
-                    x - 14.0 - parenthesis_space - (i % 2) as f32 * 3.0,
-                    py,
-                    pitch.alter,
-                    expected != pitch.alter,
-                );
-                accidental_state.insert((pitch.staff_step(), pitch.octave), pitch.alter);
                 entry_style::draw_notehead(
                     page,
-                    style,
+                    head_style,
                     hx,
                     py,
                     matches!(
@@ -1608,15 +1781,15 @@ fn draw_measure_layer(
                         0.0,
                     );
                 }
-                last_step = Some(pitch.staff_step());
+                last_step = Some(position);
             }
             articulations::draw(
                 page,
                 note,
                 x,
                 articulations::Placement {
-                    staff_top: region.y,
-                    staff_bottom: region.y + 40.0,
+                    staff_top: region.top_line_y(),
+                    staff_bottom: region.bottom_line_y(),
                     top_note_y: top,
                     bottom_note_y: bottom,
                     stem_up: up,
@@ -1625,7 +1798,13 @@ fn draw_measure_layer(
             let below = match style.tie_direction {
                 crate::slurs::SlurDirection::Above => false,
                 crate::slurs::SlurDirection::Below => true,
-                crate::slurs::SlurDirection::Auto => up,
+                crate::slurs::SlurDirection::Auto => {
+                    if context.pitches.unpitched(region.part) && paired & (1 << note.layer) != 0 {
+                        note.voice == 1
+                    } else {
+                        up
+                    }
+                }
             };
             let tie_y = if below { bottom + 7.0 } else { top - 7.0 };
             if let Some(ties) = &style.tie_pitches {
@@ -1636,11 +1815,8 @@ fn draw_measure_layer(
                         region,
                         note,
                         x,
-                        pitch_y(
-                            &context.pitches.written_pitch(anchor, *pitch),
-                            part.clef,
-                            region.y,
-                        ) + if below { 7.0 } else { -7.0 },
+                        context.pitches.y(anchor, *pitch, region.y)
+                            + if below { 7.0 } else { -7.0 },
                         below,
                     );
                 }
@@ -1687,11 +1863,8 @@ fn draw_measure_layer(
                                 page,
                                 (x - 24.0).max(region.x + 2.0),
                                 x - 8.0,
-                                pitch_y(
-                                    &context.pitches.written_pitch(anchor, *pitch),
-                                    part.clef,
-                                    region.y,
-                                ) + if below { 7.0 } else { -7.0 },
+                                context.pitches.y(anchor, *pitch, region.y)
+                                    + if below { 7.0 } else { -7.0 },
                                 below,
                             );
                         }
@@ -1789,10 +1962,10 @@ fn draw_measure_layer(
 fn draw_tuplets(
     page: &mut Page,
     region: &StaffRegion,
-    clef: Clef,
+    _clef: Clef,
     notes: &[&Note],
     below: bool,
-    pitches: &crate::lines::PitchIndex,
+    pitches: &display::Index,
 ) {
     let anchor = |n: &Note| crate::document::Anchor {
         part: region.part,
@@ -1828,10 +2001,9 @@ fn draw_tuplets(
             .flat_map(|note| {
                 note.pitches
                     .iter()
-                    .map(|p| pitches.written_pitch(anchor(note), *p))
+                    .map(|p| pitches.y(anchor(note), *p, region.y))
             })
-            .map(|pitch| pitch_y(&pitch, clef, region.y))
-            .fold(region.y, f32::min);
+            .fold(region.top_line_y(), f32::min);
         let max_flags = notes[first..index]
             .iter()
             .map(|note| note.duration.flags())
@@ -1842,10 +2014,9 @@ fn draw_tuplets(
             .flat_map(|note| {
                 note.pitches
                     .iter()
-                    .map(|p| pitches.written_pitch(anchor(note), *p))
+                    .map(|p| pitches.y(anchor(note), *p, region.y))
             })
-            .map(|pitch| pitch_y(&pitch, clef, region.y))
-            .fold(region.y + 40.0, f32::max);
+            .fold(region.bottom_line_y(), f32::max);
         let y = if below {
             lowest + 46.0 + max_flags.saturating_sub(2) as f32 * 7.0
         } else {
@@ -1913,7 +2084,14 @@ fn articulation_clearance(note: &Note) -> Option<f32> {
     Some(16.0 + count.saturating_sub(1) as f32 * 11.0 + if staccato_dot { 9.0 } else { 0.0 })
 }
 
-fn staff_dynamic_baseline(notes: &[Note], clef: Clef, y: f32, multiple_layers: bool) -> f32 {
+fn staff_dynamic_baseline(
+    notes: &[Note],
+    display: &display::Index,
+    part: usize,
+    measure: usize,
+    y: f32,
+    multiple_layers: bool,
+) -> f32 {
     let paired = paired_layers(notes);
     notes
         .iter()
@@ -1922,7 +2100,19 @@ fn staff_dynamic_baseline(notes: &[Note], clef: Clef, y: f32, multiple_layers: b
             let (bottom, sum) = note
                 .pitches
                 .iter()
-                .map(|pitch| pitch_y(pitch, clef, y))
+                .map(|pitch| {
+                    display.y(
+                        crate::document::Anchor {
+                            part,
+                            measure,
+                            tick: note.start,
+                            layer: note.layer,
+                            voice: note.voice,
+                        },
+                        *pitch,
+                        y,
+                    )
+                })
                 .fold((f32::NEG_INFINITY, 0.0), |(bottom, sum), position| {
                     (bottom.max(position), sum + position)
                 });
@@ -1944,12 +2134,15 @@ fn staff_dynamic_baseline(notes: &[Note], clef: Clef, y: f32, multiple_layers: b
             };
             let baseline = bottom + stem_clearance.max(tuplet_clearance);
             if up && let Some(clearance) = articulation_clearance(note) {
-                baseline.max(bottom.max(y + 40.0) + clearance + 18.0)
+                baseline.max(bottom.max(display.bottom(part, y)) + clearance + 18.0)
             } else {
                 baseline
             }
         })
-        .fold(y + 65.0, f32::max)
+        .fold(
+            y + if display.lines(part) == 1 { 45.0 } else { 65.0 },
+            f32::max,
+        )
 }
 
 fn dynamic_change(previous: &mut Option<&'static str>, note: &Note) -> Option<&'static str> {
@@ -2118,9 +2311,17 @@ fn gap_rests(page: &mut Page, r: &StaffRegion, mut from: u32, to: u32) {
             break;
         };
         let x = r.x_at_tick(from as f32);
-        rest(page, x, r.y, duration, false);
+        rest(page, x, rest_y(r, duration), duration, false);
         from = from.saturating_add(duration.ticks());
     }
+}
+fn rest_y(region: &StaffRegion, duration: Duration) -> f32 {
+    region.y
+        + if region.lines == 1 && duration == Duration::Whole {
+            10.0
+        } else {
+            0.0
+        }
 }
 
 fn note_head(page: &mut Page, x: f32, y: f32, open: bool, whole: bool, color: [u8; 3]) {
@@ -2557,6 +2758,23 @@ fn key_signature(page: &mut Page, x: f32, y: f32, clef: Clef, fifths: i8) {
             x + i as f32 * 7.0,
             py,
             if fifths >= 0 { 1 } else { -1 },
+        );
+    }
+}
+
+fn percussion_clef(page: &mut Page, x: f32, center: f32) {
+    for dx in [-4.0, 4.0] {
+        page.path(
+            vec![
+                (x + dx - 1.7, center - 12.0),
+                (x + dx + 1.7, center - 12.0),
+                (x + dx + 1.7, center + 12.0),
+                (x + dx - 1.7, center + 12.0),
+            ],
+            true,
+            Some(INK),
+            None,
+            0.0,
         );
     }
 }

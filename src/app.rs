@@ -21,6 +21,7 @@ mod navigation;
 mod notation;
 mod ornaments;
 mod parts;
+mod percussion;
 mod playback;
 mod regions;
 mod style;
@@ -166,6 +167,7 @@ pub struct EncoreApp {
     grace_editor: grace::Editor,
     lines_editor: lines::Editor,
     ornaments_editor: ornaments::Editor,
+    percussion_editor: percussion::Editor,
     master: f32,
     theme: Theme,
     needs_native_save: bool,
@@ -187,6 +189,7 @@ pub struct EncoreApp {
     cached_selection: Option<Selection>,
     cached_filter: Option<usize>,
     preview_sample: Option<(Instrument, u8)>,
+    preview_percussion: Option<(usize, u8)>,
     audition_playback: Option<synth::Playback>,
     audition_worker: Option<mpsc::Receiver<AuditionResult>>,
     audio_engine: AudioEngine,
@@ -278,6 +281,7 @@ impl EncoreApp {
             grace_editor: Default::default(),
             lines_editor: Default::default(),
             ornaments_editor: Default::default(),
+            percussion_editor: Default::default(),
             master: 0.8,
             theme: Theme::Dark,
             needs_native_save: false,
@@ -299,6 +303,7 @@ impl EncoreApp {
             cached_selection: None,
             cached_filter: None,
             preview_sample: None,
+            preview_percussion: None,
             audition_playback: None,
             audition_worker: None,
             audio_engine: AudioEngine::Procedural,
@@ -420,6 +425,8 @@ impl EncoreApp {
         self.grace_editor = Default::default();
         self.lines_editor = Default::default();
         self.ornaments_editor = Default::default();
+        self.percussion_editor = Default::default();
+        self.preview_percussion = None;
         self.cursor_measure = 0;
         self.cursor_tick = 0;
         self.undo.clear();
@@ -433,6 +440,7 @@ impl EncoreApp {
             self.midi_import = Some(path);
             self.midi_grid = None;
             self.midi_import_error = None;
+            self.percussion_editor.open = false;
             self.properties = false;
             self.help = false;
             self.show_history = false;
@@ -1081,7 +1089,7 @@ impl EncoreApp {
             if self.rest {
                 "Rest".into()
             } else {
-                pitch.name()
+                self.percussion_name(part, pitch)
             },
             self.cursor_measure + 1,
             self.cursor_tick as f32 / PPQ as f32 + 1.0
@@ -1089,6 +1097,10 @@ impl EncoreApp {
     }
 
     fn transpose(&mut self, semitones: i8) {
+        if self.active_percussion().is_some() {
+            self.status = "Choose another percussion sound; drum IDs cannot be transposed.".into();
+            return;
+        }
         if self.selected_entry().is_some_and(|note| {
             note.pitches
                 .iter()
@@ -1158,6 +1170,7 @@ impl EncoreApp {
             || self.grace_editor.open
             || self.lines_editor.open
             || self.ornaments_editor.open
+            || self.percussion_editor.open
         {
             return;
         }
@@ -1214,6 +1227,7 @@ impl EncoreApp {
                 || self.grace_editor.open
                 || self.lines_editor.open
                 || self.ornaments_editor.open
+                || self.percussion_editor.open
             {
                 break;
             }
@@ -1994,14 +2008,11 @@ impl EncoreApp {
                             }
                         });
                     ui.separator();
-                    for (a, name) in [
-                        (None, "Key"),
-                        (Some(-1), "♭"),
-                        (Some(0), "♮"),
-                        (Some(1), "♯"),
-                    ] {
-                        ui.selectable_value(&mut self.accidental, a, name);
-                    }
+                    if self.active_percussion().is_none() {
+                        for (a, name) in [(None, "Key"), (Some(-1), "♭"), (Some(0), "♮"), (Some(1), "♯")] {
+                            ui.selectable_value(&mut self.accidental, a, name);
+                        }
+                    } else if ui.button("Percussion map…").clicked() { self.open_percussion(); }
                 });
             });
     }
@@ -2033,6 +2044,9 @@ impl EncoreApp {
                     });
                 });
                 ui.add_space(10.0);
+                if ui.button("+  Drum staff").clicked() {
+                    self.add_percussion_staff();
+                }
                 egui::ScrollArea::vertical()
                     .id_salt("part-list")
                     .max_height((ui.available_height() - 245.0).max(100.0))
@@ -2072,9 +2086,13 @@ impl EncoreApp {
                                         self.cursor_tick = 0;
                                     }
                                     ui.label(
-                                        RichText::new(part.instrument.name())
-                                            .size(11.0)
-                                            .color(colors.muted),
+                                        RichText::new(if part.percussion.is_some() {
+                                            "Sampled drum kit"
+                                        } else {
+                                            part.instrument.name()
+                                        })
+                                        .size(11.0)
+                                        .color(colors.muted),
                                     );
                                     ui.horizontal(|ui| {
                                         ui.toggle_value(&mut part.muted, "M")
@@ -2148,6 +2166,7 @@ impl EncoreApp {
         }
         let colors = Palette::for_context(ctx);
         let written_interval = self.entry_transposition();
+        let drum_map = self.active_percussion().cloned();
         let previous_anchor = self
             .selected
             .and_then(|selection| encore::document::Anchor::from_selection(&self.score, selection));
@@ -2158,11 +2177,11 @@ impl EncoreApp {
             let mut remove = false;
             if let Some(s) = self.selected {
                 if let Some(n) = self.score.parts.get_mut(s.part).and_then(|p| p.measures.get_mut(s.measure)).and_then(|m| m.notes.get_mut(s.note)) {
-                    ui.label(RichText::new(if n.pitches.is_empty() { "Rest".into() } else { n.pitches.iter().map(|p| p.name()).collect::<Vec<_>>().join(" · ") }).size(21.0).strong());
+                    ui.label(RichText::new(if n.pitches.is_empty() { "Rest".into() } else { n.pitches.iter().map(|p| drum_map.as_ref().and_then(|map|map.sound(p.midi())).map_or_else(||p.name(),|sound|sound.name.clone())).collect::<Vec<_>>().join(" · ") }).size(21.0).strong());
                     ui.label(RichText::new(format!("Measure {}  ·  Beat {:.2}", s.measure+1,n.start as f32 / PPQ as f32 + 1.0)).size(12.0).color(colors.muted));
                     ui.add_space(14.0);
                     let original = n.clone();
-                    if n.pitches.len()>1 {egui::ComboBox::from_id_salt("chord-pitch").selected_text(format!("Edit pitch: {}",self.entry_pitch.name())).show_ui(ui,|ui|{for pitch in &n.pitches{if ui.selectable_value(&mut self.entry_pitch,*pitch,pitch.name()).changed(){self.octave=written_interval.written_pitch(*pitch).map_or(pitch.octave,|written|written.octave);}}});}
+                    if n.pitches.len()>1 {egui::ComboBox::from_id_salt("chord-pitch").selected_text(if drum_map.is_some(){"Edit sound".into()}else{format!("Edit pitch: {}",self.entry_pitch.name())}).show_ui(ui,|ui|{for pitch in &n.pitches{let label=drum_map.as_ref().and_then(|map|map.sound(pitch.midi())).map_or_else(||pitch.name(),|sound|sound.name.clone());if ui.selectable_value(&mut self.entry_pitch,*pitch,label).changed() && drum_map.is_none(){self.octave=written_interval.written_pitch(*pitch).map_or(pitch.octave,|written|written.octave);}}});}
                     egui::ComboBox::from_label("Duration").selected_text(n.duration.name()).show_ui(ui, |ui| { for &d in Duration::ALL { ui.selectable_value(&mut n.duration, d, d.name()); } });
                     ui.label(format!("Voice {}", n.voice+1));
                     egui::ComboBox::from_id_salt("note-layer").selected_text(format!("Layer {}",n.layer+1)).show_ui(ui,|ui|{for layer in 0..4{ui.selectable_value(&mut n.layer,layer,format!("Layer {}",layer+1));}});
@@ -2187,28 +2206,32 @@ impl EncoreApp {
                     let m = &self.score.parts[s.part].measures[s.measure];
                     let n = &m.notes[s.note];
                     if m.notes.iter().enumerate().any(|(i,x)| i!=s.note && n.lane()==x.lane() && n.start < x.start+x.ticks() && n.start+n.ticks()>x.start) { self.score.parts[s.part].measures[s.measure].notes[s.note] = original; self.status = "That duration overlaps the next event.".into(); }
-                    ui.add_space(12.0); ui.horizontal(|ui| { if ui.button("− semitone").clicked() { self.transpose(-1); }
+                    if drum_map.is_none() {ui.add_space(12.0); ui.horizontal(|ui| { if ui.button("− semitone").clicked() { self.transpose(-1); }
  if ui.button("+").clicked() { self.transpose(1); } });
                     ui.horizontal(|ui| { if ui.button("− octave").clicked() { self.transpose(-12); }
- if ui.button("+").clicked() { self.transpose(12); } });
+ if ui.button("+").clicked() { self.transpose(12); } });}
                     if ui.button("Delete note").clicked() { remove = true; }
                 }
             } else {
                 ui.label(RichText::new("Make your mark.").size(19.0).strong());
                 ui.add_space(8.0); ui.label("Choose Write, then click a staff to enter a note. Select a note to edit its expression here.");
-                ui.add_space(12.0); ui.label(RichText::new("Shift-click adds a chord tone.\nA–G enters notes at the cursor.\n0–8 chooses duration (5 = quarter).\n↑ / ↓ moves by a diatonic step.").size(12.0).color(colors.muted));
+                ui.add_space(12.0); ui.label(RichText::new(if drum_map.is_some(){"Choose a named sound below.\nEnter uses the selected sound.\n0–8 chooses duration (5 = quarter).\n↑ / ↓ selects a mapped sound."}else{"Shift-click adds a chord tone.\nA–G enters notes at the cursor.\n0–8 chooses duration (5 = quarter).\n↑ / ↓ moves by a diatonic step."}).size(12.0).color(colors.muted));
             }
             if remove { self.delete_selected(); }
             ui.add_space(20.0); ui.separator(); ui.add_space(14.0);
             let part = &mut self.score.parts[self.active_part];
             ui.label(RichText::new("STAFF").size(11.0).strong().color(colors.muted));
             ui.text_edit_singleline(&mut part.name);
-            egui::ComboBox::from_id_salt("instrument-select").selected_text(part.instrument.name()).show_ui(ui, |ui| { for &i in Instrument::ALL { ui.selectable_value(&mut part.instrument, i, i.name()); } });
-            egui::ComboBox::from_label("Clef").selected_text(format!("{:?}",part.clef)).show_ui(ui, |ui| { for c in [Clef::Treble,Clef::Bass,Clef::Alto] { ui.selectable_value(&mut part.clef,c,format!("{c:?}")); } });
+            if part.percussion.is_none() {
+                egui::ComboBox::from_id_salt("instrument-select").selected_text(part.instrument.name()).show_ui(ui, |ui| { for &i in Instrument::ALL { ui.selectable_value(&mut part.instrument, i, i.name()); } });
+                egui::ComboBox::from_label("Clef").selected_text(format!("{:?}",part.clef)).show_ui(ui, |ui| { for c in [Clef::Treble,Clef::Bass,Clef::Alto] { ui.selectable_value(&mut part.clef,c,format!("{c:?}")); } });
+            } else {ui.label("Unpitched percussion");}
             ui.add(egui::Slider::new(&mut part.pan, -1.0..=1.0).text("pan"));
+            if ui.button("Percussion map…").clicked() {self.open_percussion();}
             if self.score.parts.len()>1 && ui.small_button("Remove this staff").clicked() { encore::document::remove_staff(&mut self.score, self.active_part); self.score.parts.remove(self.active_part); self.active_part=0; self.selected=None; self.clear_region_selection(); }
             ui.add_space(20.0); ui.label(RichText::new(format!("ENTRY CURSOR\nMeasure {}  ·  Beat {:.2}",self.cursor_measure+1,self.cursor_tick as f32 / PPQ as f32 +1.0)).size(11.0).color(colors.muted));
-            ui.add(egui::DragValue::new(&mut self.octave).range(0..=8).prefix("Octave "));
+            if drum_map.is_none() {ui.add(egui::DragValue::new(&mut self.octave).range(0..=8).prefix("Octave "));}
+            else {ui.label("Enter uses the selected percussion sound; Up/Down selects by printed position.");}
             });
         });
         if let Some(anchor) = previous_anchor
@@ -2343,6 +2366,10 @@ impl EncoreApp {
                     .inner_margin(egui::Margin::symmetric(20, 9)),
             )
             .show(ctx, |ui| {
+                if self.active_percussion().is_some() {
+                    self.percussion_palette(ui);
+                    return;
+                }
                 ui.horizontal(|ui| {
                     ui.label(
                         RichText::new("AUDITION")
@@ -2532,6 +2559,9 @@ impl EncoreApp {
                             projection.source_staves[hit.selection.anchor.part];
                     }
                     for hit in &mut page.chord_hits {
+                        hit.anchor.part = projection.source_staves[hit.anchor.part];
+                    }
+                    for hit in &mut page.sound_hits {
                         hit.anchor.part = projection.source_staves[hit.anchor.part];
                     }
                     for hit in &mut page.slur_hits {
@@ -2841,15 +2871,28 @@ impl EncoreApp {
                 }
                 return;
             }
+            let drum_hit = page
+                .sound_hits
+                .iter()
+                .min_by(|a, b| {
+                    Vec2::new(a.x - pos.x, a.y - pos.y)
+                        .length_sq()
+                        .total_cmp(&Vec2::new(b.x - pos.x, b.y - pos.y).length_sq())
+                })
+                .filter(|hit| Vec2::new(hit.x - pos.x, hit.y - pos.y).length() < 10.0)
+                .cloned();
             let nearest = page
                 .hits
                 .iter()
                 .map(|h| (h, Vec2::new(h.x - pos.x, h.y - pos.y).length()))
                 .filter(|(_, d)| *d < 14.0)
                 .min_by(|a, b| a.1.total_cmp(&b.1));
+            let hit_selection = drum_hit
+                .as_ref()
+                .and_then(|hit| hit.anchor.selection(&self.score))
+                .or_else(|| nearest.map(|(hit, _)| hit.selection));
             if !self.write_mode {
-                if let Some((h, _)) = nearest {
-                    let sel = h.selection;
+                if let Some(sel) = hit_selection {
                     if chord {
                         self.select_region_at(sel.part, sel.measure, true);
                         return;
@@ -2864,13 +2907,24 @@ impl EncoreApp {
                         self.score.parts[sel.part].measures[sel.measure].notes[sel.note].layer;
                     self.active_voice =
                         self.score.parts[sel.part].measures[sel.measure].notes[sel.note].voice;
-                    let pitch_index = projection
+                    let pitch_index = drum_hit
                         .as_ref()
-                        .and_then(|p| {
-                            p.project_selection(sel)
-                                .and_then(|display| p.source_pitch(display, 0))
+                        .and_then(|hit| {
+                            self.score.parts[sel.part].measures[sel.measure].notes[sel.note]
+                                .pitches
+                                .iter()
+                                .position(|pitch| pitch.midi() == hit.sound_id)
                         })
-                        .map_or(0, |(_, index)| index);
+                        .or_else(|| {
+                            projection
+                                .as_ref()
+                                .and_then(|p| {
+                                    p.project_selection(sel)
+                                        .and_then(|display| p.source_pitch(display, 0))
+                                })
+                                .map(|(_, index)| index)
+                        })
+                        .unwrap_or(0);
                     if let Some(pitch) = self.score.parts[sel.part].measures[sel.measure].notes
                         [sel.note]
                         .pitches
@@ -2910,7 +2964,7 @@ impl EncoreApp {
                     self.select_region_at(staff.part, staff.measure, chord);
                 }
             } else {
-                let hit = nearest.map(|(h, _)| h.selection);
+                let hit = hit_selection;
                 let staff = page
                     .staves
                     .iter()
@@ -2925,6 +2979,22 @@ impl EncoreApp {
                 {
                     let part = staff.part;
                     let measure = staff.measure;
+                    let drum_pitch = self.score.parts[part].percussion.as_ref().and_then(|map| {
+                        let position = staff.position_at_y(pos.y);
+                        map.sounds
+                            .iter()
+                            .min_by(|a, b| {
+                                let da = (f32::from(a.position) - position).abs();
+                                let db = (f32::from(b.position) - position).abs();
+                                da.total_cmp(&db)
+                                    .then_with(|| {
+                                        (b.id == self.entry_pitch.midi())
+                                            .cmp(&(a.id == self.entry_pitch.midi()))
+                                    })
+                                    .then_with(|| a.id.cmp(&b.id))
+                            })
+                            .map(|sound| encore::percussion::token(sound.id))
+                    });
                     let step0 = match self.score.parts[part].clef {
                         Clef::Treble => 30,
                         Clef::Bass => 18,
@@ -2938,8 +3008,11 @@ impl EncoreApp {
                         .map_or(self.score.key_fifths, |projection| {
                             projection.score.key_fifths
                         });
-                    let mut pitch = Pitch::from_staff_step(step, written_key);
-                    if let Some(alter) = self.accidental {
+                    let mut pitch =
+                        drum_pitch.unwrap_or_else(|| Pitch::from_staff_step(step, written_key));
+                    if drum_pitch.is_none()
+                        && let Some(alter) = self.accidental
+                    {
                         pitch.alter = alter;
                     }
                     let start =
@@ -3067,6 +3140,11 @@ impl EncoreApp {
     }
 
     fn replace_library_staff(&mut self) {
+        if self.active_percussion().is_some() {
+            self.status =
+                "Use Percussion map to change this staff's sampled kit or sound mappings.".into();
+            return;
+        }
         let part = &mut self.score.parts[self.active_part];
         if part.name == part.instrument.name() {
             part.name = self.lab_instrument.name().into();
@@ -3145,7 +3223,7 @@ impl EncoreApp {
 
                             ui.horizontal_wrapped(|ui| {
                                 if ui.add_enabled(self.score.parts.len() < MAX_PARTS, egui::Button::new("+  Add staff")).clicked() { self.add_library_staff(); }
-                                if ui.button("Use on active staff").on_hover_text("Change the current staff's instrument and clef; keep its notes").clicked() { self.replace_library_staff(); }
+                                if ui.add_enabled(self.active_percussion().is_none(),egui::Button::new("Use on active staff")).on_hover_text("Change a pitched staff's instrument and clef; use Percussion map for drum kits").clicked() { self.replace_library_staff(); }
                                 if ui.button("Export phrase…").clicked() { self.export_audition(); }
                             });
                             ui.add_space(8.0);
@@ -3390,6 +3468,7 @@ impl EncoreApp {
             });
         }
         self.reconcile_part_staff();
+        self.reconcile_percussion_caret();
         self.close_voiced_editors();
         self.keyboard(ctx);
         self.top(ctx);
@@ -3411,6 +3490,7 @@ impl EncoreApp {
         self.grace_dialog(ctx);
         self.lines_window(ctx);
         self.ornaments_window(ctx);
+        self.percussion_window(ctx);
         self.chord_dialog(ctx);
         self.instrument_lab(ctx);
         self.protect_voiced_music(&before);
@@ -3435,6 +3515,11 @@ impl EncoreApp {
         }
         if let Some(p) = self.audition_playback.as_mut() {
             p.set_volume(self.master);
+        }
+        if let Some((part, token)) = self.preview_percussion.take()
+            && let Some(staff) = self.score.parts.get(part).cloned()
+        {
+            self.audition_part(staff, token, self.lab_velocity, 0.9);
         }
         if let Some((instrument, midi)) = self.preview_sample.take() {
             self.audition(instrument, Some(midi), self.lab_velocity, 0.9);

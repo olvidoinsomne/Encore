@@ -17,6 +17,7 @@ pub(super) struct Styles {
 struct RawStyle {
     style: EntryStyle,
     pitches: Vec<(u8, bool)>,
+    native: bool,
 }
 impl Styles {
     pub fn xml(
@@ -37,6 +38,7 @@ impl Styles {
                 layer: 0,
             }),
             pitches: Vec::new(),
+            native: false,
         });
         if node.attribute("print-object") == Some("no") {
             raw.style.visible = false;
@@ -146,11 +148,21 @@ impl Styles {
                 if json.len() > 16 * 1024 {
                     return Err("Entry-style interchange metadata exceeds its limit.".into());
                 }
+                raw.native = true;
                 raw.style = serde_json::from_str(json)
                     .map_err(|error| format!("Invalid Encore entry style in MusicXML: {error}"))?;
             }
         }
         Ok(())
+    }
+    pub fn percussion_note(&mut self, at: &SourceAnchor, pitch: Pitch, tied: bool) {
+        if let Some(raw) = self.entries.get_mut(at) {
+            raw.pitches.push((pitch.midi(), tied));
+            if !raw.native {
+                raw.style.notehead = Notehead::Normal;
+                raw.style.accidentals.clear();
+            }
+        }
     }
     pub fn shift(&mut self, measure: usize, ticks: u32) {
         let entries = std::mem::take(&mut self.entries);

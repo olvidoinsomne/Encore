@@ -3,7 +3,7 @@ use super::*;
 use crate::{
     document::Anchor,
     expressions::Placement,
-    lines::{LineKind, PedalKind, PitchIndex},
+    lines::{LineKind, PedalKind},
 };
 pub(super) fn clearance(score: &Score, part: usize, measure: usize, bars: usize) -> (f32, f32) {
     let mut above = 0.0_f32;
@@ -79,20 +79,14 @@ fn wave(page: &mut Page, a: (f32, f32), b: (f32, f32)) {
     }
     page.path(points, false, None, Some(INK), 1.0);
 }
-fn endpoint(score: &Score, index: &PitchIndex, at: Anchor, region: &StaffRegion) -> f32 {
+fn endpoint(score: &Score, index: &display::Index, at: Anchor, region: &StaffRegion) -> f32 {
     crate::document::note_at(score, &at)
         .and_then(|n| n.pitches.first())
-        .map_or(region.y + 20.0, |pitch| {
-            pitch_y(
-                &index.written_pitch(at, *pitch),
-                score.parts[at.part].clef,
-                region.y,
-            )
-        })
+        .map_or(region.y + 20.0, |pitch| index.y(at, *pitch, region.y))
 }
 pub(super) fn draw(page: &mut Page, score: &Score) {
     let staves = page.staves.clone();
-    let index = PitchIndex::new(score);
+    let index = display::Index::new(score);
     let mut systems = BTreeMap::<(usize, u32), Vec<&StaffRegion>>::new();
     for r in &staves {
         systems.entry((r.part, r.y.to_bits())).or_default().push(r);

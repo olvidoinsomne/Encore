@@ -16,6 +16,7 @@ pub mod lyrics;
 pub mod model;
 pub mod ornaments;
 pub mod parts;
+pub mod percussion;
 pub mod performance;
 pub mod repeats;
 pub mod sampled;

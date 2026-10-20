@@ -61,12 +61,13 @@ impl Timeline {
     }
 }
 pub fn needed(score: &Score) -> bool {
-    score
-        .parts
-        .iter()
-        .flat_map(|part| &part.measures)
-        .flat_map(|measure| &measure.notes)
-        .any(|note| note.voice != 0)
+    score.parts.iter().any(|part| part.percussion.is_some())
+        || score
+            .parts
+            .iter()
+            .flat_map(|part| &part.measures)
+            .flat_map(|measure| &measure.notes)
+            .any(|note| note.voice != 0)
         || score.notation.chords.iter().any(|chord| chord.play)
         || score
             .notation
@@ -86,6 +87,87 @@ pub fn needed(score: &Score) -> bool {
             .iter()
             .any(|e| e.kind == ExpressionKind::Technique && technique(&e.text).is_some())
 }
+/// One merged kit-channel command. None velocity is note-off.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct DrumEvent {
+    pub tick: u64,
+    pub key: u8,
+    pub velocity: Option<u8>,
+}
+/// All notation voices share a physical kit. A repeated key supersedes its old
+/// gate, so an older written voice's note-off cannot cut the newer strike.
+/// Quantizing first also coalesces sub-tick/frame simultaneous note-ons.
+pub(crate) fn drum_events(
+    timeline: &Timeline,
+    part: usize,
+    quantize: impl Fn(f64) -> u64,
+) -> Vec<DrumEvent> {
+    let mut strikes = BTreeMap::<(u64, u8), (u8, u64)>::new();
+    for n in timeline
+        .notes
+        .iter()
+        .filter(|n| n.anchor.part == part && n.velocity > 0)
+    {
+        let start = quantize(n.start);
+        let end = quantize(n.end).max(start.saturating_add(1));
+        strikes
+            .entry((start, n.midi))
+            .and_modify(|(velocity, stop)| {
+                *velocity = (*velocity).max(n.velocity);
+                *stop = (*stop).max(end);
+            })
+            .or_insert((n.velocity, end));
+    }
+    let mut raw = Vec::with_capacity(strikes.len() * 2);
+    for (index, ((start, key), (velocity, end))) in strikes.into_iter().enumerate() {
+        let generation = index + 1;
+        raw.push((start, 3_u8, key, generation, Some(velocity)));
+        raw.push((end, 0, key, generation, None));
+    }
+    raw.sort_by_key(|(tick, priority, key, _, _)| (*tick, *priority, *key));
+    let mut active = [0_usize; 128];
+    let mut output = Vec::with_capacity(raw.len());
+    for (tick, _, key, generation, velocity) in raw {
+        let current = &mut active[key as usize];
+        if velocity.is_some() {
+            *current = generation;
+        } else if *current == generation {
+            *current = 0;
+        } else {
+            continue;
+        }
+        output.push(DrumEvent {
+            tick,
+            key,
+            velocity,
+        });
+    }
+    output
+}
+/// Whether a score requests audible unpitched percussion on the selected mixer.
+pub fn active_percussion(score: &Score) -> bool {
+    let solo = score.parts.iter().any(|p| p.solo && !p.muted);
+    score.parts.iter().enumerate().any(|(part, p)| {
+        p.percussion.is_some()
+            && !p.muted
+            && p.volume > 0.
+            && (!solo || p.solo)
+            && (p
+                .measures
+                .iter()
+                .flat_map(|m| &m.notes)
+                .any(|n| n.velocity > 0 && !n.pitches.is_empty())
+                || score.notation.grace.iter().any(|group| {
+                    group.anchor.part == part
+                        && group.percent > 0.
+                        && group
+                            .notes
+                            .iter()
+                            .any(|n| n.velocity.is_some_and(|v| v > 0))
+                }))
+    })
+}
+
 #[derive(Clone, Copy)]
 enum Technique {
     Ordinary,
@@ -441,7 +523,18 @@ impl Timeline {
         for lane in techniques.values_mut() {
             lane.sort_by_key(|(t, _)| *t);
         }
+        let any_solo = score.parts.iter().any(|p| p.solo && !p.muted);
         for (part, p) in score.parts.iter().enumerate() {
+            if p.percussion.is_some() && (p.muted || p.volume <= 0. || (any_solo && !p.solo)) {
+                continue;
+            }
+            let drum_keys = p.percussion.as_ref().map(|staff| {
+                let mut keys = [None; 128];
+                for sound in &staff.sounds {
+                    keys[sound.id as usize] = sound.midi;
+                }
+                keys
+            });
             for layer in 0..8 {
                 let timeline = events(score, part, layer, &order, &groups)?;
                 for event in timeline.iter().filter(|e| !e.grace) {
@@ -523,7 +616,8 @@ impl Timeline {
                             (last_event.end - last_event.start)
                                 * last_event.note.playback_shortening()
                         };
-                        let legato = !last_event.grace
+                        let legato = p.percussion.is_none()
+                            && !last_event.grace
                             && crate::slurs::continues(score, &last_event.anchor)
                             && timeline.get(last + 1).is_some_and(|next| {
                                 adjacent(last_event, next, score) && next.start == end
@@ -531,7 +625,11 @@ impl Timeline {
                             && shortening == 0.0;
                         let end = (end - shortening + if legato { 15.0 } else { 0.0 })
                             .max(e.start + 0.01);
-                        let lane = techniques.get(&(part, layer % 4));
+                        let lane = if p.percussion.is_none() {
+                            techniques.get(&(part, layer % 4))
+                        } else {
+                            None
+                        };
                         let instrument = lane.map_or(p.instrument, |lane| {
                             let count =
                                 lane.partition_point(|(at, _)| *at <= source(score, e.anchor));
@@ -549,7 +647,7 @@ impl Timeline {
                             end,
                             sounding_end: end,
                             sampler_end: end,
-                            midi,
+                            midi: if let Some(keys)=&drum_keys{keys[usize::from(midi)].ok_or_else(||format!("Percussion sound {} on staff '{}' has no playback MIDI mapping.",midi,p.name))?}else{midi},
                             velocity: if e.grace {
                                 e.grace_velocity
                                     .unwrap_or_else(|| expressions.velocity(e.anchor, &e.note))
@@ -771,6 +869,9 @@ impl Timeline {
         // A fixed attack reference leaves headroom for CC11 to swell a held SF2
         // voice. This is GM expression loudness, not sample-layer crossfading.
         for part in 0..score.parts.len() {
+            if score.parts[part].percussion.is_some() {
+                continue;
+            }
             for layer in 0..8 {
                 let mut hairpins: Vec<_> = score
                     .notation
@@ -945,6 +1046,9 @@ impl Timeline {
             }
         }
         for (part, slot, start, end, pitches) in crate::chords::playback_events(score) {
+            if score.parts[part].percussion.is_some() {
+                continue;
+            }
             let a = to_anchor(score, part, 0, start);
             let b = if end == score.measure_count() as u64 * u64::from(score.measure_ticks()) {
                 Anchor {
@@ -1201,7 +1305,7 @@ mod tests {
         let t = Timeline::new(&s).unwrap();
         assert_eq!(t.notes[1].start, 60.);
         assert_eq!(t.notes[1].sounding_end, 1440.);
-        let bytes = crate::export::midi(&s);
+        let bytes = crate::export::midi(&s).unwrap();
         assert!(bytes.windows(3).any(|b| b == [0xb0, 64, 127]));
         assert!(bytes.windows(3).any(|b| b == [0x90, 72, 80]));
         let audio = crate::synth::render_dry(&s);
@@ -1244,7 +1348,7 @@ mod accompaniment_tests {
         assert_eq!(timeline.notes.iter().filter(|n| n.layer == 8).count(), 10);
         assert_eq!(timeline.notes.iter().filter(|n| n.layer == 9).count(), 10);
         assert!(timeline.notes.iter().all(|n| n.end - n.start == 1920.));
-        let midi = crate::export::midi(&score);
+        let midi = crate::export::midi(&score).unwrap();
         assert_eq!(u16::from_be_bytes([midi[10], midi[11]]), 4);
         assert!(!crate::synth::render_dry(&score).is_empty());
     }
@@ -1683,7 +1787,7 @@ mod discrete_ornament_tests {
         assert_eq!(t.notes[1].start, 120.);
         assert!(t.notes.iter().any(|n| n.midi == 62 && n.start == 160.));
         assert!(t.notes.iter().any(|n| n.midi == 62 && n.start == 2080.));
-        let midi = crate::export::midi(&s);
+        let midi = crate::export::midi(&s).unwrap();
         assert!(midi.windows(3).any(|b| b == [0x90, 62, 80]));
         let audio = crate::synth::render_dry(&s);
         assert!(!audio.is_empty());
@@ -1771,5 +1875,218 @@ mod discrete_ornament_tests {
                 .all(|n| n.velocity == 110 && n.instrument.gm_program() == 45)
         );
         assert_eq!(t.notes.last().unwrap().end, 960.);
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod percussion_tests {
+    use super::*;
+    use crate::{
+        entry_style::Notehead,
+        model::{Duration, Pitch},
+        percussion::{Sound, Staff},
+    };
+    pub(crate) fn note(start: u32, duration: Duration, id: u8, voice: u8, layer: u8) -> Note {
+        Note {
+            start,
+            duration,
+            dotted: false,
+            tuplet: None,
+            layer,
+            voice,
+            voice_launch: None,
+            pitches: vec![crate::percussion::token(id)],
+            velocity: 80,
+            staccato: false,
+            tied: false,
+            articulations: vec![],
+        }
+    }
+    pub(crate) fn fixture() -> Score {
+        let mut s = Score::blank();
+        s.tempo = 120;
+        s.parts.truncate(1);
+        s.parts[0].measures.truncate(1);
+        s.parts[0].instrument = Instrument::Violin;
+        s.parts[0].percussion = Some(Staff {
+            kit: 0,
+            lines: 5,
+            sounds: vec![
+                Sound {
+                    id: 1,
+                    name: "Open hat".into(),
+                    midi: Some(46),
+                    position: 9,
+                    notehead: Notehead::Cross,
+                },
+                Sound {
+                    id: 2,
+                    name: "Closed hat".into(),
+                    midi: Some(42),
+                    position: 9,
+                    notehead: Notehead::Cross,
+                },
+                Sound {
+                    id: 3,
+                    name: "Snare".into(),
+                    midi: Some(38),
+                    position: 5,
+                    notehead: Notehead::Normal,
+                },
+                Sound {
+                    id: 7,
+                    name: "Snare alias".into(),
+                    midi: Some(38),
+                    position: 5,
+                    notehead: Notehead::Cross,
+                },
+            ],
+        });
+        s.parts[0].measures[0].notes = vec![note(0, Duration::Quarter, 3, 0, 0)];
+        s
+    }
+    #[test]
+    fn drum_retrigger_invalidates_older_voice_gate_and_simultaneous_aliases_coalesce() {
+        let mut s = fixture();
+        s.parts[0].measures[0]
+            .notes
+            .push(note(240, Duration::Half, 7, 1, 0));
+        let t = Timeline::new(&s).unwrap();
+        let e = drum_events(&t, 0, |v| v.round() as u64);
+        assert_eq!(
+            e,
+            vec![
+                DrumEvent {
+                    tick: 0,
+                    key: 38,
+                    velocity: Some(80)
+                },
+                DrumEvent {
+                    tick: 240,
+                    key: 38,
+                    velocity: Some(80)
+                },
+                DrumEvent {
+                    tick: 1200,
+                    key: 38,
+                    velocity: None
+                }
+            ]
+        );
+        s.parts[0].measures[0].notes[1].start = 0;
+        s.parts[0].measures[0].notes[1].velocity = 110;
+        let t = Timeline::new(&s).unwrap();
+        assert_eq!(
+            drum_events(&t, 0, |v| v.round() as u64),
+            vec![
+                DrumEvent {
+                    tick: 0,
+                    key: 38,
+                    velocity: Some(110)
+                },
+                DrumEvent {
+                    tick: 960,
+                    key: 38,
+                    velocity: None
+                }
+            ]
+        );
+    }
+    #[test]
+    fn percussion_ties_match_sound_identity_before_output_key_mapping() {
+        let mut s = fixture();
+        s.parts[0].measures[0].notes[0].tied = true;
+        s.parts[0].measures[0]
+            .notes
+            .push(note(480, Duration::Quarter, 7, 0, 0));
+        let t = Timeline::new(&s).unwrap();
+        assert_eq!(t.notes.len(), 2);
+        assert_eq!(t.notes[0].end, 480.);
+        s.parts[0].measures[0].notes[1].pitches = vec![Pitch::from_midi(3)];
+        let t = Timeline::new(&s).unwrap();
+        assert_eq!(t.notes.len(), 1);
+        assert_eq!(t.notes[0].end, 960.);
+    }
+    #[test]
+    fn drum_hairpins_control_hits_without_shared_channel_expression_interference() {
+        let mut s = fixture();
+        s.parts[0].measures[0]
+            .notes
+            .push(note(480, Duration::Quarter, 3, 0, 0));
+        s.parts[0].measures[0]
+            .notes
+            .push(note(0, Duration::Quarter, 2, 0, 1));
+        let a = Anchor {
+            part: 0,
+            measure: 0,
+            tick: 0,
+            layer: 0,
+            voice: 0,
+        };
+        let mut h = crate::expressions::Hairpin::new(a, Anchor { tick: 960, ..a });
+        h.start_velocity = Some(40);
+        h.end_velocity = Some(120);
+        s.notation.spanners.push(h);
+        let mut mark = crate::expressions::Expression::text(a, "pizz.");
+        mark.kind = ExpressionKind::Technique;
+        s.notation.expressions.push(mark);
+        let t = Timeline::new(&s).unwrap();
+        assert!(t.controls.is_empty());
+        assert_eq!(
+            t.notes
+                .iter()
+                .map(|n| (n.midi, n.velocity))
+                .collect::<Vec<_>>(),
+            vec![(38, 40), (42, 80), (38, 80)]
+        );
+        assert!(t.notes.iter().all(|n| n.instrument == Instrument::Violin));
+    }
+    #[test]
+    fn unmapped_active_hits_fail_but_muted_unmapped_staff_does_not_block_other_music() {
+        let mut s = fixture();
+        s.parts[0].percussion.as_mut().unwrap().sounds[2].midi = None;
+        s.validate().unwrap();
+        assert!(
+            Timeline::new(&s)
+                .unwrap_err()
+                .contains("no playback MIDI mapping")
+        );
+        assert!(crate::export::midi(&s).is_err());
+        assert!(
+            crate::audio::AudioEngine::Procedural
+                .render(&s)
+                .unwrap_err()
+                .contains("sampled")
+        );
+        s.parts[0].muted = true;
+        assert!(Timeline::new(&s).unwrap().notes.is_empty());
+        assert!(crate::export::midi(&s).is_ok());
+    }
+    #[test]
+    fn audible_drum_grace_on_a_silent_principal_still_requires_samples() {
+        let mut s = fixture();
+        s.parts[0].measures[0].notes[0].velocity = 0;
+        let at = Anchor {
+            part: 0,
+            measure: 0,
+            tick: 0,
+            layer: 0,
+            voice: 0,
+        };
+        let mut n = crate::grace::GraceNote::new(crate::percussion::token(2), Duration::Sixteenth);
+        n.velocity = Some(100);
+        s.notation
+            .grace
+            .push(crate::grace::GraceGroup::new(at, vec![n]));
+        assert!(active_percussion(&s));
+        let timeline = Timeline::new(&s).unwrap();
+        assert_eq!(timeline.notes.len(), 1);
+        assert_eq!(timeline.notes[0].midi, 42);
+        assert!(
+            crate::audio::AudioEngine::Procedural
+                .render(&s)
+                .unwrap_err()
+                .contains("sampled")
+        );
     }
 }

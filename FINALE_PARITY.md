@@ -7,7 +7,7 @@ This is a functional compatibility checklist, not a claim that Encore has
 already reached parity. The modern Encore interface remains the intended UI.
 
 The starting point is Encore 0.5, commit `55f2cc0`; the tables also incorporate
-the Encore 0.6–0.11 implementation passes recorded below. Source evidence was inspected
+the Encore 0.6–0.12 implementation passes recorded below. Source evidence was inspected
 in `src/model.rs`, `src/app.rs`, `src/engraving.rs`, `src/export.rs`,
 `src/audio.rs`, `src/sampled.rs`, `src/synth.rs`, and the three format readers.
 Changes made after that commit must pass the acceptance checks below before a
@@ -39,7 +39,7 @@ Linux verification.
 | Grace notes, slashed/unslashed groups and playback | Partial | Editable before/after groups retain pitches/chords, values, dots, beam choices, size, slash, principal connector and bounded borrowed-time playback across native, linked parts and MusicXML. MuseScore imports before/after groups and pickups. Ordinary-entry conversion/rebar shortcuts, grace-specific lyric/articulation/tuplet/tie structures and inserted global make-time remain open. |
 | Four independent layers, each with two voices | Complete | Eight independent rhythmic lanes now retain source identity across entry/navigation, voice-local annotations, vector engraving, native persistence, linked parts, MusicXML, MIDI and both audio engines. Secondary launch points separate beam groups. This row covers basic polyphony; advanced layer policies and cross-voice/cross-staff notation remain tracked separately. |
 | Per-pitch chord spelling and independent ties | Partial | Active chord tones now have exact tie subsets, enharmonic respelling and editable tie direction, preserved by native/event-region clipboard, linked transposition, MusicXML and performed playback. Arbitrary continuation controls, tie curvature and complete cross-voice ties remain open. |
-| Clefs and clef changes | Partial | Three fixed staff clefs. Needs other C/F/G clefs, percussion, octave variants and mid-measure changes. |
+| Clefs and clef changes | Partial | Three fixed pitched clefs plus mapped percussion presentation. Needs other C/F/G clefs, octave variants and mid-measure changes. |
 | Keys and key changes | Partial | One constant circle-of-fifths signature. Needs regional/independent signatures, cancellation and custom/nonlinear keys. |
 | Meter and meter changes | Partial | One constant meter, now with 1–32 beats and power-of-two denominators through 128. Changes, pickup measures, additive/composite, independent and display-only meters remain open. |
 | Accidental display policies | Partial | Per-pitch automatic, forced, hidden, courtesy and parenthesized displays are editable, engraved and retained through native/MusicXML and linked transposition. Regional accidental policies and complete cross-layer/cross-bar rules remain open. |
@@ -53,8 +53,8 @@ Linux verification.
 | Lyrics | Partial | Numbered verses/choruses/sections, atomic syllable typing/assignment, hyphens, melismas and elisions, adjustable baselines, lyric-aware spacing and vector continuations; native and MusicXML preservation and MuseScore import. Rich typography, above-staff underlay, verse-number alignment and Finale’s full Lyrics window/metatools remain open. |
 | Chord symbols and fretboards | Partial | Free-beat letter-name chords support standard triads, sevenths/extensions, altered/add/omit degrees, alternate basses, N.C., eight stack slots and per-symbol printing/playback. Original vector fretboards have bounded guitar suggestions, 4–12 custom strings, open/muted stops, fingering, barres and known/unknown tunings. Native/MusicXML harmony/frame interchange, linked transposition and regional editing retain the supported semantics. Finale suffix/fretboard libraries, MIDI analysis/learned chords, numeric/Roman naming and arbitrary suffix typography remain open. |
 | Guitar tablature, bends, slides and tuning | Partial | Editable chord diagrams retain explicit string tunings and frets; tablature staves, automatic standard/tab conversion, bends and continuous slides remain open. |
-| Unpitched percussion layouts and drum maps | Missing | GM melodic pitched percussion is available, but does not supply percussion notation or drum-kit routing. |
-| Staff styles, cutaway, slash/rhythmic notation and repeats | Missing | Fixed five-line staff presentation; no regional style definitions. |
+| Unpitched percussion layouts and drum maps | Partial | One/five-line unpitched staves have stable named sound IDs, independent positions/vector heads/output keys, exact sampled kit selection and native/MusicXML/MuseScore/MIDI support. Entry, parts, ties/grace and clipboard preserve sound identities. Duration-specific/custom glyphs, regional maps, input maps, reusable libraries and Finale device/library import remain open. |
+| Staff styles, cutaway, slash/rhythmic notation and repeats | Missing | Percussion supports one/five-line presentation, but regional staff-style definitions and cutaway/slash/rhythmic workflows remain absent. |
 | Cue notes, ossia, note sizes and custom noteheads | Partial | Per-entry 40–200% head sizing, six original vector notehead shapes and hidden entries are editable and persistent, with native/MusicXML preservation. These are visual controls; automatic cue extraction, ossia staffs and arbitrary glyph selection remain open. |
 | Rehearsal marks and expressive/technique text | Partial | Beat-anchored dynamics, expressive text, technique text and boxed rehearsal marks have staff/system scope, offsets, native persistence, MusicXML preservation and basic MuseScore import. Text typography, automatic rehearsal sequencing, category/library editors, marking metatools and automatic instrument-technique switching remain open. |
 | Music fonts and symbol selection | Missing | Original vector symbols; no user-selectable SMuFL music font, metadata or arbitrary symbol browser. |
@@ -166,7 +166,7 @@ and [audio files](https://usermanuals.finalemusic.com/FinaleWin/Content/Finale/A
 | Human Playback equivalent | Partial | A deterministic shared planner handles supported marks and exact pizzicato/arco/tremolo-string/muted-trumpet labels. Finale style interpretation, its full dictionary, instrument-specific behavior and custom library keyswitch rules remain open. |
 | MIDI performance editor | Missing | No controller lanes, pitch bends, patch/bank changes, fine note timing or captured data. |
 | External MIDI I/O | Missing | No device routing, MIDI Thru, input/output maps or sync. |
-| Percussion playback | Missing | Needs drum-kit bank/channel selection coupled to notation maps. |
+| Percussion playback | Partial | Exact bank-128 kit programs, independent output maps, merged voice choking, retrigger-safe note-offs and sampled auditions/WAV/MIDI are implemented. Missing maps/kits fail explicitly; non-GM key coverage depends on the bank. External device input maps, mid-score kits, per-layer sustained controllers and full performance rules remain open. |
 | Multiple devices and instrument changes | Missing | One selected sample bank/backend; no score-time instrument/device routing. |
 | VST2 Windows / Audio Units macOS host | Missing | No scanning, instantiation, editor windows, state, audio/MIDI routing or crash isolation. Native tests required. |
 | Garritan/ARIA playback | Missing | Requires the user's licensed installed player and compatible host; proprietary assets are not bundled. |
@@ -526,3 +526,41 @@ three voiced parts extract/reopen with retained concert pitches. PDF/SVG, MIDI
 and sampled WAV exports and bounded editor dialogs were inspected. Sampled
 studies do not clip; Carol's sampled regression remains byte-identical. Full
 Finale parity and native macOS/Windows qualification remain open.
+
+### Encore 0.12 integration qualification
+
+Unpitched percussion now has a separate sound identity boundary. One/five-line
+staffs retain independent sound IDs, names, positions, vector heads and optional
+playback keys. Named entry, mapped mouse placement, chord-head selection,
+percussion grace groups, ties, eight voices, linked parts and clipboard domains
+preserve these identities. Keys, accidental/respelling tools and melodic
+transposition cannot reinterpret drum tokens. Map edits validate atomically;
+used missing IDs and stale editor snapshots cannot overwrite the score.
+
+The active SF2 exposes exact bank-128 kit programs. All voices on a staff share
+one kit channel, supporting cross-voice exclusive-class choking, simultaneous
+same-key coalescing and stale note-off suppression after retriggers. Audio/MIDI
+report unmapped sounds or unavailable kits. Procedural mode reports its sampled
+percussion requirement. Arbitrary kits can contain empty key zones, so assigning
+a numeric key does not guarantee a sample exists. The bundled bank's thirteen
+kits are probed with known populated keys. Sustained per-layer controllers,
+external input maps and full percussion performance rules remain open.
+
+MusicXML writes standard unpitched/display/instrument/one-based MIDI keys and
+retains exact native maps; MuseScore definitions and SMF channel10 import into
+the supported representation. Exact per-sound grace, map/tone identity and
+one-line geometry round trips are covered. SMF uses two reserved ports per staff
+and a merged drum channel; all 64 staves/16 pitched lanes fit through port 127.
+MusicXML numeric ports above 16 are omitted. Event clipboard v7 and region v4
+preserve compatible sound contexts while older supported versions remain pitched.
+Silent harmony labels still transpose as pitched annotations over drum staves.
+
+Local Linux qualification: **380 library and 145 editor/CLI tests** pass
+(the complete 523-test sweep plus minimum-window and written-harmony regressions),
+all-target Clippy with warnings denied, format checks and optimized build pass.
+The new native Percussion Maps Study exports PDF/SVG/XML/MIDI/sampled WAV and
+three independently extracted parts. Native/XML maps and principal/grace tokens
+are exact; MIDI reports inferred voice splitting. Two-page full-score and
+one-line part PDFs and the 980×680 map dialog were inspected. The study and parts
+do not clip; Carol remains byte-identical to 0.11. First Light's two SVG pages are
+also byte-identical. See [PERCUSSION.md](PERCUSSION.md) for the remaining gaps.

@@ -38,7 +38,7 @@ fn anchor(n: &Note) -> Anchor {
     }
 }
 fn voice_page(score: &Score) -> Page {
-    let pitches = crate::lines::PitchIndex::new(score);
+    let pitches = display::Index::new(score);
     let styles = score
         .notation
         .entries
@@ -55,6 +55,7 @@ fn voice_page(score: &Score) -> Page {
         offsets,
     };
     let region = StaffRegion {
+        lines: 5,
         part: 0,
         measure: 0,
         x: 20.0,

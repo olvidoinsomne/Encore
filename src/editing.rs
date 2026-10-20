@@ -87,6 +87,8 @@ pub struct RegionClip {
     pub key_fifths: i8,
     /// Staff rows containing equal numbers of complete measures.
     pub measures: Vec<Vec<Measure>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub percussion: Vec<Option<crate::percussion::Staff>>,
     #[serde(default)]
     pub notation: Notation,
     #[serde(default)]
@@ -98,7 +100,7 @@ impl RegionClip {
         self.measures.first().map_or(0, Vec::len)
     }
     pub fn validate(&self) -> Result<(), String> {
-        if ![1, 2, 3].contains(&self.version) {
+        if ![1, 2, 3, 4].contains(&self.version) {
             return Err("This region clipboard requires a different Encore version.".into());
         }
         if self.measures.is_empty()
@@ -114,6 +116,14 @@ impl RegionClip {
                 "A region clipboard must contain 1–64 equal staff rows and 1–1024 measures.".into(),
             );
         }
+        if !self.percussion.is_empty()
+            && (self.percussion.len() != self.measures.len() || self.version < 4)
+        {
+            return Err(
+                "Percussion region clipboard context requires version4 and one domain per staff."
+                    .into(),
+            );
+        }
         if self.warnings.len() > 64 || self.warnings.iter().any(|warning| warning.len() > 4096) {
             return Err("Region clipboard warnings exceed their limit.".into());
         }
@@ -127,8 +137,10 @@ impl RegionClip {
         score.parts = self
             .measures
             .iter()
-            .map(|measures| {
+            .enumerate()
+            .map(|(row, measures)| {
                 let mut part = prototype.clone();
+                part.percussion = self.percussion.get(row).cloned().flatten();
                 part.measures = measures.clone();
                 part
             })
@@ -451,7 +463,13 @@ pub fn copy_region(score: &Score, region: &Region) -> Result<RegionClip, String>
         ));
     }
     let clip = RegionClip {
-        version: if !score.notation.ornaments.is_empty()
+        version: if region
+            .staves
+            .iter()
+            .any(|staff| score.parts[*staff].percussion.is_some())
+        {
+            4
+        } else if !score.notation.ornaments.is_empty()
             || score
                 .notation
                 .slurs
@@ -476,6 +494,19 @@ pub fn copy_region(score: &Score, region: &Region) -> Result<RegionClip, String>
             .iter()
             .map(|staff| score.parts[*staff].measures[region.start..=region.end].to_vec())
             .collect(),
+        percussion: if region
+            .staves
+            .iter()
+            .any(|staff| score.parts[*staff].percussion.is_some())
+        {
+            region
+                .staves
+                .iter()
+                .map(|staff| score.parts[*staff].percussion.clone())
+                .collect()
+        } else {
+            Vec::new()
+        },
         notation: from_notation(target)?,
         warnings,
     };
@@ -648,6 +679,27 @@ pub fn paste_region(
         return Err(
             "The destination must have the same number of staves as the copied region.".into(),
         );
+    }
+    for (row, &staff) in target_staves.iter().enumerate() {
+        let ids = clip.measures[row]
+            .iter()
+            .flat_map(|bar| &bar.notes)
+            .flat_map(|note| &note.pitches)
+            .map(|pitch| pitch.midi())
+            .chain(
+                clip.notation
+                    .grace
+                    .iter()
+                    .filter(|group| group.anchor.part == row)
+                    .flat_map(|group| &group.notes)
+                    .flat_map(|note| &note.pitches)
+                    .map(|pitch| pitch.midi()),
+            );
+        crate::percussion::compatible(
+            clip.percussion.get(row).and_then(Option::as_ref),
+            score.parts[staff].percussion.as_ref(),
+            ids,
+        )?;
     }
     if (score.time_numerator, score.time_denominator)
         != (clip.time_numerator, clip.time_denominator)
@@ -840,6 +892,9 @@ fn transpose_with(
     let mut candidate = score.clone();
     let mut pitches = BTreeMap::new();
     for &staff in &region.staves {
+        if candidate.parts[staff].percussion.is_some() {
+            continue;
+        }
         for measure in region.start..=region.end {
             for note in &mut candidate.parts[staff].measures[measure].notes {
                 let anchor = Anchor {
@@ -865,7 +920,8 @@ fn transpose_with(
         }
     }
     for group in &mut candidate.notation.grace {
-        if region.contains(&group.anchor) {
+        if region.contains(&group.anchor) && candidate.parts[group.anchor.part].percussion.is_none()
+        {
             for note in &mut group.notes {
                 for pitch in &mut note.pitches {
                     *pitch = transform(*pitch)?;

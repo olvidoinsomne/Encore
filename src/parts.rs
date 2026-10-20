@@ -345,10 +345,13 @@ pub fn default_definitions(score: &Score) -> Vec<LinkedPart> {
     let mut staff = 0;
     while staff < score.parts.len() {
         let first = &score.parts[staff];
-        let piano_pair = first.instrument.gm_program() == 0
+        let piano_pair = first.percussion.is_none()
+            && first.instrument.gm_program() == 0
             && first.clef == Clef::Treble
             && score.parts.get(staff + 1).is_some_and(|second| {
-                second.instrument.gm_program() == 0 && second.clef == Clef::Bass
+                second.percussion.is_none()
+                    && second.instrument.gm_program() == 0
+                    && second.clef == Clef::Bass
             });
         let staves = if piano_pair {
             vec![staff, staff + 1]
@@ -366,7 +369,11 @@ pub fn default_definitions(score: &Score) -> Vec<LinkedPart> {
             },
             staves,
             voicing: Vec::new(),
-            transposition: Transposition::for_instrument(first.instrument),
+            transposition: if first.percussion.is_some() {
+                Transposition::CONCERT
+            } else {
+                Transposition::for_instrument(first.instrument)
+            },
             layout: PartLayout::default(),
         });
         staff += if piano_pair { 2 } else { 1 };
@@ -450,14 +457,30 @@ fn project_internal(score: &Score, part: &LinkedPart, written: bool) -> Result<P
     score.validate()?;
     part.validate(score.parts.len())?;
     part.layout.validate_for_score(score.measure_count())?;
+    for rule in &part.voicing {
+        if score.parts[rule.staff].percussion.is_some() && rule.chord != ChordFilter::All {
+            return Err(
+                "Unpitched percussion voicing selects layers/voices, not chord pitch ranks.".into(),
+            );
+        }
+    }
     let interval = if written {
         part.transposition
     } else {
         Transposition::CONCERT
     };
+    let key_interval = if part
+        .staves
+        .iter()
+        .any(|&staff| score.parts[staff].percussion.is_none())
+    {
+        interval
+    } else {
+        Transposition::CONCERT
+    };
     let mut projected = score.clone();
     projected.title = format!("{} — {}", score.title, part.name);
-    projected.key_fifths = interval.written_key(score.key_fifths)?;
+    projected.key_fifths = key_interval.written_key(score.key_fifths)?;
     projected.parts.clear();
     let mut entries = Vec::new();
     let mut reverse_entries = BTreeMap::new();
@@ -879,6 +902,9 @@ fn filter_ties(score: &mut Score, definition: &LinkedPart) -> usize {
 }
 fn transpose_projection(score: &mut Score, interval: Transposition) -> Result<(), String> {
     for staff in &mut score.parts {
+        if staff.percussion.is_some() {
+            continue;
+        }
         for measure in &mut staff.measures {
             for note in &mut measure.notes {
                 for pitch in &mut note.pitches {
@@ -888,6 +914,9 @@ fn transpose_projection(score: &mut Score, interval: Transposition) -> Result<()
         }
     }
     for entry in &mut score.notation.entries {
+        if score.parts[entry.anchor.part].percussion.is_some() {
+            continue;
+        }
         for accidental in &mut entry.accidentals {
             accidental.pitch = (i16::from(accidental.pitch) + i16::from(interval.semitones)) as u8;
         }
@@ -901,6 +930,9 @@ fn transpose_projection(score: &mut Score, interval: Transposition) -> Result<()
         crate::chords::transpose_symbol(symbol, interval)?;
     }
     for group in &mut score.notation.grace {
+        if score.parts[group.anchor.part].percussion.is_some() {
+            continue;
+        }
         for note in &mut group.notes {
             for pitch in &mut note.pitches {
                 *pitch = interval.written_pitch(*pitch)?;

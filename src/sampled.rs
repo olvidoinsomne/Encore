@@ -38,6 +38,7 @@ pub struct SampleBank {
     path: PathBuf,
     name: String,
     presets: Vec<(u8, String)>,
+    kits: Vec<(u8, String)>,
     calibrated_general_user: bool,
 }
 
@@ -74,6 +75,7 @@ impl SampleBank {
             })?
             .map_err(|e| format!("Could not decode SF2 SoundFont: {e}"))?;
         let presets = required_presets(&bytes)?;
+        let kits = catalog_bank(&bytes, 128)?;
         let supplied_name = list(&bytes[12..], b"INFO")
             .and_then(|data| chunk(data, b"INAM"))
             .map(decode_name)
@@ -98,6 +100,11 @@ impl SampleBank {
                 .select_program(0, id, 0, instrument.gm_program())
                 .map_err(|e| format!("SoundFont cannot select {}: {e}", instrument.name()))?;
         }
+        for (kit, _) in &kits {
+            probe
+                .select_program(0, id, 128, *kit)
+                .map_err(|e| format!("SoundFont cannot select percussion kit {kit}: {e}"))?;
+        }
         let font = probe
             .remove_font(id, false)
             .ok_or("Could not retain decoded SoundFont.")?;
@@ -106,6 +113,7 @@ impl SampleBank {
             path: path.canonicalize().unwrap_or_else(|_| path.to_path_buf()),
             name,
             presets,
+            kits,
             calibrated_general_user,
         })
     }
@@ -123,6 +131,16 @@ impl SampleBank {
             .map(|(_, name)| name.as_str())
     }
 
+    /// Exact bank-128 percussion programs available in this loaded SF2.
+    pub fn drum_kits(&self) -> &[(u8, String)] {
+        &self.kits
+    }
+    pub fn kit_name(&self, kit: u8) -> Option<&str> {
+        self.kits
+            .iter()
+            .find(|(id, _)| *id == kit)
+            .map(|(_, name)| name.as_str())
+    }
     pub fn render(&self, score: &Score) -> Result<Vec<f32>, String> {
         score.validate()?;
         let duration = synth::duration_seconds(score);
@@ -139,6 +157,23 @@ impl SampleBank {
         let performance = decorated.is_none().then(|| Performance::new(score));
         for (part_index, part) in score.parts.iter().enumerate() {
             if part.muted || part.volume <= 0.0 || (any_solo && !part.solo) {
+                continue;
+            }
+            if let Some(staff) = &part.percussion {
+                let timeline = decorated
+                    .as_ref()
+                    .ok_or("Percussion requires the shared performance timeline.")?;
+                let events = drum_commands(timeline, part_index);
+                if !events.is_empty() {
+                    let mut engine = self.kit_engine(staff.kit)?;
+                    guarded_mix(
+                        &mut engine.engine,
+                        &events,
+                        &mut output,
+                        part.volume,
+                        part.pan,
+                    )?;
+                }
                 continue;
             }
             for layer in 0..if decorated.is_some() { 16 } else { 4 } {
@@ -216,10 +251,62 @@ impl SampleBank {
         Ok(output)
     }
 
+    pub fn render_part_note(
+        &self,
+        part: &Part,
+        token: u8,
+        velocity: u8,
+        duration_secs: f32,
+    ) -> Result<Vec<f32>, String> {
+        if let Some(staff) = &part.percussion {
+            staff.validate()?;
+            let key = staff.output_key(token)?;
+            if velocity > 127
+                || !duration_secs.is_finite()
+                || !(0.01..=120.).contains(&duration_secs)
+            {
+                return Err("Audition needs velocity0–127 and0.01–120 finite seconds.".into());
+            }
+            let frames = ((duration_secs + RELEASE_TAIL) * SAMPLE_RATE as f32).ceil() as usize;
+            let mut output = vec![0.; frames * 2];
+            if velocity > 0 {
+                let mut engine = self.kit_engine(staff.kit)?;
+                let events = [
+                    Command {
+                        frame: 0,
+                        midi: key,
+                        kind: Kind::On(velocity),
+                    },
+                    Command {
+                        frame: (duration_secs * SAMPLE_RATE as f32).round() as usize,
+                        midi: key,
+                        kind: Kind::Off,
+                    },
+                ];
+                guarded_mix(&mut engine.engine, &events, &mut output, 1., 0.)?;
+            }
+            synth::finish(&mut output);
+            Ok(output)
+        } else {
+            self.render_note(part.instrument, token, velocity, duration_secs)
+        }
+    }
+    fn kit_engine(&self, kit: u8) -> Result<EngineLease<'_>, String> {
+        let name = self.kit_name(kit).ok_or_else(|| {
+            format!(
+                "SoundFont '{}' has no bank128 percussion kit {kit}; choose an available kit.",
+                self.name
+            )
+        })?;
+        self.engine_at(128, kit, name)
+    }
     fn engine(&self, instrument: Instrument) -> Result<EngineLease<'_>, String> {
         if self.preset_name(instrument).is_none() {
             return Err(format!("No sampled preset for {}.", instrument.name()));
         }
+        self.engine_at(0, instrument.gm_program(), instrument.name())
+    }
+    fn engine_at(&self, bank: u32, program: u8, name: &str) -> Result<EngineLease<'_>, String> {
         let mut engine = Synth::new(descriptor())
             .map_err(|e| format!("Could not initialize recorded instruments: {e}"))?;
         engine.set_gain(if self.calibrated_general_user {
@@ -241,8 +328,8 @@ impl SampleBank {
         let mut lease = EngineLease { engine, id, slot };
         lease
             .engine
-            .select_program(0, id, 0, instrument.gm_program())
-            .map_err(|e| format!("Could not select {}: {e}", instrument.name()))?;
+            .select_program(0, id, bank, program)
+            .map_err(|e| format!("Could not select {name}: {e}"))?;
         // Mixer volume is applied once, linearly, after synthesis. MIDI velocity
         // is passed untouched to the bank's recorded layers and SF2 modulators.
         for (ctrl, value) in [(7, 127), (11, 127), (10, 64)] {
@@ -369,6 +456,32 @@ fn list<'a>(bytes: &'a [u8], kind: &[u8; 4]) -> Option<&'a [u8]> {
     None
 }
 
+fn catalog_bank(bytes: &[u8], bank: u16) -> Result<Vec<(u8, String)>, String> {
+    let headers = list(&bytes[12..], b"pdta")
+        .and_then(|d| chunk(d, b"phdr"))
+        .ok_or("Malformed SoundFont: preset headers are missing.")?;
+    let (records, remainder) = headers.as_chunks::<38>();
+    if !remainder.is_empty() || records.len() < 2 {
+        return Err("Malformed SoundFont: incomplete preset header table.".into());
+    }
+    let mut output = Vec::new();
+    let mut seen = [false; 128];
+    for pair in records.windows(2) {
+        let rec = &pair[0];
+        let program = u16::from_le_bytes([rec[20], rec[21]]);
+        if u16::from_le_bytes([rec[22], rec[23]]) == bank
+            && program < 128
+            && u16::from_le_bytes([pair[1][24], pair[1][25]])
+                > u16::from_le_bytes([rec[24], rec[25]])
+            && !seen[program as usize]
+        {
+            seen[program as usize] = true;
+            output.push((program as u8, decode_name(&rec[..20])));
+        }
+    }
+    output.sort_by_key(|(program, _)| *program);
+    Ok(output)
+}
 fn required_presets(bytes: &[u8]) -> Result<Vec<(u8, String)>, String> {
     let headers = list(&bytes[12..], b"pdta")
         .and_then(|data| chunk(data, b"phdr"))
@@ -636,6 +749,18 @@ fn timeline_performance(
     commands
 }
 
+fn drum_commands(timeline: &crate::performance::Timeline, part: usize) -> Vec<Command> {
+    crate::performance::drum_events(timeline, part, |tick| {
+        (timeline.seconds(tick) * f64::from(SAMPLE_RATE)).round() as u64
+    })
+    .into_iter()
+    .map(|event| Command {
+        frame: event.tick as usize,
+        midi: event.key,
+        kind: event.velocity.map_or(Kind::Off, Kind::On),
+    })
+    .collect()
+}
 fn decorated_commands(
     timeline: &crate::performance::Timeline,
     part: usize,
@@ -1577,5 +1702,78 @@ mod discrete_ornament_commands {
             .map(|c| c.kind)
             .collect();
         assert_eq!(frame, vec![Kind::Off, Kind::On(80)]);
+    }
+}
+
+#[cfg(test)]
+mod percussion_tests {
+    use super::*;
+    use crate::{
+        model::Duration,
+        performance::percussion_tests::{fixture, note},
+    };
+    #[test]
+    fn all_drum_voices_share_one_ordered_command_stream_without_program_changes() {
+        let mut s = fixture();
+        s.parts[0].measures[0].notes = vec![
+            note(0, Duration::Half, 1, 0, 0),
+            note(240, Duration::Quarter, 2, 1, 3),
+            note(480, Duration::Quarter, 3, 0, 1),
+        ];
+        let t = crate::performance::Timeline::new(&s).unwrap();
+        let commands = drum_commands(&t, 0);
+        assert!(commands.iter().all(|c| !matches!(c.kind, Kind::Program(_))));
+        assert_eq!(
+            commands
+                .iter()
+                .filter(|c| matches!(c.kind, Kind::On(_)))
+                .map(|c| (c.frame, c.midi))
+                .collect::<Vec<_>>(),
+            vec![(0, 46), (11025, 42), (22050, 38)]
+        );
+    }
+    #[test]
+    fn bundled_kits_are_real_samples_and_cross_voice_hihat_chokes() {
+        let path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/soundfonts/GeneralUser-GS.sf2");
+        if !path.exists() {
+            return;
+        }
+        let bank = SampleBank::load(&path).unwrap();
+        assert_eq!(bank.drum_kits().len(), 13);
+        let mut s = fixture();
+        for &(kit, _) in bank.drum_kits() {
+            s.parts[0].percussion.as_mut().unwrap().kit = kit;
+            // SFX has its own key map;39 is a populated effect, not GM snare38.
+            s.parts[0].percussion.as_mut().unwrap().sounds[2].midi =
+                Some(if kit == 56 { 39 } else { 38 });
+            let audio = bank.render_part_note(&s.parts[0], 3, 100, 0.15).unwrap();
+            assert!(audio.iter().all(|n| n.is_finite()));
+            assert!(audio.iter().any(|n| n.abs() > 0.0001), "kit {kit}");
+        }
+        s.parts[0].percussion.as_mut().unwrap().kit = 3;
+        assert!(
+            bank.render_part_note(&s.parts[0], 3, 100, 0.1)
+                .unwrap_err()
+                .contains("no bank128 percussion kit")
+        );
+        s.parts[0].percussion.as_mut().unwrap().kit = 0;
+        s.parts[0].percussion.as_mut().unwrap().sounds[2].midi = Some(38);
+        s.parts[0].measures[0].notes = vec![note(0, Duration::Whole, 1, 0, 0)];
+        let open = bank.render(&s).unwrap();
+        s.parts[0].measures[0]
+            .notes
+            .push(note(240, Duration::Quarter, 2, 1, 0));
+        let closed = bank.render(&s).unwrap();
+        let lo = (0.7 * SAMPLE_RATE as f32) as usize * 2;
+        let hi = (1.0 * SAMPLE_RATE as f32) as usize * 2;
+        let energy = |a: &[f32]| a[lo..hi].iter().map(|v| f64::from(*v).powi(2)).sum::<f64>();
+        assert!(energy(&open) > 0.0001);
+        assert!(
+            energy(&closed) < energy(&open) * 0.25,
+            "open {}, closed {}",
+            energy(&open),
+            energy(&closed)
+        );
     }
 }

@@ -154,9 +154,20 @@ fn barline(page: &mut Page, staff: &StaffRegion, forward: bool) {
         let x = staff.x + staff.width - 2.0;
         (x, x - 5.0, x - 11.0)
     };
-    let bottom = staff.y + 4.0 * staff.spacing;
-    page.line(thick, staff.y, thick, bottom, 3.2, INK);
-    page.line(thin, staff.y, thin, bottom, 1.1, INK);
+    let top = staff.top_line_y()
+        - if staff.lines == 1 {
+            staff.spacing * 0.5
+        } else {
+            0.0
+        };
+    let bottom = staff.bottom_line_y()
+        + if staff.lines == 1 {
+            staff.spacing * 0.5
+        } else {
+            0.0
+        };
+    page.line(thick, top, thick, bottom, 3.2, INK);
+    page.line(thin, top, thin, bottom, 1.1, INK);
     for offset in [1.5, 2.5] {
         page.ellipse(
             dots,

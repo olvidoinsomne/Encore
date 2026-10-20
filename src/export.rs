@@ -1,4 +1,5 @@
 //! Interchange exporters written from the public MusicXML and Standard MIDI formats.
+pub(crate) mod percussion;
 use crate::model::{Clef, Duration, Note, PPQ, Part, Pitch, Score};
 use std::collections::HashMap;
 use std::fmt::Write as _;
@@ -285,16 +286,20 @@ pub fn musicxml(score: &Score) -> String {
         {
             0.0
         } else {
-            part.volume * 100.0
+            (part.volume * 100.0).clamp(0.0, 100.0)
         };
+        if part.percussion.is_some() {
+            out.push_str(&percussion::part_list(pi, part, volume));
+            continue;
+        }
         let _ = writeln!(
             out,
-            "    <score-part id=\"P{id}\"><part-name>{}</part-name><part-abbreviation>{}</part-abbreviation><score-instrument id=\"I{id}\"><instrument-name>{}</instrument-name></score-instrument><midi-device port=\"{}\"/><midi-instrument id=\"I{id}\"><midi-channel>{}</midi-channel><midi-program>{}</midi-program><volume>{volume:.2}</volume><pan>{:.2}</pan></midi-instrument></score-part>",
+            "    <score-part id=\"P{id}\"><part-name>{}</part-name><part-abbreviation>{}</part-abbreviation><score-instrument id=\"I{id}\"><instrument-name>{}</instrument-name></score-instrument>{}<midi-instrument id=\"I{id}\"><midi-channel>{}</midi-channel><midi-program>{}</midi-program><volume>{volume:.2}</volume><pan>{:.2}</pan></midi-instrument></score-part>",
             xml(&part.name),
             xml(part.instrument.name()),
             xml(part.instrument.name()),
-            pi / 15 + 1,
-            channel(pi) + 1,
+            percussion::device(pi),
+            1,
             part.instrument.gm_program() + 1,
             part.pan * 90.0
         );
@@ -322,16 +327,25 @@ pub fn musicxml(score: &Score) -> String {
         for (mi, measure) in part.measures.iter().enumerate() {
             let _ = writeln!(out, "    <measure number=\"{}\">", mi + 1);
             if mi == 0 {
-                let (sign, line) = match part.clef {
-                    Clef::Treble => ("G", 2),
-                    Clef::Bass => ("F", 4),
-                    Clef::Alto => ("C", 3),
-                };
-                let _ = writeln!(
-                    out,
-                    "      <attributes><divisions>{PPQ}</divisions><key><fifths>{}</fifths></key><time><beats>{}</beats><beat-type>{}</beat-type></time><clef><sign>{sign}</sign><line>{line}</line></clef></attributes>",
-                    score.key_fifths, score.time_numerator, score.time_denominator
-                );
+                if let Some(staff) = &part.percussion {
+                    let _ = writeln!(
+                        out,
+                        "<attributes><divisions>{PPQ}</divisions><time><beats>{}</beats><beat-type>{}</beat-type></time><clef><sign>percussion</sign></clef><staff-details><staff-lines>{}</staff-lines></staff-details></attributes>",
+                        score.time_numerator, score.time_denominator, staff.lines
+                    );
+                    out.push_str(&percussion::native(part));
+                } else {
+                    let (sign, line) = match part.clef {
+                        Clef::Treble => ("G", 2),
+                        Clef::Bass => ("F", 4),
+                        Clef::Alto => ("C", 3),
+                    };
+                    let _ = writeln!(
+                        out,
+                        "      <attributes><divisions>{PPQ}</divisions><key><fifths>{}</fifths></key><time><beats>{}</beats><beat-type>{}</beat-type></time><clef><sign>{sign}</sign><line>{line}</line></clef></attributes>",
+                        score.key_fifths, score.time_numerator, score.time_denominator
+                    );
+                }
                 let _ = writeln!(
                     out,
                     "      <direction placement=\"above\"><direction-type><metronome><beat-unit>quarter</beat-unit><per-minute>{}</per-minute></metronome><other-direction print-object=\"no\">encore-initial-tempo</other-direction></direction-type><sound tempo=\"{}\"/></direction>",
@@ -400,6 +414,7 @@ pub fn musicxml(score: &Score) -> String {
                             tuplet_bounds,
                             ("", ""),
                             style_index.get(&anchor),
+                            None,
                         );
                     } else {
                         let dynamic = crate::model::dynamic_name(note.velocity);
@@ -455,6 +470,10 @@ pub fn musicxml(score: &Score) -> String {
                                 },
                                 (&notation_marks, if chord_index == 0 { marks.1 } else { "" }),
                                 style_index.get(&anchor),
+                                part.percussion
+                                    .as_ref()
+                                    .and_then(|staff| staff.sound(pitch.midi()))
+                                    .map(|sound| (pi, sound)),
                             );
                         }
                     }
@@ -619,6 +638,7 @@ fn write_gap(out: &mut String, mut ticks: u32, layer: u8) {
                     (false, false),
                     ("", ""),
                     None,
+                    None,
                 );
                 ticks -= size;
             }
@@ -644,6 +664,7 @@ fn write_xml_note(
     tuplet_bounds: (bool, bool),
     annotations: (&str, &str),
     style: Option<&crate::entry_style::EntryStyle>,
+    drum: Option<(usize, &crate::percussion::Sound)>,
 ) {
     let attributes = crate::entry_style::xml_attributes(style);
     if pitch.is_some() {
@@ -660,7 +681,9 @@ fn write_xml_note(
     if chord {
         out.push_str("<chord/>");
     }
-    if let Some(pitch) = pitch {
+    if let Some((_, sound)) = drum {
+        out.push_str(&percussion::pitch(sound));
+    } else if let Some(pitch) = pitch {
         let _ = write!(
             out,
             "<pitch><step>{}</step><alter>{}</alter><octave>{}</octave></pitch>",
@@ -678,6 +701,9 @@ fn write_xml_note(
     if tie_out {
         out.push_str("<tie type=\"start\"/>");
     }
+    if let Some((part, sound)) = drum {
+        out.push_str(&percussion::instrument(part, sound.id));
+    }
     let _ = write!(
         out,
         "<voice>{}</voice><type>{}</type>",
@@ -687,11 +713,13 @@ fn write_xml_note(
     if note.dotted {
         out.push_str("<dot/>");
     }
-    out.push_str(&crate::entry_style::xml_accidental(
-        style,
-        Some(note),
-        pitch.map(|pitch| pitch.midi()),
-    ));
+    if drum.is_none() {
+        out.push_str(&crate::entry_style::xml_accidental(
+            style,
+            Some(note),
+            pitch.map(|pitch| pitch.midi()),
+        ));
+    }
     if let Some(tuplet) = note.tuplet {
         let _ = write!(
             out,
@@ -699,8 +727,23 @@ fn write_xml_note(
             tuplet.actual, tuplet.normal
         );
     }
+    let mut display_style = style.cloned();
+    if let Some((_, sound)) = drum {
+        let style = display_style.get_or_insert_with(|| {
+            crate::entry_style::EntryStyle::new(crate::document::Anchor {
+                part: 0,
+                measure: 0,
+                tick: 0,
+                layer: note.layer,
+                voice: note.voice,
+            })
+        });
+        if style.notehead == crate::entry_style::Notehead::Normal {
+            style.notehead = sound.notehead;
+        }
+    }
     out.push_str(&crate::entry_style::xml_elements(
-        style,
+        display_style.as_ref(),
         Some(note),
         pitch.map(|pitch| pitch.midi()),
         chord,
@@ -815,25 +858,15 @@ fn track(mut events: Vec<Event>, end: u32) -> Vec<u8> {
 
 /// Standard MIDI format 1, 480 ticks/quarter. Each staff has its own track;
 /// ports extend beyond the 15 melodic channels without using percussion channel 10.
-pub fn midi(score: &Score) -> Vec<u8> {
-    // The normal UI always validates first. Keep this free-function safe for callers.
-    if score.validate().is_err() {
-        return Vec::new();
-    }
-    let decorated = if crate::performance::needed(score) {
-        match crate::performance::Timeline::new(score) {
-            Ok(t) => Some(t),
-            Err(_) => return Vec::new(),
-        }
-    } else {
-        None
-    };
+pub fn midi(score: &Score) -> Result<Vec<u8>, String> {
+    score.validate()?;
+    let decorated = crate::performance::needed(score)
+        .then(|| crate::performance::Timeline::new(score))
+        .transpose()?;
     let expression_map = crate::expressions::ExpressionMap::new(score);
     let style_index = crate::entry_style::Index::new(score);
     let measure_ticks = score.measure_ticks();
-    let Ok(order) = crate::repeats::playback_order(score) else {
-        return Vec::new();
-    };
+    let order = crate::repeats::playback_order(score)?;
     let end = measure_ticks * order.len() as u32;
     let tempo = 60_000_000u32 / u32::from(score.tempo);
     let denominator_power = score.time_denominator.trailing_zeros() as u8;
@@ -866,7 +899,8 @@ pub fn midi(score: &Score) -> Vec<u8> {
     ];
     if !score.notation.tempo.is_empty() {
         conductor.retain(|event| !event.bytes.starts_with(&[0xff, 0x51]));
-        if let Ok(map) = crate::expressions::TempoMap::new(score) {
+        {
+            let map = crate::expressions::TempoMap::new(score)?;
             for (tick, tempo) in map.midi_tempos() {
                 conductor.push(Event {
                     tick,
@@ -886,8 +920,93 @@ pub fn midi(score: &Score) -> Vec<u8> {
     for lyrics in lyric_index.values_mut() {
         lyrics.sort_by_key(|lyric| (lyric.kind, lyric.verse));
     }
-    let mut lane_index = 0;
     for (part_index, part) in score.parts.iter().enumerate() {
+        if let Some(staff) = &part.percussion {
+            let channel = 9_u8;
+            let port = (part_index * 2) as u8;
+            let mut events = vec![
+                Event {
+                    tick: 0,
+                    priority: 0,
+                    bytes: meta(0x03, part.name.as_bytes()),
+                },
+                Event {
+                    tick: 0,
+                    priority: 0,
+                    bytes: meta(0x21, &[port]),
+                },
+                Event {
+                    tick: 0,
+                    priority: 1,
+                    bytes: vec![0xc0 | channel, staff.kit],
+                },
+                Event {
+                    tick: 0,
+                    priority: 1,
+                    bytes: vec![
+                        0xb0 | channel,
+                        7,
+                        (part.volume * 127.).round().clamp(0., 127.) as u8,
+                    ],
+                },
+                Event {
+                    tick: 0,
+                    priority: 1,
+                    bytes: vec![0xb0 | channel, 10, ((part.pan + 1.) * 63.5).round() as u8],
+                },
+            ];
+            if !part.muted && (!has_solo || part.solo) && part.volume > 0. {
+                let timeline = decorated
+                    .as_ref()
+                    .ok_or("Percussion requires the shared performance timeline.")?;
+                for event in crate::performance::drum_events(timeline, part_index, |tick| {
+                    tick.round() as u64
+                }) {
+                    let tick = u32::try_from(event.tick)
+                        .map_err(|_| "Percussion MIDI tick exceeds the output range.")?;
+                    events.push(Event {
+                        tick,
+                        priority: if event.velocity.is_some() { 3 } else { 0 },
+                        bytes: vec![
+                            if event.velocity.is_some() {
+                                0x90 | channel
+                            } else {
+                                0x80 | channel
+                            },
+                            event.key,
+                            event.velocity.unwrap_or(0),
+                        ],
+                    });
+                }
+                for event in crate::repeats::events(part, measure_ticks, &order) {
+                    let anchor = crate::document::Anchor {
+                        part: part_index,
+                        measure: event.measure,
+                        tick: event.note.start,
+                        layer: event.note.layer,
+                        voice: event.note.voice,
+                    };
+                    if let Some(lyrics) = lyric_index.get(&anchor) {
+                        for lyric in lyrics {
+                            let mut text = lyric.text.clone();
+                            if matches!(
+                                lyric.syllabic,
+                                crate::lyrics::Syllabic::Begin | crate::lyrics::Syllabic::Middle
+                            ) {
+                                text.push('-');
+                            }
+                            events.push(Event {
+                                tick: event.tick as u32,
+                                priority: 0,
+                                bytes: meta(0x05, text.as_bytes()),
+                            });
+                        }
+                    }
+                }
+            }
+            tracks.push(track(events, end));
+            continue;
+        }
         let layers = (0..8)
             .filter(|layer| {
                 part.measures
@@ -909,7 +1028,8 @@ pub fn midi(score: &Score) -> Vec<u8> {
             }
         }
         for layer in layers {
-            let channel = channel(lane_index);
+            let channel = channel(usize::from(layer));
+            let port = (part_index * 2 + usize::from(layer >= 15)) as u8;
             let mut events = vec![
                 Event {
                     tick: 0,
@@ -919,7 +1039,7 @@ pub fn midi(score: &Score) -> Vec<u8> {
                 Event {
                     tick: 0,
                     priority: 0,
-                    bytes: meta(0x21, &[(lane_index / 15) as u8]),
+                    bytes: meta(0x21, &[port]),
                 },
                 Event {
                     tick: 0,
@@ -929,7 +1049,11 @@ pub fn midi(score: &Score) -> Vec<u8> {
                 Event {
                     tick: 0,
                     priority: 1,
-                    bytes: vec![0xb0 | channel, 7, (part.volume * 127.0).round() as u8],
+                    bytes: vec![
+                        0xb0 | channel,
+                        7,
+                        (part.volume * 127.0).round().clamp(0.0, 127.0) as u8,
+                    ],
                 },
                 Event {
                     tick: 0,
@@ -1117,7 +1241,6 @@ pub fn midi(score: &Score) -> Vec<u8> {
                 }
             }
             tracks.push(track(events, end));
-            lane_index += 1;
         }
     }
     let mut out = b"MThd".to_vec();
@@ -1128,7 +1251,7 @@ pub fn midi(score: &Score) -> Vec<u8> {
     for track in tracks {
         out.extend(track);
     }
-    out
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -1182,7 +1305,7 @@ mod tests {
         ] {
             assert_eq!(xml.matches(marker).count(), 1, "{marker}");
         }
-        let bytes = midi(&score);
+        let bytes = midi(&score).unwrap();
         assert!(bytes.windows(3).any(|bytes| bytes == [0x90, 60, 98]));
         assert_eq!(
             midi_notes(&bytes),
@@ -1194,7 +1317,7 @@ mod tests {
             ]
         );
         score.parts[0].measures[0].notes[0].articulations = vec![Articulation::Tenuto];
-        let bytes = midi(&score);
+        let bytes = midi(&score).unwrap();
         assert!(bytes.windows(3).any(|bytes| bytes == [0x90, 60, 83]));
         assert_eq!(midi_notes(&bytes)[2].0, 480);
     }
@@ -1275,7 +1398,7 @@ mod tests {
         let mut next = note(960, &[60, 64]);
         next.staccato = true;
         score.parts[0].measures[0].notes = vec![first, next];
-        let bytes = midi(&score);
+        let bytes = midi(&score).unwrap();
         assert_eq!(&bytes[..4], b"MThd");
         assert!(bytes.windows(2).any(|pair| pair == [0xc0, 40]));
         assert_eq!(
@@ -1288,7 +1411,7 @@ mod tests {
             ]
         );
         score.parts[0].muted = true;
-        assert!(midi_notes(&midi(&score)).is_empty());
+        assert!(midi_notes(&midi(&score).unwrap()).is_empty());
     }
     #[test]
     fn every_catalog_program_survives_midi_and_musicxml_export() {
@@ -1299,7 +1422,10 @@ mod tests {
             score.parts[0].instrument = instrument;
             let program = instrument.gm_program();
             assert!(
-                midi(&score).windows(2).any(|pair| pair == [0xc0, program]),
+                midi(&score)
+                    .unwrap()
+                    .windows(2)
+                    .any(|pair| pair == [0xc0, program]),
                 "{}",
                 instrument.name()
             );
@@ -1324,7 +1450,7 @@ mod tests {
         score.parts[1].measures[0].notes = vec![note(0, &[48])];
         score.parts[0].solo = true;
         assert_eq!(
-            midi_notes(&midi(&score)),
+            midi_notes(&midi(&score).unwrap()),
             vec![(1440, 0x90, 60), (2400, 0x80, 60)]
         );
     }
@@ -1336,7 +1462,7 @@ mod tests {
         first.tied = true;
         score.parts[0].measures[0].notes = vec![first, note(960, &[60, 67])];
         assert_eq!(
-            midi_notes(&midi(&score)),
+            midi_notes(&midi(&score).unwrap()),
             vec![
                 (480, 0x90, 60),
                 (480, 0x90, 64),
@@ -1363,7 +1489,7 @@ mod tests {
     fn malformed_midi_input_is_safe() {
         let mut score = Score::blank();
         score.tempo = 0;
-        assert!(midi(&score).is_empty());
+        assert!(midi(&score).is_err());
     }
     #[test]
     fn midi_tuplets_have_exact_note_on_and_off_times() {
@@ -1379,7 +1505,7 @@ mod tests {
             })
             .collect();
         assert_eq!(
-            midi_notes(&midi(&score)),
+            midi_notes(&midi(&score).unwrap()),
             vec![
                 (0, 0x90, 60),
                 (160, 0x80, 60),
@@ -1403,7 +1529,7 @@ mod tests {
                 note
             })
             .collect();
-        let bytes = midi(&score);
+        let bytes = midi(&score).unwrap();
         assert_eq!(u16::from_be_bytes([bytes[10], bytes[11]]), 5);
         for layer in 0..4 {
             assert!(
@@ -1442,7 +1568,7 @@ mod tests {
                 },
             ],
         });
-        let result = midi_notes(&midi(&score));
+        let result = midi_notes(&midi(&score).unwrap());
         let ons: Vec<_> = result
             .iter()
             .filter(|(_, status, _)| *status == 0x90)
@@ -1461,7 +1587,7 @@ mod tests {
         );
         // A tied repeat-end C must reattack when returning to the initial C.
         score.notation.repeats = vec![RepeatRegion::simple(0, 0)];
-        let ons: Vec<_> = midi_notes(&midi(&score))
+        let ons: Vec<_> = midi_notes(&midi(&score).unwrap())
             .into_iter()
             .filter(|(_, status, _)| *status == 0x90)
             .collect();
@@ -1483,12 +1609,12 @@ mod tests {
         };
         let end = Anchor { tick: 480, ..start };
         score.notation.slurs.push(Slur::new(start, end));
-        assert!(midi_notes(&midi(&score)).contains(&(495, 0x80, 60)));
+        assert!(midi_notes(&midi(&score).unwrap()).contains(&(495, 0x80, 60)));
         score.parts[0].measures[0].notes[0].staccato = true;
-        assert!(midi_notes(&midi(&score)).contains(&(240, 0x80, 60)));
+        assert!(midi_notes(&midi(&score).unwrap()).contains(&(240, 0x80, 60)));
         score.parts[0].measures[0].notes[0].staccato = false;
         score.parts[0].measures[0].notes[1].pitches = vec![Pitch::from_midi(60)];
-        let events = midi_notes(&midi(&score));
+        let events = midi_notes(&midi(&score).unwrap());
         assert_eq!(events[1], (480, 0x80, 60));
         assert_eq!(events[2], (480, 0x90, 60));
     }
@@ -1540,6 +1666,7 @@ mod tests {
         let expected = [0xff, 0x05, 5, b'G', b'l', 0xc3, 0xb3, b'-'];
         assert_eq!(
             midi(&score)
+                .unwrap()
                 .windows(expected.len())
                 .filter(|window| *window == expected)
                 .count(),
@@ -1568,7 +1695,7 @@ mod tests {
                 play_repeats_after_jump: false,
             },
         ];
-        let ons: Vec<_> = midi_notes(&midi(&score))
+        let ons: Vec<_> = midi_notes(&midi(&score).unwrap())
             .into_iter()
             .filter(|(_, status, _)| *status == 0x90)
             .map(|(tick, _, pitch)| (tick, pitch))
@@ -1618,8 +1745,9 @@ mod solo_regression {
             tied: false,
             articulations: vec![],
         }];
-        let bytes = midi(&score);
-        assert!(bytes.windows(3).any(|b| b == [0x91, 60, 80]));
+        let bytes = midi(&score).unwrap();
+        assert!(bytes.windows(3).any(|b| b == [0x90, 60, 80]));
+        assert!(bytes.windows(4).any(|b| b == [0xff, 0x21, 1, 2]));
     }
 }
 
@@ -1700,11 +1828,11 @@ mod voice_two_tests {
     fn midi_keeps_same_pitch_voices_on_independent_lanes_and_ties() {
         let score = score();
         score.validate().unwrap();
-        let events = events(&midi(&score));
+        let events = events(&midi(&score).unwrap());
         assert!(events.contains(&(0, 0x90, 60, 80)));
         assert!(events.contains(&(1920, 0x80, 60, 0)));
-        assert!(events.contains(&(0, 0x91, 60, 80)));
-        assert!(events.contains(&(960, 0x81, 60, 0)));
+        assert!(events.contains(&(0, 0x94, 60, 80)));
+        assert!(events.contains(&(960, 0x84, 60, 0)));
         assert_eq!(events.len(), 4);
     }
     #[test]
@@ -1749,5 +1877,135 @@ mod voice_two_tests {
                 .descendants()
                 .any(|n| n.has_tag_name("tie") && n.attribute("type") == Some("stop"))
         );
+    }
+}
+
+#[cfg(test)]
+mod percussion_tests {
+    use super::*;
+    use crate::performance::percussion_tests::{fixture, note};
+    #[test]
+    fn drum_xml_uses_unpitched_ids_default_heads_and_one_based_midi_keys() {
+        let mut s = fixture();
+        s.parts[0].measures[0].notes = vec![
+            note(0, Duration::Quarter, 1, 0, 0),
+            note(480, Duration::Quarter, 3, 1, 0),
+        ];
+        let x = musicxml(&s);
+        let d = roxmltree::Document::parse_with_options(
+            &x,
+            roxmltree::ParsingOptions {
+                allow_dtd: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            d.descendants().filter(|n| n.has_tag_name("pitch")).count(),
+            0
+        );
+        assert_eq!(
+            d.descendants()
+                .filter(|n| n.has_tag_name("unpitched"))
+                .count(),
+            2
+        );
+        assert!(x.contains("<midi-unpitched>47</midi-unpitched>"));
+        assert!(x.contains("<instrument id=\"P1-S1\"/>"));
+        assert!(x.contains(">x</notehead>"));
+        assert!(x.contains("<sign>percussion</sign>"));
+        assert!(x.contains("<staff-lines>5</staff-lines>"));
+        assert!(!x.contains("<accidental>"));
+        assert!(x.contains("encore-percussion:"));
+    }
+    fn ports_and_channels(bytes: &[u8]) -> Vec<(u8, u8)> {
+        let mut offset = 14;
+        let mut output = vec![];
+        while offset < bytes.len() {
+            let len =
+                u32::from_be_bytes(bytes[offset + 4..offset + 8].try_into().unwrap()) as usize;
+            let data = &bytes[offset + 8..offset + 8 + len];
+            if let Some(port) = data
+                .windows(4)
+                .find(|b| b[..3] == [0xff, 0x21, 1])
+                .map(|b| b[3])
+            {
+                let channel = data
+                    .windows(3)
+                    .find(|b| b[0] & 0xf0 == 0x90)
+                    .map(|b| b[0] & 0xf)
+                    .unwrap_or(255);
+                output.push((port, channel));
+            }
+            offset += 8 + len;
+        }
+        output
+    }
+    #[test]
+    fn midi_drums_merge_voices_on_channel_ten_and_staff_ports_never_collide() {
+        let mut s = fixture();
+        s.parts[0].measures[0]
+            .notes
+            .push(note(240, Duration::Quarter, 2, 1, 0));
+        let melodic = Score::blank().parts[0].clone();
+        s.parts.push(melodic);
+        s.parts[1].measures.truncate(1);
+        s.parts[1].measures[0].notes = vec![note(0, Duration::Quarter, 60, 0, 0)];
+        let b = midi(&s).unwrap();
+        assert_eq!(ports_and_channels(&b), vec![(0, 9), (2, 0)]);
+        assert!(b.windows(3).any(|b| b == [0x99, 38, 80]));
+        assert!(b.windows(3).any(|b| b == [0x99, 42, 80]));
+        let part = s.parts[0].clone();
+        s.parts = vec![part; 64];
+        let b = midi(&s).unwrap();
+        let ports = ports_and_channels(&b);
+        assert_eq!(ports.len(), 64);
+        assert_eq!(ports.last(), Some(&(126, 9)));
+        let x = musicxml(&s);
+        let d = roxmltree::Document::parse_with_options(
+            &x,
+            roxmltree::ParsingOptions {
+                allow_dtd: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            d.descendants()
+                .filter(|n| n.has_tag_name("midi-device"))
+                .filter_map(|n| n.attribute("port"))
+                .all(|p| p.parse::<u8>().unwrap() <= 16)
+        );
+    }
+    #[test]
+    fn sixty_fourth_melodic_staff_with_all_sixteen_lanes_uses_last_valid_port() {
+        let mut s = fixture();
+        let drum = s.parts[0].clone();
+        s.parts = vec![drum; 64];
+        let mut last = Score::blank().parts[0].clone();
+        last.measures.truncate(1);
+        last.measures[0].notes = (0..8)
+            .map(|lane| note(0, Duration::Quarter, 60, lane / 4, lane % 4))
+            .collect();
+        s.parts[63] = last;
+        let at = crate::document::Anchor {
+            part: 63,
+            measure: 0,
+            tick: 0,
+            layer: 0,
+            voice: 0,
+        };
+        for slot in 0..8 {
+            let mut chord = crate::chords::ChordSymbol::new(at, crate::chords::parse("C").unwrap());
+            chord.slot = slot;
+            chord.play = true;
+            s.notation.chords.push(chord);
+        }
+        let ports = ports_and_channels(&midi(&s).unwrap());
+        assert_eq!(ports.len(), 79);
+        assert_eq!(ports.last(), Some(&(127, 0)));
+        let unique: std::collections::BTreeSet<_> = ports.iter().copied().collect();
+        assert_eq!(unique.len(), ports.len());
+        assert!(ports.iter().all(|(port, _)| *port <= 127));
     }
 }

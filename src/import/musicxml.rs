@@ -16,6 +16,7 @@ struct PartInfo {
     instrument: Instrument,
     volume: f32,
     pan: f32,
+    drums: super::percussion::Instruments,
 }
 
 #[derive(Clone)]
@@ -60,9 +61,7 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
                 .attribute("id")
                 .ok_or("MusicXML score-part has no id.")?;
             let midi = child(definition, "midi-instrument");
-            if midi.is_some_and(|n| child(n, "midi-unpitched").is_some()) {
-                return Err("Unpitched percussion maps are not supported yet. Pitched percussion such as timpani can be imported.".into());
-            }
+            let drums = super::percussion::Instruments::xml(definition)?;
             let program = midi
                 .map(|n| number::<u16>(n, "midi-program"))
                 .transpose()?
@@ -83,14 +82,27 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
                     .copied()
                     .find(|instrument| instrument.name().eq_ignore_ascii_case(instrument_name));
                 let instrument = inferred.unwrap_or(Instrument::Piano);
-                warnings.add(format!("Part {id} has no MIDI program; {} was {}. Confirm its instrument in the mixer.", instrument.name(), if inferred.is_some() { "inferred from its name" } else { "selected as a fallback" }));
+                if !drums.unpitched
+                    && !root
+                        .children()
+                        .filter(|node| {
+                            node.has_tag_name("part") && node.attribute("id") == Some(id)
+                        })
+                        .any(|part| {
+                            part.descendants()
+                                .any(|node| node.has_tag_name("unpitched"))
+                        })
+                {
+                    warnings.add(format!("Part {id} has no MIDI program; {} was {}. Confirm its instrument in the mixer.", instrument.name(), if inferred.is_some() { "inferred from its name" } else { "selected as a fallback" }));
+                }
                 instrument
             };
-            if definition
-                .children()
-                .filter(|n| n.has_tag_name("midi-instrument"))
-                .count()
-                > 1
+            if !drums.unpitched
+                && definition
+                    .children()
+                    .filter(|n| n.has_tag_name("midi-instrument"))
+                    .count()
+                    > 1
             {
                 warnings.add("Parts with multiple instrument definitions use their first MIDI instrument for playback.");
             }
@@ -124,6 +136,7 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
                         instrument,
                         volume,
                         pan,
+                        drums,
                     },
                 )
                 .is_some()
@@ -159,6 +172,7 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
                 instrument: Instrument::Piano,
                 volume: 0.8,
                 pan: 0.0,
+                drums: Default::default(),
             }
         });
         let measures: Vec<_> = source
@@ -194,6 +208,19 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
         // Preserve source staves and map their independent voices into four layers.
         let mut lanes: BTreeMap<(u32, String), Vec<Measure>> = BTreeMap::new();
         let mut clefs = BTreeMap::new();
+        let mut percussion = super::percussion::Xml::new(info.drums.clone());
+        percussion.native(source)?;
+        let percussion_staves: std::collections::BTreeSet<u32> = source
+            .descendants()
+            .filter(|node| node.has_tag_name("note") && child(*node, "unpitched").is_some())
+            .map(|note| number::<u32>(note, "staff").map(|staff| staff.unwrap_or(1)))
+            .collect::<Result<_, _>>()?;
+        for &staff in &percussion_staves {
+            if !percussion.staves.contains_key(&staff) {
+                percussion.declare(staff, 5)?;
+            }
+        }
+
         let mut declared_staves = 1_u32;
         let mut transpose = BTreeMap::new();
         let mut default_transpose = 0_i16;
@@ -312,6 +339,16 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
                                 .unwrap_or("1")
                                 .parse::<u32>()
                                 .map_err(|_| "Invalid key staff number.")?;
+                            if percussion_staves.contains(&staff)
+                                || item.children().any(|clef| {
+                                    clef.has_tag_name("clef")
+                                        && value(clef, "sign") == Some("percussion")
+                                        && clef.attribute("number").unwrap_or("1")
+                                            == staff.to_string()
+                                })
+                            {
+                                continue;
+                            }
                             let shift = transpose.get(&staff).copied().unwrap_or(default_transpose);
                             let concert = concert_key(fifths, shift);
                             if let Some(first) = initial_key {
@@ -323,18 +360,53 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
                                 score.key_fifths = concert;
                             }
                         }
+                        for details in item.children().filter(|n| n.has_tag_name("staff-details")) {
+                            let staff = details
+                                .attribute("number")
+                                .unwrap_or("1")
+                                .parse::<u32>()
+                                .map_err(|_| "Invalid staff-details number.")?;
+                            if let Some(lines) = number::<u8>(details, "staff-lines")?
+                                && (percussion.staves.contains_key(&staff)
+                                    || item.children().any(|clef| {
+                                        clef.has_tag_name("clef")
+                                            && value(clef, "sign") == Some("percussion")
+                                            && clef.attribute("number").unwrap_or("1")
+                                                == staff.to_string()
+                                    }))
+                            {
+                                percussion.declare(staff, lines)?;
+                            }
+                        }
                         for clef in item.children().filter(|n| n.has_tag_name("clef")) {
                             let staff = clef
                                 .attribute("number")
                                 .unwrap_or("1")
                                 .parse::<u32>()
                                 .map_err(|_| "Invalid clef staff number.")?;
-                            let parsed = match (value(clef, "sign").unwrap_or("G"), value(clef, "line").unwrap_or("2")) {
+                            let parsed = match (
+                                value(clef, "sign").unwrap_or("G"),
+                                value(clef, "line").unwrap_or("2"),
+                            ) {
                                 ("G", "2") => Clef::Treble,
                                 ("F", "4") => Clef::Bass,
                                 ("C", "3") => Clef::Alto,
-                                ("percussion", _) | ("TAB", _) => return Err("Percussion and tablature staves are not supported by this importer yet.".into()),
-                                _ => { warnings.add("An unsupported clef was replaced by the instrument's default clef; sounding pitches are preserved."); info.instrument.default_clef() }
+                                ("percussion", _) => {
+                                    if !percussion.staves.contains_key(&staff) {
+                                        percussion.declare(staff, 5)?;
+                                    }
+                                    Clef::Treble
+                                }
+                                ("TAB", _) => {
+                                    return Err(
+                                        "Tablature staves are not supported by this importer yet."
+                                            .into(),
+                                    );
+                                }
+                                _ => {
+                                    warnings.add("An unsupported clef was replaced by the instrument's default clef; sounding pitches are preserved.");
+                                    info.instrument.default_clef()
+                                }
                             };
                             if measure_index != 0
                                 && clefs
@@ -423,11 +495,21 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
                                 return Err("MusicXML grace voice identifier is too long.".into());
                             }
                             let shift = transpose.get(&staff).copied().unwrap_or(default_transpose);
-                            let pitch = read_pitch(
-                                child(item, "pitch")
-                                    .ok_or("A grace note must have a pitched note.")?,
-                                shift,
-                            )?;
+                            let pitch = if let Some(token) = percussion.note(
+                                item,
+                                staff,
+                                clefs.get(&staff).copied().unwrap_or(Clef::Treble),
+                                &mut warnings,
+                            )? {
+                                token
+                            } else {
+                                percussion.pitched(staff)?;
+                                read_pitch(
+                                    child(item, "pitch")
+                                        .ok_or("A grace note needs pitch or unpitched identity.")?,
+                                    shift,
+                                )?
+                            };
                             grace.xml(
                                 item,
                                 SourceAnchor {
@@ -440,11 +522,6 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
                                 &mut warnings,
                             )?;
                             continue;
-                        }
-                        if child(item, "unpitched").is_some() {
-                            return Err(format!(
-                                "{context}: unpitched percussion is not supported yet."
-                            ));
                         }
                         let ticks = xml_ticks(item, divisions, &context)?;
                         let rhythm = read_rhythm(item, ticks)
@@ -471,7 +548,15 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
                             return Err("MusicXML voice identifier is too long.".into());
                         }
                         let shift = transpose.get(&staff).copied().unwrap_or(default_transpose);
-                        let pitches = if let Some(pitch) = child(item, "pitch") {
+                        let pitches = if let Some(token) = percussion.note(
+                            item,
+                            staff,
+                            clefs.get(&staff).copied().unwrap_or(Clef::Treble),
+                            &mut warnings,
+                        )? {
+                            vec![token]
+                        } else if let Some(pitch) = child(item, "pitch") {
+                            percussion.pitched(staff)?;
                             vec![read_pitch(pitch, shift)?]
                         } else if child(item, "rest").is_some() {
                             Vec::new()
@@ -513,6 +598,11 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
                             &mut warnings,
                             &excluded,
                         )?;
+                        if child(item, "unpitched").is_some()
+                            && let Some(&pitch) = pitches.first()
+                        {
+                            annotations.percussion_note(&at, pitch, tied);
+                        }
                         ornaments.xml(item, at.clone(), &mut warnings)?;
                         lines.xml_note(item, at, divisions.unwrap_or(480.0), &mut warnings)?;
                         let key = (staff, voice);
@@ -824,6 +914,7 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
                     info.name.clone()
                 },
                 instrument: info.instrument,
+                percussion: percussion.finish(staff),
                 clef: clefs
                     .get(&staff)
                     .copied()

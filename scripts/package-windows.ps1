@@ -23,7 +23,7 @@ $encorePackage = Join-Path $encoreStage $encoreName
 New-Item -ItemType Directory -Path $encorePackage -Force | Out-Null
 try {
     Copy-Item -LiteralPath $BinaryPath -Destination (Join-Path $encorePackage "Encore.exe")
-    foreach ($encoreItem in @("assets", "src", "scripts", "Cargo.toml", "Cargo.lock", "LICENSE", "README.md", "ARCHITECTURE.md", "BUILDING.md", "COMPATIBILITY.md", "FINALE_PARITY.md", "SHORTCUTS.md", "LINKED_PARTS.md", ".gitlab-ci.yml")) {
+    foreach ($encoreItem in @("assets", "src", "scripts", "Cargo.toml", "Cargo.lock", "LICENSE", "README.md", "ARCHITECTURE.md", "BUILDING.md", "COMPATIBILITY.md", "FINALE_PARITY.md", "SHORTCUTS.md", "LINKED_PARTS.md", "PERCUSSION.md", ".gitlab-ci.yml")) {
         Copy-Item -LiteralPath (Join-Path $encoreRoot $encoreItem) -Destination $encorePackage -Recurse
     }
     if (Test-Path -LiteralPath (Join-Path $encoreRoot "tests") -PathType Container) {

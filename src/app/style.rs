@@ -10,6 +10,19 @@ use encore::{
 };
 impl EncoreApp {
     pub(super) fn apply_style_command(&mut self, command: StyleCommand) {
+        if self.active_percussion().is_some()
+            && matches!(
+                command,
+                StyleCommand::Respell
+                    | StyleCommand::ToggleAccidental
+                    | StyleCommand::ToggleCourtesy
+                    | StyleCommand::ToggleParentheses
+                    | StyleCommand::DefaultAccidental
+            )
+        {
+            self.status="Unpitched percussion uses sound IDs and mapped heads, without pitch spelling or accidentals.".into();
+            return;
+        }
         let Some(selection) = self.selected else {
             self.status = "Select a note or rest to change its engraving.".into();
             return;
@@ -50,15 +63,25 @@ impl EncoreApp {
                             Clef::Bass => 22,
                             Clef::Alto => 28,
                         };
-                        note.pitches
-                            .iter()
-                            .map(|pitch| {
-                                self.written_pitch_at(*pitch, anchor)
-                                    .unwrap_or(*pitch)
-                                    .staff_step()
-                            })
-                            .sum::<i32>()
-                            <= center * note.pitches.len() as i32
+                        if let Some(map) = &self.score.parts[selection.part].percussion {
+                            let center = if map.lines == 1 { 0 } else { 4 };
+                            note.pitches
+                                .iter()
+                                .filter_map(|pitch| map.sound(pitch.midi()))
+                                .map(|sound| i32::from(sound.position))
+                                .sum::<i32>()
+                                <= center * note.pitches.len() as i32
+                        } else {
+                            note.pitches
+                                .iter()
+                                .map(|pitch| {
+                                    self.written_pitch_at(*pitch, anchor)
+                                        .unwrap_or(*pitch)
+                                        .staff_step()
+                                })
+                                .sum::<i32>()
+                                <= center * note.pitches.len() as i32
+                        }
                     }
                 });
                 style.stem = match style.stem {
@@ -253,22 +276,24 @@ impl EncoreApp {
             .vscroll(true)
             .show(ctx,|ui|{
    let Some(selection)=self.selected else{ui.label("Select a note or rest to edit its engraving.");return};let Some(anchor)=Anchor::from_selection(&self.score,selection)else{return};
+   let drum=self.score.parts[anchor.part].percussion.is_some();
    let mut style=entry_style::at(&self.score,&anchor).cloned().unwrap_or_else(||EntryStyle::new(anchor));let original=style.clone();
    ui.label(format!("Staff {} · measure {} · layer {}",anchor.part+1,anchor.measure+1,anchor.layer+1));
    egui::ComboBox::from_label("Stem").selected_text(style.stem.name()).show_ui(ui,|ui|{for value in StemDirection::ALL{ui.selectable_value(&mut style.stem,value,value.name());}});
    egui::ComboBox::from_label("Beam").selected_text(style.beam.name()).show_ui(ui,|ui|{for value in BeamStyle::ALL{ui.selectable_value(&mut style.beam,value,value.name());}});
    egui::ComboBox::from_label("Notehead").selected_text(style.notehead.name()).show_ui(ui,|ui|{for value in Notehead::ALL{ui.selectable_value(&mut style.notehead,value,value.name());}});
+   if drum {ui.small("Normal inherits each sound's mapped head. Choose another head to override the map for this entry.");}
    ui.checkbox(&mut style.visible,"Visible in score and print");ui.add(egui::Slider::new(&mut style.scale,0.4..=2.0).text("Notehead scale"));
    ui.small("Hidden entries keep their sounding pitches and timing. Use a smaller head for cue notation.");
    let pitches=self.selected_entry().map(|note|note.pitches.clone()).unwrap_or_default();
    for pitch in pitches{
-    let mut display=style.accidental(pitch.midi());let old=display;ui.horizontal(|ui|{ui.label(self.entry_written_pitch(pitch).unwrap_or(pitch).name());egui::ComboBox::from_id_salt(("pitch-accidental",pitch.midi())).selected_text(display.name()).show_ui(ui,|ui|{for value in AccidentalDisplay::ALL{ui.selectable_value(&mut display,value,value.name());}});let mut tied=style.tie_pitches.as_ref().map_or_else(||self.selected_entry().is_some_and(|note|note.tied),|ties|ties.contains(&pitch.midi()));if ui.checkbox(&mut tied,"Tie").changed(){let ties=style.tie_pitches.get_or_insert_with(||if self.selected_entry().is_some_and(|note|note.tied){self.selected_entry().unwrap().pitches.iter().map(|pitch|pitch.midi()).collect()}else{Vec::new()});ties.retain(|own|*own!=pitch.midi());if tied{ties.push(pitch.midi());}}});if old!=display{style.accidentals.retain(|mark|mark.pitch!=pitch.midi());if display!=AccidentalDisplay::Auto{style.accidentals.push(AccidentalOverride{pitch:pitch.midi(),display});}}
+    let mut display=style.accidental(pitch.midi());let old=display;ui.horizontal(|ui|{ui.label(if drum{self.percussion_name(anchor.part,pitch)}else{self.entry_written_pitch(pitch).unwrap_or(pitch).name()});if !drum {egui::ComboBox::from_id_salt(("pitch-accidental",pitch.midi())).selected_text(display.name()).show_ui(ui,|ui|{for value in AccidentalDisplay::ALL{ui.selectable_value(&mut display,value,value.name());}});}let mut tied=style.tie_pitches.as_ref().map_or_else(||self.selected_entry().is_some_and(|note|note.tied),|ties|ties.contains(&pitch.midi()));if ui.checkbox(&mut tied,"Tie").changed(){let ties=style.tie_pitches.get_or_insert_with(||if self.selected_entry().is_some_and(|note|note.tied){self.selected_entry().unwrap().pitches.iter().map(|pitch|pitch.midi()).collect()}else{Vec::new()});ties.retain(|own|*own!=pitch.midi());if tied{ties.push(pitch.midi());}}});if old!=display{style.accidentals.retain(|mark|mark.pitch!=pitch.midi());if display!=AccidentalDisplay::Auto{style.accidentals.push(AccidentalOverride{pitch:pitch.midi(),display});}}
    }
    egui::ComboBox::from_label("Tie direction").selected_text(style.tie_direction.name()).show_ui(ui,|ui|{for value in SlurDirection::ALL{ui.selectable_value(&mut style.tie_direction,value,value.name());}});
    if ui.button("Restore automatic engraving").clicked(){style=EntryStyle::new(anchor);}
    if style!=original&&let Err(error)=entry_style::assign(&mut self.score,style){self.status=error;}
-   ui.horizontal(|ui| { if ui.button("Show/hide accidental (*)").clicked() { self.apply_style_command(StyleCommand::ToggleAccidental); }
- if ui.button("Automatic accidental").clicked() { self.apply_style_command(StyleCommand::DefaultAccidental); } });
+   if !drum {ui.horizontal(|ui| { if ui.button("Show/hide accidental (*)").clicked() { self.apply_style_command(StyleCommand::ToggleAccidental); }
+ if ui.button("Automatic accidental").clicked() { self.apply_style_command(StyleCommand::DefaultAccidental); } });}
    ui.separator();ui.label("Articulations");if let Some(note)=self.score.parts.get_mut(selection.part).and_then(|part|part.measures.get_mut(selection.measure)).and_then(|bar|bar.notes.get_mut(selection.note)){ui.checkbox(&mut note.staccato,"Staccato");for &mark in Articulation::ALL{let mut enabled=note.articulations.contains(&mark);if ui.checkbox(&mut enabled,mark.name()).changed(){if enabled{note.articulations.push(mark);}else{note.articulations.retain(|prior|*prior!=mark);}}}}
   });
         self.show_entry_style = open;

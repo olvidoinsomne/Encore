@@ -18,6 +18,8 @@ struct ClipboardEvent {
     grace: Vec<encore::grace::GraceGroup>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     ornaments: Vec<encore::ornaments::Ornament>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    percussion: Option<encore::percussion::Staff>,
 }
 
 #[cfg(test)]
@@ -42,6 +44,7 @@ fn encode_document_event(
 ) -> Result<String, String> {
     encode_complete_event(note, lyrics, style, grace, Vec::new())
 }
+#[cfg(test)]
 fn encode_complete_event(
     note: Note,
     lyrics: Vec<encore::lyrics::Lyric>,
@@ -49,8 +52,20 @@ fn encode_complete_event(
     grace: Vec<encore::grace::GraceGroup>,
     ornaments: Vec<encore::ornaments::Ornament>,
 ) -> Result<String, String> {
+    encode_domain_event(note, lyrics, style, grace, ornaments, None)
+}
+fn encode_domain_event(
+    note: Note,
+    lyrics: Vec<encore::lyrics::Lyric>,
+    style: Option<encore::entry_style::EntryStyle>,
+    grace: Vec<encore::grace::GraceGroup>,
+    ornaments: Vec<encore::ornaments::Ornament>,
+    percussion: Option<encore::percussion::Staff>,
+) -> Result<String, String> {
     let data = serde_json::to_string(&ClipboardEvent {
-        version: if !ornaments.is_empty() {
+        version: if percussion.is_some() {
+            7
+        } else if !ornaments.is_empty() {
             6
         } else if note.voice != 0 || note.voice_launch.is_some() {
             5
@@ -68,6 +83,7 @@ fn encode_complete_event(
         style,
         grace,
         ornaments,
+        percussion,
     })
     .map_err(|error| format!("Could not copy event: {error}"))?;
     if data.len() + CLIPBOARD_MARKER.len() > MAX_CLIPBOARD_BYTES {
@@ -85,8 +101,14 @@ fn decode_event(text: &str) -> Result<ClipboardEvent, String> {
         .ok_or("Copy a single note, chord, or rest in Encore before pasting.")?;
     let event: ClipboardEvent = serde_json::from_str(data)
         .map_err(|error| format!("Invalid Encore clipboard event: {error}"))?;
-    if ![1, 2, 3, 4, 5, 6].contains(&event.version) {
+    if ![1, 2, 3, 4, 5, 6, 7].contains(&event.version) {
         return Err("This clipboard event requires a different Encore version.".into());
+    }
+    if event.percussion.is_some() && event.version < 7 {
+        return Err("Percussion event clipboard requires version7.".into());
+    }
+    if let Some(staff) = &event.percussion {
+        staff.validate()?;
     }
     Ok(event)
 }
@@ -149,7 +171,14 @@ impl EncoreApp {
             .filter(|o| Some(o.anchor) == anchor)
             .cloned()
             .collect();
-        let text = match encode_complete_event(note.clone(), lyrics, style, grace, ornaments) {
+        let text = match encode_domain_event(
+            note.clone(),
+            lyrics,
+            style,
+            grace,
+            ornaments,
+            self.score.parts[selection.part].percussion.clone(),
+        ) {
             Ok(text) => text,
             Err(error) => {
                 self.status = error;
@@ -297,8 +326,22 @@ impl EncoreApp {
             style,
             grace,
             ornaments,
+            percussion,
             ..
         } = decode_event(text)?;
+        let destination = self
+            .score
+            .parts
+            .get(self.active_part)
+            .ok_or("Choose an existing destination staff.")?;
+        let ids = note.pitches.iter().map(|pitch| pitch.midi()).chain(
+            grace
+                .iter()
+                .flat_map(|group| &group.notes)
+                .flat_map(|note| &note.pitches)
+                .map(|pitch| pitch.midi()),
+        );
+        encore::percussion::compatible(percussion.as_ref(), destination.percussion.as_ref(), ids)?;
         let detached_launch = note.voice_launch.take().is_some();
         note.start = self.cursor_tick;
         note.layer = self.active_layer;
@@ -550,6 +593,7 @@ mod tests {
                 style: None,
                 grace: Vec::new(),
                 ornaments: Vec::new(),
+                percussion: None,
             })
             .unwrap()
         );
@@ -1066,5 +1110,47 @@ mod ornament_tests {
         };
         assert_eq!(app.score.notation.ornaments, vec![ornament]);
         app.score.validate().unwrap();
+    }
+    #[test]
+    fn percussion_event_clipboard_preserves_domain_and_rejects_aliases_atomically() {
+        let mut score = Score::blank();
+        score.parts[0].percussion = Some(encore::percussion::Staff::general_midi());
+        let mut note = Score::demo().parts[0].measures[0].notes[0].clone();
+        note.start = 0;
+        note.duration = Duration::Quarter;
+        note.pitches = vec![encore::percussion::token(38)];
+        note.tied = false;
+        let staff = score.parts[0].percussion.clone();
+        let text =
+            encode_domain_event(note, Vec::new(), None, Vec::new(), Vec::new(), staff).unwrap();
+        assert_eq!(decode_event(&text).unwrap().version, 7);
+        let mut app = EncoreApp::from_score(score, None, "Ready".into());
+        app.active_part = 1;
+        let before = app.score.clone();
+        app.paste_selection(&text);
+        assert_eq!(app.score, before);
+        app.active_part = 0;
+        app.paste_selection(&text);
+        assert_eq!(
+            app.score.parts[0].measures[0].notes[0].pitches[0],
+            encore::percussion::token(38)
+        );
+        app.cursor_tick = 480;
+        app.score.parts[0]
+            .percussion
+            .as_mut()
+            .unwrap()
+            .sounds
+            .iter_mut()
+            .find(|sound| sound.id == 38)
+            .unwrap()
+            .midi = Some(40);
+        let before = app.score.clone();
+        app.paste_selection(&text);
+        assert_eq!(app.score, before);
+        let legacy = encode_event(Score::demo().parts[0].measures[0].notes[0].clone()).unwrap();
+        let before = app.score.clone();
+        app.paste_selection(&legacy);
+        assert_eq!(app.score, before);
     }
 }

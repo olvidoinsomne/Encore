@@ -21,6 +21,7 @@ mod midi;
 mod musescore;
 mod musicxml;
 mod ornaments;
+mod percussion;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct VoiceTarget {

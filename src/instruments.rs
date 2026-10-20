@@ -432,6 +432,7 @@ pub fn audition_phrase(instrument: Instrument, velocity: u8) -> Score {
         parts: vec![Part {
             name: instrument.name().into(),
             instrument,
+            percussion: None,
             clef: instrument.default_clef(),
             measures,
             volume: 0.8,

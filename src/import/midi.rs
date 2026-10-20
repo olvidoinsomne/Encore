@@ -587,9 +587,6 @@ pub(super) fn parse_with_quantization(
                 velocity,
                 on,
             } => {
-                if channel == 9 {
-                    return Err("MIDI channel 10 percussion kits are not supported yet. Pitched percussion such as timpani on a melodic channel can be imported.".into());
-                }
                 let key = (port, channel, pitch);
                 if on {
                     let state = *channels.entry((port, channel)).or_default();
@@ -740,6 +737,25 @@ pub(super) fn parse_with_quantization(
                     names[group.track].clone()
                 },
                 instrument,
+                percussion: if group.channel == 9 {
+                    let mut staff = crate::percussion::Staff::general_midi();
+                    staff.kit = group.program;
+                    for pitch in lane.iter().flat_map(|chord| &chord.pitches) {
+                        let id = pitch.midi();
+                        if staff.sound(id).is_none() {
+                            staff.sounds.push(crate::percussion::Sound {
+                                id,
+                                name: format!("Drum key {id}"),
+                                midi: Some(id),
+                                position: 4,
+                                notehead: crate::entry_style::Notehead::Normal,
+                            });
+                        }
+                    }
+                    Some(staff)
+                } else {
+                    None
+                },
                 clef: instrument.default_clef(),
                 measures: vec![Measure::default(); measures],
                 volume: channel.volume,
@@ -970,6 +986,7 @@ fn rhythmic_notes(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
 
     fn variable(mut value: u32) -> Vec<u8> {
         let mut bytes = vec![(value & 0x7f) as u8];
@@ -1223,7 +1240,7 @@ mod tests {
                 })
                 .collect();
             source.validate().unwrap();
-            let imported = parse(&crate::export::midi(&source)).unwrap();
+            let imported = parse(&crate::export::midi(&source).unwrap()).unwrap();
             imported.score.validate().unwrap();
             let notes = pitched(&imported.score);
             assert_eq!(notes.len(), 5);
@@ -1351,7 +1368,6 @@ mod tests {
             vec![(0, vec![0x90, 60, 80])],
             vec![(0, vec![0x90, 60, 80]), (0, vec![0x90, 60, 80])],
             vec![(0, vec![0x90, 60, 80]), (0, vec![0x80, 60, 0])],
-            vec![(0, vec![0x99, 60, 80]), (480, vec![0x89, 60, 0])],
             vec![
                 (0, vec![0x90, 60, 80]),
                 (240, vec![0xff, 1, 0]),
@@ -1429,7 +1445,7 @@ mod tests {
     #[test]
     fn encore_orchestral_midi_export_can_be_reopened_including_the_second_port() {
         let source = crate::model::Score::carol_demo();
-        let data = crate::export::midi(&source);
+        let data = crate::export::midi(&source).unwrap();
         let result = parse(&data).unwrap();
         result.score.validate().unwrap();
         assert_eq!(result.score.tempo, source.tempo);
@@ -1819,5 +1835,39 @@ mod tests {
             }
         }
         assert_eq!(std::fs::read(path).unwrap(), before);
+    }
+    #[test]
+    fn channel_ten_imports_sampled_kit_keys_without_melodic_pitch_inference() {
+        let drums = track(
+            &[
+                (0, vec![0xc9, 40]),
+                (0, vec![0x99, 38, 90]),
+                (0, vec![0x99, 42, 80]),
+                (480, vec![0x89, 38, 0]),
+                (480, vec![0x89, 42, 0]),
+            ],
+            480,
+        );
+        let imported = parse(&smf(0, 480, &[drums])).unwrap().score;
+        let part = &imported.parts[0];
+        let staff = part.percussion.as_ref().unwrap();
+        assert_eq!(staff.kit, 40);
+        assert_eq!(staff.output_key(38).unwrap(), 38);
+        assert_eq!(staff.output_key(42).unwrap(), 42);
+        let notes = pitched(&imported);
+        assert!(
+            notes
+                .iter()
+                .flat_map(|n| &n.pitches)
+                .all(|p| crate::percussion::token_id(*p).is_ok())
+        );
+        assert_eq!(
+            notes
+                .iter()
+                .flat_map(|n| &n.pitches)
+                .map(|p| p.midi())
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([38, 42])
+        );
     }
 }

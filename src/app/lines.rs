@@ -27,6 +27,10 @@ impl Default for Editor {
 }
 impl EncoreApp {
     pub(super) fn open_lines(&mut self) {
+        if self.active_percussion().is_some() {
+            self.status="Pitch and pedal lines are unavailable on unpitched percussion. Dynamics and hairpins remain available.".into();
+            return;
+        }
         self.lines_editor.open = true;
         self.write_mode = false;
     }

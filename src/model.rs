@@ -817,6 +817,8 @@ pub struct Measure {
 pub struct Part {
     pub name: String,
     pub instrument: Instrument,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub percussion: Option<crate::percussion::Staff>,
     pub clef: Clef,
     pub measures: Vec<Measure>,
     pub volume: f32,
@@ -829,6 +831,7 @@ impl Part {
         Self {
             name: instrument.name().into(),
             instrument,
+            percussion: None,
             clef: instrument.default_clef(),
             measures: vec![Measure::default(); measures],
             volume: 0.8,

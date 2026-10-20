@@ -2,9 +2,10 @@
 use super::*;
 use crate::grace::{GraceGroup, GracePlacement, GraceSelection};
 
-fn note_width(note: &crate::grace::GraceNote, scale: f32) -> f32 {
+fn note_width(note: &crate::grace::GraceNote, scale: f32, unpitched: bool, span: f32) -> f32 {
     (22.0
-        + if note.pitches.iter().any(|p| p.alter != 0) {
+        + span
+        + if !unpitched && note.pitches.iter().any(|p| p.alter != 0) {
             12.0
         } else {
             0.0
@@ -12,11 +13,22 @@ fn note_width(note: &crate::grace::GraceNote, scale: f32) -> f32 {
         + if note.dotted { 5.0 } else { 0.0 })
         * scale
 }
-pub(super) fn width(group: &GraceGroup) -> f32 {
+pub(super) fn width(score: &Score, group: &GraceGroup) -> f32 {
+    let unpitched = score
+        .parts
+        .get(group.anchor.part)
+        .is_some_and(|p| p.percussion.is_some());
     group
         .notes
         .iter()
-        .map(|n| note_width(n, group.scale))
+        .map(|n| {
+            note_width(
+                n,
+                group.scale,
+                unpitched,
+                display::percussion_span(&score.parts[group.anchor.part], &n.pitches),
+            )
+        })
         .sum::<f32>()
         + 8.0
 }
@@ -30,9 +42,9 @@ pub(super) fn widths(score: &Score, parts: &[usize], measure: usize) -> BTreeMap
     {
         let entry = result.entry(group.anchor.tick).or_default();
         if group.placement == GracePlacement::Before {
-            entry.0 = entry.0.max(width(group));
+            entry.0 = entry.0.max(width(score, group));
         } else {
-            entry.1 = entry.1.max(width(group));
+            entry.1 = entry.1.max(width(score, group));
         }
     }
     result
@@ -70,7 +82,7 @@ pub(super) fn horizontal_requirement(score: &Score, parts: &[usize], measure: us
     normal + groups.values().map(|(a, b)| a + b).sum::<f32>()
 }
 pub(super) fn clearance(score: &Score, part: usize, measure: usize, bars: usize) -> (f32, f32) {
-    let pitch_index = crate::lines::PitchIndex::new(score);
+    let pitch_index = display::Index::new(score);
     let mut above = 0.0f32;
     let mut below = 0.0f32;
     for g in score.notation.grace.iter().filter(|g| {
@@ -78,8 +90,7 @@ pub(super) fn clearance(score: &Score, part: usize, measure: usize, bars: usize)
     }) {
         for n in &g.notes {
             for p in &n.pitches {
-                let pitch = pitch_index.written_pitch(g.anchor, *p);
-                let y = pitch_y(&pitch, score.parts[part].clef, 0.0);
+                let y = pitch_index.y(g.anchor, *p, 0.0);
                 above = above.max(
                     -y + if n.duration.has_stem() && g.anchor.voice == 0 {
                         stem_length(n.duration) * g.scale + 8.0
@@ -102,7 +113,7 @@ pub(super) fn clearance(score: &Score, part: usize, measure: usize, bars: usize)
     (above, below)
 }
 pub(super) fn draw(page: &mut Page, score: &Score, ornaments: &super::ornaments::Index<'_>) {
-    let pitch_index = crate::lines::PitchIndex::new(score);
+    let pitch_index = display::Index::new(score);
     let groups = score
         .notation
         .grace
@@ -122,10 +133,10 @@ pub(super) fn draw(page: &mut Page, score: &Score, ornaments: &super::ornaments:
         else {
             continue;
         };
-        let clef = score.parts[group.anchor.part].clef;
+        let unpitched = pitch_index.unpitched(group.anchor.part);
         let main_x = region.x_at_anchor(&group.anchor);
         let up = group.anchor.voice == 0;
-        let desired = width(group);
+        let desired = width(score, group);
         let start = if group.placement == GracePlacement::Before {
             main_x - ornaments.roll_prefix(&group.anchor) - desired - 6.0
         } else {
@@ -142,49 +153,66 @@ pub(super) fn draw(page: &mut Page, score: &Score, ornaments: &super::ornaments:
         let mut state = BTreeMap::new();
         for (index, note) in group.notes.iter().enumerate() {
             let s = group.scale;
-            let has_alter = note.pitches.iter().any(|p| p.alter != 0);
+            let has_alter = !unpitched && note.pitches.iter().any(|p| p.alter != 0);
             let cx = x + (if has_alter { 17.0 } else { 7.0 }) * s * squeeze;
             let ys = note
                 .pitches
                 .iter()
-                .map(|p| pitch_y(&pitch_index.written_pitch(group.anchor, *p), clef, region.y))
+                .map(|p| pitch_index.y(group.anchor, *p, region.y))
                 .collect::<Vec<_>>();
             let top = ys.iter().copied().fold(f32::INFINITY, f32::min);
             let bottom = ys.iter().copied().fold(f32::NEG_INFINITY, f32::max);
             let mid = ys.iter().sum::<f32>() / ys.len() as f32;
-            let style = crate::entry_style::EntryStyle {
+            let mut style = crate::entry_style::EntryStyle {
                 scale: s,
                 ..crate::entry_style::EntryStyle::new(group.anchor)
             };
             let mut order = (0..note.pitches.len()).collect::<Vec<_>>();
-            order.sort_by_key(|i| note.pitches[*i].staff_step());
+            order.sort_by_key(|i| pitch_index.position(group.anchor, note.pitches[*i]));
+            let columns = pitch_index.columns(group.anchor, &note.pitches);
             let mut last = None;
             let mut displaced = false;
             for i in order {
                 let pitch = pitch_index.written_pitch(group.anchor, note.pitches[i]);
                 let py = ys[i];
-                displaced =
-                    last.is_some_and(|p: i32| (pitch.staff_step() - p).abs() == 1) && !displaced;
-                last = Some(pitch.staff_step());
-                let hx = cx + if displaced { 10.0 * s } else { 0.0 };
-                let mut ly = region.y - 10.0;
-                while py <= ly + 1.0 {
-                    page.line(hx - 7.0 * s, ly, hx + 7.0 * s, ly, 0.8 * s, INK);
-                    ly -= 10.0;
+                let position = pitch_index.position(group.anchor, note.pitches[i]);
+                displaced = last.is_some_and(|p: i32| {
+                    (position - p).abs() == 1 || (unpitched && position == p)
+                }) && !displaced;
+                last = Some(position);
+                let hx = cx
+                    + if unpitched {
+                        columns[i] * 10.0 * s
+                    } else if displaced {
+                        10.0 * s
+                    } else {
+                        0.0
+                    };
+                if !unpitched {
+                    let mut ly = region.y - 10.0;
+                    while py <= ly + 1.0 {
+                        page.line(hx - 7.0 * s, ly, hx + 7.0 * s, ly, 0.8 * s, INK);
+                        ly -= 10.0;
+                    }
+                    let mut ly = region.y + 50.0;
+                    while py >= ly - 1.0 {
+                        page.line(hx - 7.0 * s, ly, hx + 7.0 * s, ly, 0.8 * s, INK);
+                        ly += 10.0;
+                    }
+                    let expected = state
+                        .get(&(pitch.step.index(), pitch.octave))
+                        .copied()
+                        .unwrap_or(key_alter(pitch.step, score.key_fifths));
+                    if expected != pitch.alter {
+                        scaled_accidental(page, cx - 11.0 * s, py, pitch.alter, s);
+                    }
+                    state.insert((pitch.step.index(), pitch.octave), pitch.alter);
                 }
-                let mut ly = region.y + 50.0;
-                while py >= ly - 1.0 {
-                    page.line(hx - 7.0 * s, ly, hx + 7.0 * s, ly, 0.8 * s, INK);
-                    ly += 10.0;
-                }
-                let expected = state
-                    .get(&(pitch.step.index(), pitch.octave))
-                    .copied()
-                    .unwrap_or(key_alter(pitch.step, score.key_fifths));
-                if expected != pitch.alter {
-                    scaled_accidental(page, cx - 11.0 * s, py, pitch.alter, s);
-                }
-                state.insert((pitch.step.index(), pitch.octave), pitch.alter);
+                style.notehead = pitch_index.head(
+                    group.anchor,
+                    note.pitches[i],
+                    crate::entry_style::Notehead::Normal,
+                );
                 entry_style::draw_notehead(
                     page,
                     &style,
@@ -232,7 +260,12 @@ pub(super) fn draw(page: &mut Page, score: &Score, ornaments: &super::ornaments:
                 forced_up: Some(up),
                 beam: note.beam,
             });
-            x += note_width(note, s) * squeeze;
+            x += note_width(
+                note,
+                s,
+                unpitched,
+                display::percussion_span(&score.parts[group.anchor.part], &note.pitches),
+            ) * squeeze;
         }
         let mut i = 0;
         while i < layouts.len() {
@@ -275,7 +308,7 @@ pub(super) fn draw(page: &mut Page, score: &Score, ornaments: &super::ornaments:
             let main_y = main
                 .pitches
                 .iter()
-                .map(|p| pitch_y(&pitch_index.written_pitch(group.anchor, *p), clef, region.y))
+                .map(|p| pitch_index.y(group.anchor, *p, region.y))
                 .reduce(|a, b| if up { a.max(b) } else { a.min(b) })
                 .unwrap_or(region.y + 20.0)
                 + if up { 8.0 } else { -8.0 };

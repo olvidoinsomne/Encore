@@ -65,7 +65,12 @@ pub(super) fn clearance(
     }
     (above, below)
 }
-fn base(score: &Score, region: &StaffRegion, placement: Placement) -> f32 {
+fn base(
+    score: &Score,
+    region: &StaffRegion,
+    placement: Placement,
+    display: &display::Index,
+) -> f32 {
     match placement {
         Placement::Above => region.y - 34.0,
         Placement::Below => score.parts[region.part]
@@ -74,7 +79,9 @@ fn base(score: &Score, region: &StaffRegion, placement: Placement) -> f32 {
             .map_or(region.y + 65.0, |measure| {
                 staff_dynamic_baseline(
                     &measure.notes,
-                    score.parts[region.part].clef,
+                    display,
+                    region.part,
+                    region.measure,
                     region.y,
                     measure.notes.iter().any(|note| note.lane() != 0),
                 )
@@ -82,6 +89,7 @@ fn base(score: &Score, region: &StaffRegion, placement: Placement) -> f32 {
     }
 }
 pub(super) fn draw(page: &mut Page, score: &Score) {
+    let display = display::Index::new(score);
     let staves = page.staves.clone();
     for mark in &score.notation.expressions {
         for region in staves.iter().filter(|region| {
@@ -96,7 +104,7 @@ pub(super) fn draw(page: &mut Page, score: &Score) {
                 continue;
             }
             let x = region.x_at_tick(mark.anchor.tick as f32) + mark.offset[0];
-            let mut y = base(score, region, mark.placement) + mark.offset[1];
+            let mut y = base(score, region, mark.placement, &display) + mark.offset[1];
             if mark.placement == Placement::Above {
                 let system = staves
                     .iter()
@@ -167,14 +175,14 @@ pub(super) fn draw(page: &mut Page, score: &Score) {
                 Placement::Above => {
                     regions
                         .iter()
-                        .map(|region| base(score, region, line.placement))
+                        .map(|region| base(score, region, line.placement, &display))
                         .fold(f32::INFINITY, f32::min)
                         - 15.0
                 }
                 Placement::Below => {
                     regions
                         .iter()
-                        .map(|region| base(score, region, line.placement))
+                        .map(|region| base(score, region, line.placement, &display))
                         .fold(0.0, f32::max)
                         + 18.0
                         + lyrics::extra_below(

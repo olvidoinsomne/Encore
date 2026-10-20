@@ -437,6 +437,7 @@ fn parse_enigma(xml: &str, metadata: Option<&[u8]>) -> Result<ImportResult, Stri
         let mut part = Part {
             name,
             instrument,
+            percussion: None,
             clef: instrument.default_clef(),
             measures: vec![Measure::default(); measures.len()],
             volume: 0.8,

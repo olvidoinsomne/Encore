@@ -259,3 +259,7 @@ controls remains pending. Voiced linked parts use source-score editing for
 music changes; their view/navigation, formatting and extraction controls remain
 available. Ornament assignment uses Notation → Ornaments and arpeggios; Finale
 articulation trigger keys and programmable metatools remain pending.
+
+## Unpitched percussion context
+
+On a percussion staff, Enter uses the selected named sound and duration; Shift-click in the sound palette enters it directly. Up/Down walks mapped sounds in staff-position order, including alternatives sharing a position. Simple Entry modifies the selected chord sound; Speedy moves its entry sound. Duration, rest, tie, chord, layer/voice and navigation commands retain their ordinary context. A–G, intervals, octave shifts, accidental/respelling and melodic transposition commands do not reinterpret drum IDs. Grace editing offers the same named sounds. MIDI keyboard entry and mouse-drag sound cycling remain pending. This follows the public [Finale percussion entry reference](https://usermanuals.finalemusic.com/FinaleWin/Content/Finale/Percussion.htm) within Encore’s currently implemented entry profiles.

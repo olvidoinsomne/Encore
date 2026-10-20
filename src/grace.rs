@@ -307,7 +307,7 @@ impl MusicXmlIndex {
             .collect::<BTreeMap<_, _>>();
         for ((anchor, placement), group) in &groups {
             let number = numbers.get(anchor).copied().flatten();
-            let xml = write_musicxml_group(group, number);
+            let xml = write_musicxml_group(score, group, number);
             if *placement == GracePlacement::Before {
                 result.before.insert(*anchor, xml);
             } else {
@@ -394,12 +394,16 @@ fn musicxml_group(score: &Score, anchor: &Anchor, placement: GracePlacement) -> 
         return String::new();
     };
     let number = connector_number(score, anchor);
-    write_musicxml_group(group, number)
+    write_musicxml_group(score, group, number)
 }
-fn write_musicxml_group(group: &GraceGroup, number: Option<usize>) -> String {
+fn write_musicxml_group(score: &Score, group: &GraceGroup, number: Option<usize>) -> String {
     use std::fmt::Write;
     let anchor = group.anchor;
     let placement = group.placement;
+    let staff = score
+        .parts
+        .get(anchor.part)
+        .and_then(|p| p.percussion.as_ref());
     let mut out = String::new();
     for (index, note) in group.notes.iter().enumerate() {
         for (tone, pitch) in note.pitches.iter().enumerate() {
@@ -425,12 +429,25 @@ fn write_musicxml_group(group: &GraceGroup, number: Option<usize>) -> String {
             if tone > 0 {
                 out.push_str("<chord/>");
             }
+            let sound = staff.and_then(|s| s.sound(pitch.midi()));
+            if let Some(sound) = sound {
+                out.push_str(&crate::export::percussion::pitch(sound));
+                out.push_str(&crate::export::percussion::instrument(
+                    anchor.part,
+                    sound.id,
+                ));
+            } else {
+                let _ = write!(
+                    out,
+                    "<pitch><step>{}</step><alter>{}</alter><octave>{}</octave></pitch>",
+                    pitch.step.name(),
+                    pitch.alter,
+                    pitch.octave
+                );
+            }
             let _ = write!(
                 out,
-                "<pitch><step>{}</step><alter>{}</alter><octave>{}</octave></pitch><voice>{}</voice><type size=\"cue\">{}</type>",
-                pitch.step.name(),
-                pitch.alter,
-                pitch.octave,
+                "<voice>{}</voice><type size=\"cue\">{}</type>",
                 anchor.lane() + 1,
                 note.duration.musicxml_type()
             );
@@ -438,6 +455,12 @@ fn write_musicxml_group(group: &GraceGroup, number: Option<usize>) -> String {
                 out.push_str("<dot/>");
             }
             out.push_str("<stem>up</stem>");
+            if let Some(sound) = sound {
+                out.push_str(&crate::export::percussion::notehead(
+                    sound.notehead,
+                    group.scale,
+                ));
+            }
             if tone == 0 && note.duration.flags() > 0 {
                 for level in 1..=note.duration.flags() {
                     let previous = index.checked_sub(1).and_then(|i| group.notes.get(i));

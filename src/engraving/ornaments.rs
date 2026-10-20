@@ -24,7 +24,7 @@ impl<'a> Index<'a> {
         if score.notation.ornaments.is_empty() {
             return result;
         }
-        let pitches = crate::lines::PitchIndex::new(score);
+        let pitches = display::Index::new(score);
         let styles = crate::entry_style::Index::new(score);
         let mut entries = BTreeMap::new();
         for (part, staff) in score.parts.iter().enumerate() {
@@ -34,7 +34,8 @@ impl<'a> Index<'a> {
                     .notes
                     .first()
                     .is_some_and(|first| bar.notes.iter().any(|n| n.lane() != first.lane()));
-                let dynamic = staff_dynamic_baseline(&bar.notes, staff.clef, 0.0, multiple);
+                let dynamic =
+                    staff_dynamic_baseline(&bar.notes, &pitches, part, measure, 0.0, multiple);
                 for note in &bar.notes {
                     entries.insert(
                         Anchor {
@@ -54,14 +55,16 @@ impl<'a> Index<'a> {
                 continue;
             };
             let style = styles.get(&mark.anchor);
-            if note.pitches.is_empty() || style.is_some_and(|s| !s.visible) {
+            if note.pitches.is_empty()
+                || style.is_some_and(|s| !s.visible)
+                || pitches.unpitched(mark.anchor.part)
+            {
                 continue;
             }
-            let clef = score.parts[mark.anchor.part].clef;
             let ys = note
                 .pitches
                 .iter()
-                .map(|p| pitch_y(&pitches.written_pitch(mark.anchor, *p), clef, 0.0))
+                .map(|p| pitches.y(mark.anchor, *p, 0.0))
                 .collect::<Vec<_>>();
             let top = ys.iter().copied().fold(f32::INFINITY, f32::min);
             let bottom = ys.iter().copied().fold(f32::NEG_INFINITY, f32::max);
@@ -90,25 +93,32 @@ impl<'a> Index<'a> {
             } else {
                 (bottom + 22.0 + articulation_room).max(dynamic + 21.0)
             };
-            let accidental = note
-                .pitches
-                .iter()
-                .any(|p| p.alter != key_alter(p.step, score.key_fifths))
-                || style.is_some_and(|s| !s.accidentals.is_empty());
-            // Leave the chord's accidental column clear before drawing a roll.
-            let parenthesized = style.is_some_and(|s| {
-                s.accidentals.iter().any(|a| {
-                    matches!(
-                        a.display,
-                        crate::entry_style::AccidentalDisplay::Courtesy
-                            | crate::entry_style::AccidentalDisplay::Parenthesized
-                    )
-                })
-            });
-            let seconds = note.pitches.iter().any(|a| {
-                note.pitches
+            let accidental = !pitches.unpitched(mark.anchor.part)
+                && (note
+                    .pitches
                     .iter()
-                    .any(|b| (a.staff_step() - b.staff_step()).abs() == 1)
+                    .any(|p| p.alter != key_alter(p.step, score.key_fifths))
+                    || style.is_some_and(|s| !s.accidentals.is_empty()));
+            // Leave the chord's accidental column clear before drawing a roll.
+            let parenthesized = !pitches.unpitched(mark.anchor.part)
+                && style.is_some_and(|s| {
+                    s.accidentals.iter().any(|a| {
+                        matches!(
+                            a.display,
+                            crate::entry_style::AccidentalDisplay::Courtesy
+                                | crate::entry_style::AccidentalDisplay::Parenthesized
+                        )
+                    })
+                });
+            let seconds = note.pitches.iter().any(|a| {
+                note.pitches.iter().any(|b| {
+                    a != b && {
+                        let distance = (pitches.position(mark.anchor, *a)
+                            - pitches.position(mark.anchor, *b))
+                        .abs();
+                        distance == 1 || (pitches.unpitched(mark.anchor.part) && distance == 0)
+                    }
+                })
             });
             let left = if parenthesized {
                 44.0
@@ -119,7 +129,7 @@ impl<'a> Index<'a> {
             } else {
                 17.0
             };
-            let aux = if mark.kind.chord() {
+            let aux = if mark.kind.chord() || pitches.unpitched(mark.anchor.part) {
                 None
             } else {
                 crate::ornaments::auxiliary_pitches_for_note(score, mark, note).ok()
