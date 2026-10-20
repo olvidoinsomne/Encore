@@ -320,6 +320,7 @@ impl LinkedPart {
             rule.validate()?;
         }
         self.transposition.validate()?;
+        crate::groups::validate_layout(&self.layout, staff_count)?;
         self.layout.validate()
     }
 }
@@ -571,12 +572,14 @@ fn project_internal(score: &Score, part: &LinkedPart, written: bool) -> Result<P
         ));
     }
     transpose_projection(&mut projected, interval)?;
-    projected.notation.layout = part.layout.clone();
+    let mut layout = part.layout.clone();
+    warnings.extend(crate::groups::project(&mut layout, &part.staves));
+    projected.notation.layout = layout.clone();
     projected.validate()?;
     Ok(Projection {
         score: projected,
         source_staves: part.staves.clone(),
-        layout: part.layout.clone(),
+        layout,
         transposition: interval,
         warnings,
         entries,
@@ -738,6 +741,21 @@ fn project_notation(
             count("ornaments incompatible with retained pitches");
         }
         compatible
+    });
+    score.notation.tremolos.retain_mut(|mark| {
+        if !map(&mut mark.anchor) {
+            return false;
+        }
+        if let Some(end) = &mut mark.end
+            && !map(end)
+        {
+            return false;
+        }
+        let retained = pitched(&mark.anchor) && mark.end.as_ref().is_none_or(pitched);
+        if !retained {
+            count("tremolos with hidden principals");
+        }
+        retained
     });
     score.notation.grace.retain_mut(|group| {
         let source = group.anchor;
@@ -1614,6 +1632,47 @@ mod voicing_tests {
             multiple[0].pitches,
             vec![Pitch::from_midi(48), Pitch::from_midi(55)]
         );
+    }
+    #[test]
+    fn tremolos_project_only_when_all_principals_retain_sounding_pitches() {
+        let mut score = Score::blank();
+        score.parts[1].measures[0].notes = vec![
+            note(0, 0, &[48, 60]),
+            note(480, 0, &[50]),
+            note(960, 1, &[64, 67]),
+        ];
+        let mut pair = crate::tremolos::Tremolo::new(at(1, 0, 0, 0));
+        pair.end = Some(at(1, 0, 480, 0));
+        let single = crate::tremolos::Tremolo::new(at(1, 0, 960, 1));
+        score.notation.tremolos = vec![pair, single];
+        score.validate().unwrap();
+        let before = score.clone();
+        let mut definition = part(1, ChordFilter::Highest);
+        definition.voicing[0].lanes = 3;
+        let full = project(&score, &definition).unwrap();
+        assert_eq!(full.score.notation.tremolos.len(), 2);
+        assert_eq!(full.score.notation.tremolos[0].anchor.part, 0);
+        assert_eq!(full.score.notation.tremolos[0].end.unwrap().part, 0);
+        definition.voicing[0].include_single_notes = false;
+        let filtered = project(&score, &definition).unwrap();
+        assert_eq!(filtered.score.notation.tremolos.len(), 1);
+        assert_eq!(filtered.score.notation.tremolos[0].anchor.layer, 1);
+        assert!(
+            filtered
+                .warnings
+                .iter()
+                .any(|w| w.contains("tremolos with hidden principals"))
+        );
+        definition.voicing[0].lanes = 1;
+        assert!(
+            project(&score, &definition)
+                .unwrap()
+                .score
+                .notation
+                .tremolos
+                .is_empty()
+        );
+        assert_eq!(score, before);
     }
     #[test]
     fn secondary_only_projection_keeps_rhythm_and_separates_orphaned_branches() {

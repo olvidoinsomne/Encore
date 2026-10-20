@@ -1,0 +1,953 @@
+{
+  "title": "Staff Groups and Tremolos Study",
+  "composer": "Encore original notation study",
+  "tempo": 108,
+  "time_numerator": 4,
+  "time_denominator": 4,
+  "key_fifths": 0,
+  "parts": [
+    {
+      "name": "Piano \u00b7 right hand",
+      "instrument": "Piano",
+      "clef": "Treble",
+      "measures": [
+        {
+          "notes": [
+            {
+              "start": 0,
+              "duration": "Quarter",
+              "dotted": false,
+              "pitches": [
+                {
+                  "step": "C",
+                  "alter": 0,
+                  "octave": 4
+                }
+              ],
+              "velocity": 80,
+              "staccato": false,
+              "tied": false
+            },
+            {
+              "start": 480,
+              "duration": "Quarter",
+              "dotted": false,
+              "pitches": [
+                {
+                  "step": "G",
+                  "alter": 0,
+                  "octave": 4
+                }
+              ],
+              "velocity": 80,
+              "staccato": false,
+              "tied": false
+            },
+            {
+              "start": 960,
+              "duration": "Quarter",
+              "dotted": false,
+              "pitches": [
+                {
+                  "step": "E",
+                  "alter": 0,
+                  "octave": 4
+                }
+              ],
+              "velocity": 80,
+              "staccato": false,
+              "tied": false
+            },
+            {
+              "start": 1440,
+              "duration": "Quarter",
+              "dotted": false,
+              "pitches": [
+                {
+                  "step": "B",
+                  "alter": 0,
+                  "octave": 4
+                }
+              ],
+              "velocity": 80,
+              "staccato": false,
+              "tied": false
+            }
+          ]
+        },
+        {
+          "notes": [
+            {
+              "start": 0,
+              "duration": "Half",
+              "dotted": false,
+              "pitches": [
+                {
+                  "step": "C",
+                  "alter": 0,
+                  "octave": 5
+                }
+              ],
+              "velocity": 80,
+              "staccato": false,
+              "tied": false
+            },
+            {
+              "start": 960,
+              "duration": "Half",
+              "dotted": false,
+              "pitches": [
+                {
+                  "step": "E",
+                  "alter": 0,
+                  "octave": 5
+                }
+              ],
+              "velocity": 80,
+              "staccato": false,
+              "tied": false
+            }
+          ]
+        },
+        {
+          "notes": [
+            {
+              "start": 0,
+              "duration": "Half",
+              "dotted": true,
+              "pitches": [
+                {
+                  "step": "E",
+                  "alter": 0,
+                  "octave": 4
+                },
+                {
+                  "step": "G",
+                  "alter": 0,
+                  "octave": 4
+                },
+                {
+                  "step": "C",
+                  "alter": 0,
+                  "octave": 5
+                }
+              ],
+              "velocity": 80,
+              "staccato": false,
+              "tied": false
+            },
+            {
+              "start": 1440,
+              "duration": "Eighth",
+              "dotted": false,
+              "pitches": [
+                {
+                  "step": "D",
+                  "alter": 0,
+                  "octave": 5
+                }
+              ],
+              "velocity": 80,
+              "staccato": false,
+              "tied": false
+            },
+            {
+              "start": 1680,
+              "duration": "Eighth",
+              "dotted": false,
+              "pitches": [
+                {
+                  "step": "E",
+                  "alter": 0,
+                  "octave": 5
+                }
+              ],
+              "velocity": 80,
+              "staccato": false,
+              "tied": false
+            }
+          ]
+        },
+        {
+          "notes": [
+            {
+              "start": 0,
+              "duration": "Eighth",
+              "dotted": false,
+              "pitches": [
+                {
+                  "step": "C",
+                  "alter": 0,
+                  "octave": 5
+                }
+              ],
+              "velocity": 80,
+              "staccato": false,
+              "tied": false,
+              "tuplet": {
+                "actual": 3,
+                "normal": 2
+              }
+            },
+            {
+              "start": 160,
+              "duration": "Eighth",
+              "dotted": false,
+              "pitches": [
+                {
+                  "step": "D",
+                  "alter": 0,
+                  "octave": 5
+                }
+              ],
+              "velocity": 80,
+              "staccato": false,
+              "tied": false,
+              "tuplet": {
+                "actual": 3,
+                "normal": 2
+              }
+            },
+            {
+              "start": 320,
+              "duration": "Eighth",
+              "dotted": false,
+              "pitches": [
+                {
+                  "step": "E",
+                  "alter": 0,
+                  "octave": 5
+                }
+              ],
+              "velocity": 80,
+              "staccato": false,
+              "tied": false,
+              "tuplet": {
+                "actual": 3,
+                "normal": 2
+              }
+            },
+            {
+              "start": 480,
+              "duration": "Quarter",
+              "dotted": false,
+              "pitches": [
+                {
+                  "step": "E",
+                  "alter": 0,
+                  "octave": 5
+                }
+              ],
+              "velocity": 80,
+              "staccato": false,
+              "tied": false
+            },
+            {
+              "start": 960,
+              "duration": "Quarter",
+              "dotted": false,
+              "pitches": [
+                {
+                  "step": "D",
+                  "alter": 0,
+                  "octave": 5
+                }
+              ],
+              "velocity": 80,
+              "staccato": false,
+              "tied": false
+            },
+            {
+              "start": 1440,
+              "duration": "Quarter",
+              "dotted": false,
+              "pitches": [
+                {
+                  "step": "C",
+                  "alter": 0,
+                  "octave": 5
+                }
+              ],
+              "velocity": 80,
+              "staccato": false,
+              "tied": false
+            }
+          ]
+        }
+      ],
+      "volume": 0.8,
+      "pan": 0.0,
+      "muted": false,
+      "solo": false
+    },
+    {
+      "name": "Piano \u00b7 left hand",
+      "instrument": "Piano",
+      "clef": "Bass",
+      "measures": [
+        {
+          "notes": [
+            {
+              "start": 0,
+              "duration": "Whole",
+              "dotted": false,
+              "pitches": [
+                {
+                  "step": "C",
+                  "alter": 0,
+                  "octave": 3
+                },
+                {
+                  "step": "G",
+                  "alter": 0,
+                  "octave": 3
+                },
+                {
+                  "step": "C",
+                  "alter": 0,
+                  "octave": 4
+                }
+              ],
+              "velocity": 80,
+              "staccato": false,
+              "tied": false
+            }
+          ]
+        },
+        {
+          "notes": [
+            {
+              "start": 0,
+              "duration": "Half",
+              "dotted": false,
+              "pitches": [
+                {
+                  "step": "C",
+                  "alter": 0,
+                  "octave": 2
+                },
+                {
+                  "step": "G",
+                  "alter": 0,
+                  "octave": 2
+                }
+              ],
+              "velocity": 80,
+              "staccato": false,
+              "tied": false
+            },
+            {
+              "start": 960,
+              "duration": "Half",
+              "dotted": false,
+              "pitches": [
+                {
+                  "step": "G",
+                  "alter": 0,
+                  "octave": 2
+                },
+                {
+                  "step": "D",
+                  "alter": 0,
+                  "octave": 3
+                }
+              ],
+              "velocity": 80,
+              "staccato": false,
+              "tied": false
+            }
+          ]
+        },
+        {
+          "notes": [
+            {
+              "start": 0,
+              "duration": "Whole",
+              "dotted": false,
+              "pitches": [
+                {
+                  "step": "G",
+                  "alter": 0,
+                  "octave": 2
+                },
+                {
+                  "step": "D",
+                  "alter": 0,
+                  "octave": 3
+                },
+                {
+                  "step": "G",
+                  "alter": 0,
+                  "octave": 3
+                }
+              ],
+              "velocity": 80,
+              "staccato": false,
+              "tied": false
+            }
+          ]
+        },
+        {
+          "notes": [
+            {
+              "start": 0,
+              "duration": "Quarter",
+              "dotted": false,
+              "pitches": [
+                {
+                  "step": "C",
+                  "alter": 0,
+                  "octave": 3
+                }
+              ],
+              "velocity": 80,
+              "staccato": false,
+              "tied": false
+            },
+            {
+              "start": 480,
+              "duration": "Quarter",
+              "dotted": false,
+              "pitches": [
+                {
+                  "step": "G",
+                  "alter": 0,
+                  "octave": 3
+                }
+              ],
+              "velocity": 80,
+              "staccato": false,
+              "tied": false
+            },
+            {
+              "start": 960,
+              "duration": "Quarter",
+              "dotted": false,
+              "pitches": [
+                {
+                  "step": "C",
+                  "alter": 0,
+                  "octave": 4
+                }
+              ],
+              "velocity": 80,
+              "staccato": false,
+              "tied": false
+            },
+            {
+              "start": 1440,
+              "duration": "Quarter",
+              "dotted": false,
+              "pitches": [
+                {
+                  "step": "G",
+                  "alter": 0,
+                  "octave": 4
+                }
+              ],
+              "velocity": 80,
+              "staccato": false,
+              "tied": false
+            }
+          ]
+        }
+      ],
+      "volume": 0.8,
+      "pan": 0.0,
+      "muted": false,
+      "solo": false
+    },
+    {
+      "name": "Drum kit",
+      "instrument": {
+        "GeneralMidi": 118
+      },
+      "clef": "Treble",
+      "measures": [
+        {
+          "notes": [
+            {
+              "start": 0,
+              "duration": "Half",
+              "dotted": false,
+              "pitches": [
+                {
+                  "step": "D",
+                  "alter": 0,
+                  "octave": 2
+                }
+              ],
+              "velocity": 80,
+              "staccato": false,
+              "tied": false
+            },
+            {
+              "start": 960,
+              "duration": "Half",
+              "dotted": false,
+              "pitches": [],
+              "velocity": 80,
+              "staccato": false,
+              "tied": false
+            }
+          ]
+        },
+        {
+          "notes": [
+            {
+              "start": 0,
+              "duration": "Half",
+              "dotted": false,
+              "pitches": [
+                {
+                  "step": "F",
+                  "alter": 1,
+                  "octave": 2
+                }
+              ],
+              "velocity": 80,
+              "staccato": false,
+              "tied": false
+            },
+            {
+              "start": 960,
+              "duration": "Half",
+              "dotted": false,
+              "pitches": [
+                {
+                  "step": "A",
+                  "alter": 1,
+                  "octave": 2
+                }
+              ],
+              "velocity": 80,
+              "staccato": false,
+              "tied": false
+            }
+          ]
+        },
+        {
+          "notes": [
+            {
+              "start": 0,
+              "duration": "Whole",
+              "dotted": false,
+              "pitches": [
+                {
+                  "step": "C",
+                  "alter": 1,
+                  "octave": 3
+                }
+              ],
+              "velocity": 80,
+              "staccato": false,
+              "tied": false
+            }
+          ]
+        },
+        {
+          "notes": [
+            {
+              "start": 0,
+              "duration": "Whole",
+              "dotted": false,
+              "pitches": [
+                {
+                  "step": "D",
+                  "alter": 0,
+                  "octave": 2
+                }
+              ],
+              "velocity": 80,
+              "staccato": false,
+              "tied": false
+            }
+          ]
+        }
+      ],
+      "volume": 0.8,
+      "pan": 0.0,
+      "muted": false,
+      "solo": false,
+      "percussion": {
+        "kit": 0,
+        "lines": 5,
+        "sounds": [
+          {
+            "id": 36,
+            "name": "Bass drum",
+            "midi": 36,
+            "position": 1,
+            "notehead": "Normal"
+          },
+          {
+            "id": 38,
+            "name": "Snare",
+            "midi": 38,
+            "position": 5,
+            "notehead": "Normal"
+          },
+          {
+            "id": 42,
+            "name": "Closed hi-hat",
+            "midi": 42,
+            "position": 9,
+            "notehead": "Cross"
+          },
+          {
+            "id": 46,
+            "name": "Open hi-hat",
+            "midi": 46,
+            "position": 9,
+            "notehead": "Diamond"
+          },
+          {
+            "id": 49,
+            "name": "Crash cymbal",
+            "midi": 49,
+            "position": 10,
+            "notehead": "Cross"
+          },
+          {
+            "id": 51,
+            "name": "Ride cymbal",
+            "midi": 51,
+            "position": 8,
+            "notehead": "Cross"
+          }
+        ]
+      }
+    }
+  ],
+  "notation": {
+    "layout": {
+      "measures_per_system": 2,
+      "staff_gap": 12,
+      "groups": [
+        {
+          "id": "ensemble",
+          "first_staff": 0,
+          "last_staff": 2,
+          "name": "Ensemble",
+          "abbreviation": "Ens.",
+          "show_name": true,
+          "symbol": "Bracket",
+          "barlines": "Through",
+          "show_single": false,
+          "offset": [
+            0.0,
+            0.0,
+            0.0
+          ]
+        },
+        {
+          "id": "piano",
+          "first_staff": 0,
+          "last_staff": 1,
+          "name": "Piano",
+          "abbreviation": "Pno.",
+          "show_name": true,
+          "symbol": "Brace",
+          "barlines": "Through",
+          "show_single": false,
+          "offset": [
+            0.0,
+            0.0,
+            0.0
+          ]
+        }
+      ],
+      "footer": {
+        "left": "Encore original study",
+        "right": "{page}"
+      }
+    },
+    "parts": [
+      {
+        "id": "piano",
+        "name": "Piano",
+        "staves": [
+          0,
+          1
+        ],
+        "layout": {
+          "groups": [
+            {
+              "id": "piano-only",
+              "first_staff": 0,
+              "last_staff": 1,
+              "name": "Piano",
+              "abbreviation": "Pno.",
+              "show_name": true,
+              "symbol": "Brace",
+              "barlines": "Through",
+              "show_single": false,
+              "offset": [
+                0.0,
+                0.0,
+                0.0
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "id": "kit",
+        "name": "Drum kit",
+        "staves": [
+          2
+        ],
+        "layout": {
+          "groups": []
+        }
+      }
+    ],
+    "tremolos": [
+      {
+        "anchor": {
+          "part": 0,
+          "measure": 0,
+          "tick": 0,
+          "layer": 0
+        },
+        "strokes": 2,
+        "playback": true,
+        "offset": [
+          0.0,
+          0.0
+        ],
+        "end": {
+          "part": 0,
+          "measure": 0,
+          "tick": 480,
+          "layer": 0
+        }
+      },
+      {
+        "anchor": {
+          "part": 0,
+          "measure": 0,
+          "tick": 960,
+          "layer": 0
+        },
+        "strokes": 2,
+        "playback": true,
+        "offset": [
+          0.0,
+          0.0
+        ],
+        "end": {
+          "part": 0,
+          "measure": 0,
+          "tick": 1440,
+          "layer": 0
+        }
+      },
+      {
+        "anchor": {
+          "part": 0,
+          "measure": 1,
+          "tick": 0,
+          "layer": 0
+        },
+        "strokes": 3,
+        "playback": true,
+        "offset": [
+          0.0,
+          0.0
+        ],
+        "end": {
+          "part": 0,
+          "measure": 1,
+          "tick": 960,
+          "layer": 0
+        }
+      },
+      {
+        "anchor": {
+          "part": 0,
+          "measure": 2,
+          "tick": 0,
+          "layer": 0
+        },
+        "strokes": 2,
+        "playback": true,
+        "offset": [
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "anchor": {
+          "part": 0,
+          "measure": 3,
+          "tick": 0,
+          "layer": 0
+        },
+        "strokes": 1,
+        "playback": true,
+        "offset": [
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "anchor": {
+          "part": 0,
+          "measure": 3,
+          "tick": 160,
+          "layer": 0
+        },
+        "strokes": 1,
+        "playback": true,
+        "offset": [
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "anchor": {
+          "part": 0,
+          "measure": 3,
+          "tick": 320,
+          "layer": 0
+        },
+        "strokes": 1,
+        "playback": true,
+        "offset": [
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "anchor": {
+          "part": 1,
+          "measure": 1,
+          "tick": 0,
+          "layer": 0
+        },
+        "strokes": 1,
+        "playback": true,
+        "offset": [
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "anchor": {
+          "part": 1,
+          "measure": 3,
+          "tick": 0,
+          "layer": 0
+        },
+        "strokes": 2,
+        "playback": true,
+        "offset": [
+          0.0,
+          0.0
+        ],
+        "end": {
+          "part": 1,
+          "measure": 3,
+          "tick": 480,
+          "layer": 0
+        }
+      },
+      {
+        "anchor": {
+          "part": 2,
+          "measure": 0,
+          "tick": 0,
+          "layer": 0
+        },
+        "strokes": 3,
+        "playback": true,
+        "offset": [
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "anchor": {
+          "part": 2,
+          "measure": 1,
+          "tick": 0,
+          "layer": 0
+        },
+        "strokes": 2,
+        "playback": true,
+        "offset": [
+          0.0,
+          0.0
+        ],
+        "end": {
+          "part": 2,
+          "measure": 1,
+          "tick": 960,
+          "layer": 0
+        }
+      },
+      {
+        "anchor": {
+          "part": 2,
+          "measure": 3,
+          "tick": 0,
+          "layer": 0
+        },
+        "strokes": 3,
+        "playback": true,
+        "offset": [
+          0.0,
+          0.0
+        ]
+      }
+    ],
+    "slurs": [
+      {
+        "start": {
+          "part": 0,
+          "measure": 0,
+          "tick": 0,
+          "layer": 0
+        },
+        "end": {
+          "part": 0,
+          "measure": 0,
+          "tick": 1440,
+          "layer": 0
+        },
+        "direction": "Above",
+        "height": 18
+      }
+    ],
+    "grace": [
+      {
+        "anchor": {
+          "part": 2,
+          "measure": 3,
+          "tick": 0,
+          "layer": 0
+        },
+        "notes": [
+          {
+            "pitches": [
+              {
+                "step": "D",
+                "alter": 0,
+                "octave": 2
+              }
+            ],
+            "duration": "Sixteenth",
+            "dotted": false
+          }
+        ],
+        "placement": "Before",
+        "timing": "StealMain",
+        "percent": 12.5,
+        "slashed": true,
+        "slur_to_main": true,
+        "scale": 0.65
+      }
+    ]
+  }
+}

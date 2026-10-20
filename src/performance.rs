@@ -74,6 +74,7 @@ pub fn needed(score: &Score) -> bool {
             .ornaments
             .iter()
             .any(|o| o.playback && o.kind != crate::ornaments::OrnamentKind::NonArpeggiate)
+        || score.notation.tremolos.iter().any(|t| t.playback)
         || !score.notation.grace.is_empty()
         || score
             .notation
@@ -214,6 +215,7 @@ struct Event {
     note: Note,
     grace: bool,
     grace_velocity: Option<u8>,
+    pulse: bool,
 }
 fn source(score: &Score, a: Anchor) -> u64 {
     a.measure as u64 * u64::from(score.measure_ticks()) + u64::from(a.tick)
@@ -221,6 +223,7 @@ fn source(score: &Score, a: Anchor) -> u64 {
 fn adjacent(a: &Event, b: &Event, score: &Score) -> bool {
     !a.grace
         && !b.grace
+        && !b.pulse
         && a.anchor.part == b.anchor.part
         && a.anchor.lane() == b.anchor.lane()
         && source(score, a.anchor) + u64::from(a.note.ticks()) == source(score, b.anchor)
@@ -235,6 +238,8 @@ fn events(
     layer: u8,
     order: &[usize],
     groups: &BTreeMap<(Anchor, GracePlacement), &crate::grace::GraceGroup>,
+    tremolos: &crate::tremolos::Index<'_>,
+    budget: usize,
 ) -> Result<Vec<Event>, String> {
     let mut main: Vec<_> = crate::repeats::events(&score.parts[part], score.measure_ticks(), order)
         .into_iter()
@@ -254,6 +259,7 @@ fn events(
             note: e.note.clone(),
             grace: false,
             grace_velocity: None,
+            pulse: false,
         })
         .collect();
     let mut added = Vec::new();
@@ -314,14 +320,96 @@ fn events(
                     note,
                     grace: true,
                     grace_velocity: grace.velocity,
+                    pulse: false,
                 });
                 cursor = end;
             }
         }
     }
+    let grace_pitch_count: usize = added.iter().map(|e| e.note.pitches.len()).sum();
+    if grace_pitch_count > budget {
+        return Err("Performed grace expansion exceeds two million pitch events.".into());
+    }
+    let mut main = tremolo_events(main, tremolos, budget - grace_pitch_count)?;
     main.extend(added);
     main.sort_by(|a, b| a.start.total_cmp(&b.start).then(a.grace.cmp(&b.grace)));
     Ok(main)
+}
+/// Rearticulation follows grace borrowing. Each pulse retains its source entry
+/// and token pitches; only the final single-note pulse can tie into an ordinary
+/// continuation. A new pulse always attacks even when an incoming tie exists.
+fn tremolo_events(
+    main: Vec<Event>,
+    index: &crate::tremolos::Index<'_>,
+    budget: usize,
+) -> Result<Vec<Event>, String> {
+    let mut count = 0_usize;
+    let mut event_count = 0_usize;
+    let mut i = 0;
+    while i < main.len() {
+        let event = &main[i];
+        if let Some((mark, false)) = index.at(&event.anchor).filter(|(m, _)| m.playback) {
+            let last = if let Some(end) = mark.end {
+                let next = main
+                    .get(i + 1)
+                    .ok_or("Paired tremolo lost its second performed principal.")?;
+                if next.anchor != end || event.original_end != next.original_start {
+                    return Err("Paired tremolo is not contiguous on the performed route.".into());
+                }
+                next
+            } else {
+                event
+            };
+            let pulses = ((last.end - event.start)
+                / crate::tremolos::pulse_ticks(&event.note, mark.strokes))
+            .ceil()
+            .max(1.) as usize;
+            let pitches = event.note.pitches.len().max(last.note.pitches.len());
+            count = count
+                .checked_add(pulses.saturating_mul(pitches))
+                .ok_or("Tremolo expansion overflow.")?;
+            event_count = event_count.saturating_add(pulses);
+            i += if mark.end.is_some() { 2 } else { 1 };
+        } else {
+            count = count.saturating_add(event.note.pitches.len());
+            event_count += 1;
+            i += 1;
+        }
+        if count > budget || event_count > MAX_NOTES {
+            return Err("Performed tremolo expansion exceeds two million pitch events.".into());
+        }
+    }
+    let mut out = Vec::with_capacity(event_count);
+    let mut i = 0;
+    while i < main.len() {
+        let event = &main[i];
+        if let Some((mark, false)) = index.at(&event.anchor).filter(|(m, _)| m.playback) {
+            let second = mark.end.map(|_| &main[i + 1]);
+            let stop = second.unwrap_or(event).end;
+            let period = crate::tremolos::pulse_ticks(&event.note, mark.strokes);
+            let mut at = event.start;
+            let mut n = 0;
+            while at < stop - 1e-8 {
+                let mut pulse = if n % 2 == 1 {
+                    second.unwrap_or(event)
+                } else {
+                    event
+                }
+                .clone();
+                pulse.start = at;
+                pulse.end = (at + period).min(stop);
+                pulse.pulse = true;
+                at = pulse.end;
+                out.push(pulse);
+                n += 1;
+            }
+            i += if second.is_some() { 2 } else { 1 };
+        } else {
+            out.push(event.clone());
+            i += 1;
+        }
+    }
+    Ok(out)
 }
 /// Contiguous written runs reset all line/technique state at repeat and D.C./D.S.
 /// jumps. Intersections clip sustained pedals and hairpins at those boundaries.
@@ -488,6 +576,7 @@ impl Timeline {
         let ticks = order.len() as f64 * f64::from(score.measure_ticks());
         let expressions = ExpressionMap::new(score);
         let styles = crate::entry_style::Index::new(score);
+        let tremolos = crate::tremolos::Index::new(score);
         let groups: BTreeMap<_, _> = score
             .notation
             .grace
@@ -536,7 +625,15 @@ impl Timeline {
                 keys
             });
             for layer in 0..8 {
-                let timeline = events(score, part, layer, &order, &groups)?;
+                let timeline = events(
+                    score,
+                    part,
+                    layer,
+                    &order,
+                    &groups,
+                    &tremolos,
+                    MAX_NOTES.saturating_sub(notes.len()),
+                )?;
                 for event in timeline.iter().filter(|e| !e.grace) {
                     if let Some(&mark) = ornament_marks.get(&event.anchor) {
                         if plan_count >= MAX_NOTES {
@@ -620,7 +717,9 @@ impl Timeline {
                             && !last_event.grace
                             && crate::slurs::continues(score, &last_event.anchor)
                             && timeline.get(last + 1).is_some_and(|next| {
-                                adjacent(last_event, next, score) && next.start == end
+                                adjacent(last_event, next, score)
+                                    && next.start == end
+                                    && !next.note.pitches.iter().any(|p| p.midi() == midi)
                             })
                             && shortening == 0.0;
                         let end = (end - shortening + if legato { 15.0 } else { 0.0 })
@@ -651,6 +750,9 @@ impl Timeline {
                             velocity: if e.grace {
                                 e.grace_velocity
                                     .unwrap_or_else(|| expressions.velocity(e.anchor, &e.note))
+                            } else if e.pulse {
+                                let at=source(score,e.anchor) as f64 + e.start - e.original_start as f64;
+                                expressions.velocity_at_tick(e.anchor,&e.note,at)
                             } else {
                                 expressions.velocity(e.anchor, &e.note)
                             },

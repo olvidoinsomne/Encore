@@ -1,6 +1,6 @@
 # Platforms and score compatibility
 
-Encore 0.12 targets Linux, macOS and Windows. Linux builds and packaging are
+Encore 0.13 targets Linux, macOS and Windows. Linux builds and packaging are
 verified on the development machine. Native macOS and Windows validation is
 still required; their build commands, packaging scripts and manual GitLab CI
 jobs are in [BUILDING.md](BUILDING.md). A Rust target alone does not supply the
@@ -456,3 +456,9 @@ The standard XML representation follows the
 and [MIDI key numbering](https://www.w3.org/2021/06/musicxml40/musicxml-reference/elements/midi-unpitched/).
 MuseScore field interpretation follows its public
 [drum-map serialization format](https://github.com/musescore/MuseScore/blob/v3.6.2/libmscore/drumset.cpp).
+
+## Measured tremolos and visual groups
+
+Single-entry and bounded alternating-pair tremolos retain native anchors, source durations and playback choice. MusicXML uses standard tremolo notations and, for pairs, doubled displayed types with a 2:1 time modification; Encore metadata retains exact supported options. Basic MuseScore single-chord r8/r16/r32/r64 marks import; paired and buzz semantics remain explicit gaps. Event clipboard v8 and region v5 preserve the supported marks. See [TREMOLOS.md](TREMOLOS.md).
+
+Full scores and linked parts retain independent visual groups. MusicXML numbered part groups and initial multi-staff part symbols import as visual spans, and ordinary MuseScore bracket definitions import with reported placement limits. Exported visual braces do not merge separate instrument/voice identities. Exact Encore IDs, offsets and explicit-empty group state use bounded native metadata. See [STAFF_GROUPS.md](STAFF_GROUPS.md).

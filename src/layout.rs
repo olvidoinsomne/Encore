@@ -67,6 +67,9 @@ pub struct PageText {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct DocumentLayout {
+    /// None keeps legacy automatic brackets; Some(empty) explicitly hides all.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub groups: Option<Vec<crate::groups::StaffGroup>>,
     pub page_size: PageSize,
     pub landscape: bool,
     pub staff_gap: f32,
@@ -84,6 +87,7 @@ pub struct DocumentLayout {
 impl Default for DocumentLayout {
     fn default() -> Self {
         Self {
+            groups: None,
             page_size: PageSize::Letter,
             landscape: false,
             staff_gap: 0.0,
@@ -120,6 +124,9 @@ impl DocumentLayout {
         if self.landscape { (h, w) } else { (w, h) }
     }
     pub fn validate(&self) -> Result<(), String> {
+        if let Some(groups) = &self.groups {
+            crate::groups::validate(groups, crate::model::MAX_PARTS)?;
+        }
         if !self.staff_gap.is_finite() || !(0.0..=80.0).contains(&self.staff_gap) {
             return Err("Extra staff spacing must be 0–80 page units.".into());
         }

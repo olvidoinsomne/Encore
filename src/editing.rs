@@ -100,7 +100,7 @@ impl RegionClip {
         self.measures.first().map_or(0, Vec::len)
     }
     pub fn validate(&self) -> Result<(), String> {
-        if ![1, 2, 3, 4].contains(&self.version) {
+        if ![1, 2, 3, 4, 5].contains(&self.version) {
             return Err("This region clipboard requires a different Encore version.".into());
         }
         if self.measures.is_empty()
@@ -126,6 +126,9 @@ impl RegionClip {
         }
         if self.warnings.len() > 64 || self.warnings.iter().any(|warning| warning.len() > 4096) {
             return Err("Region clipboard warnings exceed their limit.".into());
+        }
+        if !self.notation.tremolos.is_empty() && self.version < 5 {
+            return Err("Tremolo region metadata requires version5.".into());
         }
         checked_notation(&self.notation)?;
         if !self.notation.parts.is_empty() {
@@ -204,6 +207,7 @@ fn ensure_known_fields(object: &Map<String, Value>) -> Result<(), String> {
             "chords",
             "grace",
             "ornaments",
+            "tremolos",
             "lines",
             "tempo",
             "repeats",
@@ -348,6 +352,7 @@ pub fn copy_region(score: &Score, region: &Region) -> Result<RegionClip, String>
         "chords",
         "grace",
         "ornaments",
+        "tremolos",
         "lines",
     ] {
         let mut copied = Vec::new();
@@ -463,7 +468,9 @@ pub fn copy_region(score: &Score, region: &Region) -> Result<RegionClip, String>
         ));
     }
     let clip = RegionClip {
-        version: if region
+        version: if !score.notation.tremolos.is_empty() {
+            5
+        } else if region
             .staves
             .iter()
             .any(|staff| score.parts[*staff].percussion.is_some())
@@ -612,6 +619,7 @@ fn clear_in_place(score: &mut Score, region: &Region) -> Result<(), String> {
         "chords",
         "grace",
         "ornaments",
+        "tremolos",
         "lines",
     ] {
         let mut kept = Vec::new();
@@ -769,6 +777,7 @@ pub fn paste_region(
         "chords",
         "grace",
         "ornaments",
+        "tremolos",
         "lines",
     ] {
         let mut merged = records(&notation, key).to_vec();
@@ -1034,6 +1043,7 @@ fn remap_measures(score: &mut Score, mapping: &[Option<usize>]) -> Result<(), St
         "chords",
         "grace",
         "ornaments",
+        "tremolos",
         "lines",
     ] {
         let mut kept = Vec::new();
@@ -1998,6 +2008,74 @@ mod ornament_clip_tests {
                 .iter()
                 .any(|m| m.anchor.measure == 2)
         );
+        score.validate().unwrap();
+    }
+}
+
+#[cfg(test)]
+mod tremolo_region_tests {
+    use super::*;
+    #[test]
+    fn tremolo_region_copy_paste_and_measure_edits_keep_both_endpoint_anchors() {
+        let mut score = Score::blank();
+        let mut note = Score::demo().parts[0].measures[0].notes[0].clone();
+        note.start = 0;
+        note.duration = crate::model::Duration::Quarter;
+        note.dotted = false;
+        note.tuplet = None;
+        note.tied = false;
+        note.layer = 0;
+        note.voice = 0;
+        note.voice_launch = None;
+        let mut second = note.clone();
+        second.start = 480;
+        score.parts[0].measures[0].notes = vec![note, second];
+        let start = Anchor {
+            part: 0,
+            measure: 0,
+            tick: 0,
+            layer: 0,
+            voice: 0,
+        };
+        let mut mark = crate::tremolos::Tremolo::new(start);
+        mark.end = Some(Anchor { tick: 480, ..start });
+        score.notation.tremolos.push(mark);
+        let region = Region {
+            staves: vec![0],
+            start: 0,
+            end: 0,
+        };
+        let clip = copy_region(&score, &region).unwrap();
+        assert_eq!(clip.version, 5);
+        paste_region(&mut score, &clip, &[0], 1, PasteMode::EmptyOnly).unwrap();
+        assert_eq!(score.notation.tremolos.len(), 2);
+        insert_measures(&mut score, 1, 1).unwrap();
+        let shifted = score
+            .notation
+            .tremolos
+            .iter()
+            .find(|mark| mark.anchor.measure == 2)
+            .unwrap();
+        assert_eq!(shifted.end.unwrap().measure, 2);
+        assert_eq!(shifted.end.unwrap().tick, 480);
+        delete_measures(&mut score, 1, 1).unwrap();
+        assert!(
+            score
+                .notation
+                .tremolos
+                .iter()
+                .any(|mark| mark.anchor.measure == 1 && mark.end.unwrap().measure == 1)
+        );
+        clear_region(
+            &mut score,
+            &Region {
+                staves: vec![0],
+                start: 1,
+                end: 1,
+            },
+        )
+        .unwrap();
+        assert_eq!(score.notation.tremolos.len(), 1);
         score.validate().unwrap();
     }
 }

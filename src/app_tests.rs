@@ -3,6 +3,104 @@ use super::*;
 use std::collections::HashMap;
 
 #[test]
+fn staff_group_mode_and_save_buttons_work_at_minimum_size_and_are_undoable() {
+    let ctx = egui::Context::default();
+    configure_context(&ctx);
+    let source = Score::blank();
+    let mut app = controller(source.clone());
+    app.write_mode = true;
+    app.open_groups();
+    let plain = egui::Modifiers::NONE;
+    let input = |frame, events| {
+        let mut input = raw_input(frame, events, plain);
+        input.screen_rect = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(980.0, 680.0)));
+        input
+    };
+    let mut frame = 0;
+    for label in ["Custom groups", "Save staff groups"] {
+        let mut target = None;
+        for _ in 0..3 {
+            let output = ctx.run(input(frame, vec![]), |ctx| app.ui(ctx));
+            target = visible_text_rect(&output, label);
+            frame += 1;
+        }
+        let target = target.unwrap_or_else(|| panic!("{label} must be visible"));
+        assert!(target.min.y >= 0.0 && target.max.y <= 680.0);
+        for pressed in [true, false] {
+            let position = target.center();
+            let _ = ctx.run(
+                input(
+                    frame,
+                    vec![
+                        egui::Event::PointerMoved(position),
+                        egui::Event::PointerButton {
+                            pos: position,
+                            button: egui::PointerButton::Primary,
+                            pressed,
+                            modifiers: plain,
+                        },
+                    ],
+                ),
+                |ctx| app.ui(ctx),
+            );
+            frame += 1;
+        }
+    }
+    assert!(app.score.notation.layout.groups.is_some());
+    assert_eq!(app.score.parts, source.parts);
+    assert_eq!(app.undo.len(), 1);
+    app.undo();
+    assert_eq!(app.score, source);
+}
+
+#[test]
+fn measured_tremolo_save_button_changes_only_metadata_and_is_undoable() {
+    let ctx = egui::Context::default();
+    configure_context(&ctx);
+    let mut source = Score::blank();
+    source.parts[0].measures[0]
+        .notes
+        .push(event(0, Duration::Quarter, &[60]));
+    let mut app = controller(source.clone());
+    app.selected = Some(Selection {
+        part: 0,
+        measure: 0,
+        note: 0,
+    });
+    app.open_tremolos();
+    let plain = egui::Modifiers::NONE;
+    let mut target = None;
+    for frame in 0..3 {
+        let output = ctx.run(raw_input(frame, vec![], plain), |ctx| app.ui(ctx));
+        target = visible_text_rect(&output, "Save tremolo");
+    }
+    let position = target.expect("Save tremolo must be visible").center();
+    for (frame, pressed) in [(3, true), (4, false)] {
+        let _ = ctx.run(
+            raw_input(
+                frame,
+                vec![
+                    egui::Event::PointerMoved(position),
+                    egui::Event::PointerButton {
+                        pos: position,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: plain,
+                    },
+                ],
+                plain,
+            ),
+            |ctx| app.ui(ctx),
+        );
+    }
+    assert_eq!(app.score.notation.tremolos.len(), 1);
+    assert_eq!(app.score.parts, source.parts);
+    assert_eq!(app.undo.len(), 1);
+    app.undo();
+    assert_eq!(app.score, source);
+}
+
+#[test]
 fn percussion_keyboard_uses_named_sound_and_map_window_suppresses_note_entry() {
     let ctx = egui::Context::default();
     configure_context(&ctx);
@@ -1415,6 +1513,33 @@ fn headless_full_editor_renders_notation_and_font_textures() {
         app.active_part = part;
         app.open_percussion();
     }
+    if std::env::var_os("ENCORE_HEADLESS_GROUPS").is_some() {
+        app.open_groups();
+    }
+    if std::env::var_os("ENCORE_HEADLESS_TREMOLOS").is_some() {
+        app.selected = app
+            .score
+            .parts
+            .iter()
+            .enumerate()
+            .find_map(|(part, staff)| {
+                staff
+                    .measures
+                    .iter()
+                    .enumerate()
+                    .find_map(|(measure, bar)| {
+                        bar.notes
+                            .iter()
+                            .position(|note| !note.pitches.is_empty())
+                            .map(|note| Selection {
+                                part,
+                                measure,
+                                note,
+                            })
+                    })
+            });
+        app.open_tremolos();
+    }
     app.show_layout = std::env::var_os("ENCORE_HEADLESS_LAYOUT").is_some();
     if std::env::var_os("ENCORE_HEADLESS_STYLE").is_some() {
         app.show_entry_style = true;
@@ -1542,6 +1667,8 @@ fn headless_full_editor_renders_notation_and_font_textures() {
             || app.lines_editor.open
             || app.ornaments_editor.open
             || app.percussion_editor.open
+            || app.groups_editor.open
+            || app.tremolos_editor.open
             || app.notation_editor.open
             || app.show_parts
             || app.playback_editor.open

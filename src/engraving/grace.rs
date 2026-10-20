@@ -88,6 +88,15 @@ pub(super) fn clearance(score: &Score, part: usize, measure: usize, bars: usize)
     for g in score.notation.grace.iter().filter(|g| {
         g.anchor.part == part && g.anchor.measure >= measure && g.anchor.measure < measure + bars
     }) {
+        if g.slur_to_main
+            && let Some((top, bottom)) = pitch_index.tremolo_bounds(g.anchor)
+        {
+            if g.anchor.voice == 0 {
+                below = below.max(bottom + 20.0);
+            } else {
+                above = above.max(-top + 20.0);
+            }
+        }
         for n in &g.notes {
             for p in &n.pitches {
                 let y = pitch_index.y(g.anchor, *p, 0.0);
@@ -246,6 +255,7 @@ pub(super) fn draw(page: &mut Page, score: &Score, ornaments: &super::ornaments:
                 y: mid,
             });
             layouts.push(NoteLayout {
+                tremolo: None,
                 voice_launch: None,
                 x: cx,
                 top,
@@ -317,6 +327,16 @@ pub(super) fn draw(page: &mut Page, score: &Score, ornaments: &super::ornaments:
             } else {
                 main_y
             };
+            let main_y =
+                pitch_index
+                    .tremolo_bounds(group.anchor)
+                    .map_or(main_y, |(top, bottom)| {
+                        if up {
+                            main_y.max(region.y + bottom + 8.0)
+                        } else {
+                            main_y.min(region.y + top - 8.0)
+                        }
+                    });
             let first = &layouts[0];
             let last = layouts.last().unwrap();
             let (a, b) = if group.placement == GracePlacement::Before {

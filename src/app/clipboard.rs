@@ -18,6 +18,8 @@ struct ClipboardEvent {
     grace: Vec<encore::grace::GraceGroup>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     ornaments: Vec<encore::ornaments::Ornament>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    tremolos: Vec<encore::tremolos::Tremolo>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     percussion: Option<encore::percussion::Staff>,
 }
@@ -54,6 +56,7 @@ fn encode_complete_event(
 ) -> Result<String, String> {
     encode_domain_event(note, lyrics, style, grace, ornaments, None)
 }
+#[cfg(test)]
 fn encode_domain_event(
     note: Note,
     lyrics: Vec<encore::lyrics::Lyric>,
@@ -62,8 +65,29 @@ fn encode_domain_event(
     ornaments: Vec<encore::ornaments::Ornament>,
     percussion: Option<encore::percussion::Staff>,
 ) -> Result<String, String> {
+    encode_full_domain_event(
+        note,
+        lyrics,
+        style,
+        grace,
+        ornaments,
+        percussion,
+        Vec::new(),
+    )
+}
+fn encode_full_domain_event(
+    note: Note,
+    lyrics: Vec<encore::lyrics::Lyric>,
+    style: Option<encore::entry_style::EntryStyle>,
+    grace: Vec<encore::grace::GraceGroup>,
+    ornaments: Vec<encore::ornaments::Ornament>,
+    percussion: Option<encore::percussion::Staff>,
+    tremolos: Vec<encore::tremolos::Tremolo>,
+) -> Result<String, String> {
     let data = serde_json::to_string(&ClipboardEvent {
-        version: if percussion.is_some() {
+        version: if !tremolos.is_empty() {
+            8
+        } else if percussion.is_some() {
             7
         } else if !ornaments.is_empty() {
             6
@@ -84,6 +108,7 @@ fn encode_domain_event(
         grace,
         ornaments,
         percussion,
+        tremolos,
     })
     .map_err(|error| format!("Could not copy event: {error}"))?;
     if data.len() + CLIPBOARD_MARKER.len() > MAX_CLIPBOARD_BYTES {
@@ -101,11 +126,17 @@ fn decode_event(text: &str) -> Result<ClipboardEvent, String> {
         .ok_or("Copy a single note, chord, or rest in Encore before pasting.")?;
     let event: ClipboardEvent = serde_json::from_str(data)
         .map_err(|error| format!("Invalid Encore clipboard event: {error}"))?;
-    if ![1, 2, 3, 4, 5, 6, 7].contains(&event.version) {
+    if ![1, 2, 3, 4, 5, 6, 7, 8].contains(&event.version) {
         return Err("This clipboard event requires a different Encore version.".into());
     }
     if event.percussion.is_some() && event.version < 7 {
         return Err("Percussion event clipboard requires version7.".into());
+    }
+    if !event.tremolos.is_empty() && event.version < 8 {
+        return Err("Tremolo event metadata requires version8.".into());
+    }
+    if event.tremolos.len() > 1 || event.tremolos.iter().any(|mark| mark.end.is_some()) {
+        return Err("A single-event clipboard can retain one single-entry tremolo. Copy complete measures for an alternating pair.".into());
     }
     if let Some(staff) = &event.percussion {
         staff.validate()?;
@@ -171,13 +202,26 @@ impl EncoreApp {
             .filter(|o| Some(o.anchor) == anchor)
             .cloned()
             .collect();
-        let text = match encode_domain_event(
+        let tremolos = self
+            .score
+            .notation
+            .tremolos
+            .iter()
+            .filter(|mark| Some(mark.anchor) == anchor && mark.end.is_none())
+            .cloned()
+            .collect();
+        let omitted_pair =
+            self.score.notation.tremolos.iter().any(|mark| {
+                mark.end.is_some() && (Some(mark.anchor) == anchor || mark.end == anchor)
+            });
+        let text = match encode_full_domain_event(
             note.clone(),
             lyrics,
             style,
             grace,
             ornaments,
             self.score.parts[selection.part].percussion.clone(),
+            tremolos,
         ) {
             Ok(text) => text,
             Err(error) => {
@@ -207,6 +251,11 @@ impl EncoreApp {
             self.status = "Cut one event. Paste inserts it at the entry cursor.".into();
         } else {
             self.status = "Copied one event. Paste inserts it at the entry cursor.".into();
+        }
+        if omitted_pair {
+            self.status.push_str(
+                " Alternating tremolo omitted; copy a complete measure region to retain the pair.",
+            );
         }
         ctx.copy_text(text);
     }
@@ -327,6 +376,7 @@ impl EncoreApp {
             grace,
             ornaments,
             percussion,
+            tremolos,
             ..
         } = decode_event(text)?;
         let destination = self
@@ -405,6 +455,10 @@ impl EncoreApp {
         for mut ornament in ornaments {
             ornament.anchor = anchor;
             candidate.notation.ornaments.push(ornament);
+        }
+        for mut mark in tremolos {
+            mark.anchor = anchor;
+            candidate.notation.tremolos.push(mark);
         }
         candidate.validate()?;
         // Commit only after the complete score validates. A failed paste keeps
@@ -593,6 +647,7 @@ mod tests {
                 style: None,
                 grace: Vec::new(),
                 ornaments: Vec::new(),
+                tremolos: Vec::new(),
                 percussion: None,
             })
             .unwrap()
@@ -1152,5 +1207,82 @@ mod ornament_tests {
         let before = app.score.clone();
         app.paste_selection(&legacy);
         assert_eq!(app.score, before);
+    }
+}
+
+#[cfg(test)]
+mod tremolo_tests {
+    use super::*;
+    use encore::{document::Anchor, tremolos::Tremolo};
+    fn copied(ctx: &egui::Context) -> String {
+        ctx.output(|output| {
+            output.commands.iter().find_map(|command| {
+                if let egui::OutputCommand::CopyText(text) = command {
+                    Some(text.clone())
+                } else {
+                    None
+                }
+            })
+        })
+        .unwrap()
+    }
+    #[test]
+    fn single_tremolo_event_copy_reanchors_and_rejects_a_forged_pair_atomically() {
+        let mut app = EncoreApp::from_score(Score::blank(), None, "Ready".into());
+        app.enter_note(0, 0, 0, Pitch::from_midi(60), false);
+        let a = Anchor::from_selection(&app.score, app.selected.unwrap()).unwrap();
+        app.score.notation.tremolos.push(Tremolo::new(a));
+        let ctx = egui::Context::default();
+        app.copy_selection(&ctx, false);
+        let text = copied(&ctx);
+        assert_eq!(decode_event(&text).unwrap().version, 8);
+        app.cursor_measure = 1;
+        app.cursor_tick = 240;
+        app.selected = None;
+        app.paste_selection(&text);
+        assert!(
+            app.score
+                .notation
+                .tremolos
+                .iter()
+                .any(|mark| mark.anchor.measure == 1 && mark.anchor.tick == 240)
+        );
+        let mut event = decode_event(&text).unwrap();
+        event.tremolos[0].end = Some(Anchor { tick: 480, ..a });
+        let forged = format!(
+            "{CLIPBOARD_MARKER}{}",
+            serde_json::to_string(&event).unwrap()
+        );
+        let source = app.score.clone();
+        app.paste_selection(&forged);
+        assert_eq!(app.score, source);
+        assert!(app.status.contains("single-event"));
+    }
+    #[test]
+    fn copying_one_endpoint_reports_pair_loss_while_region_copy_retains_it() {
+        let mut app = EncoreApp::from_score(Score::blank(), None, "Ready".into());
+        app.enter_note(0, 0, 0, Pitch::from_midi(60), false);
+        app.enter_note(0, 0, 480, Pitch::from_midi(67), false);
+        let end = Anchor::from_selection(&app.score, app.selected.unwrap()).unwrap();
+        let mut mark = Tremolo::new(Anchor { tick: 0, ..end });
+        mark.end = Some(end);
+        app.score.notation.tremolos.push(mark);
+        let ctx = egui::Context::default();
+        let source = app.score.clone();
+        app.copy_selection(&ctx, false);
+        assert_eq!(app.score, source);
+        assert!(app.status.contains("Alternating tremolo omitted"));
+        assert!(decode_event(&copied(&ctx)).unwrap().tremolos.is_empty());
+        let clip = encore::editing::copy_region(
+            &app.score,
+            &encore::editing::Region {
+                staves: vec![0],
+                start: 0,
+                end: 0,
+            },
+        )
+        .unwrap();
+        assert_eq!(clip.version, 5);
+        assert_eq!(clip.notation.tremolos.len(), 1);
     }
 }

@@ -2,7 +2,7 @@
 use super::{INK, Page, StaffRegion};
 use crate::model::Score;
 
-pub(super) fn draw(page: &mut Page, score: &Score) {
+pub(super) fn draw(page: &mut Page, score: &Score, groups: &super::groups::Index<'_>) {
     if score.notation.repeats.is_empty() && score.notation.navigation.is_empty() {
         return;
     }
@@ -11,10 +11,10 @@ pub(super) fn draw(page: &mut Page, score: &Score) {
     for staff in &staves {
         for repeat in &score.notation.repeats {
             if staff.measure == repeat.start {
-                barline(page, staff, true);
+                barline(page, staff, true, groups.staff_bars(staff.part));
             }
             if repeat.backward_at(staff.measure) {
-                barline(page, staff, false);
+                barline(page, staff, false, groups.staff_bars(staff.part));
             }
         }
     }
@@ -146,7 +146,7 @@ pub(super) fn draw(page: &mut Page, score: &Score) {
     }
 }
 
-fn barline(page: &mut Page, staff: &StaffRegion, forward: bool) {
+fn barline(page: &mut Page, staff: &StaffRegion, forward: bool, body: bool) {
     let (thick, thin, dots) = if forward {
         let x = staff.x + 2.0;
         (x, x + 5.0, x + 11.0)
@@ -166,8 +166,10 @@ fn barline(page: &mut Page, staff: &StaffRegion, forward: bool) {
         } else {
             0.0
         };
-    page.line(thick, top, thick, bottom, 3.2, INK);
-    page.line(thin, top, thin, bottom, 1.1, INK);
+    if body {
+        page.line(thick, top, thick, bottom, 3.2, INK);
+        page.line(thin, top, thin, bottom, 1.1, INK);
+    }
     for offset in [1.5, 2.5] {
         page.ellipse(
             dots,

@@ -202,3 +202,9 @@ printed PDF/SVG extraction uses the written projection.
 ## Unpitched identity boundary
 
 `src/percussion.rs` owns one/five-line maps and canonical sound tokens. Engraving resolves tokens through `src/engraving/display.rs`, never through melodic clef/key/ottava logic. Exact token identity survives ties, grace, parts and clipboards; playback maps to output keys after rhythmic interpretation. Pitched operations skip drum staves, while clipboard compatibility checks used sound identities before mutations. MusicXML uses standard unpitched/instrument fields plus bounded native map metadata; SMF uses merged channel-10 drum tracks with two reserved ports per source staff. `export::midi` returns a checked result, allowing valid unmapped notation to report an export error instead of producing guessed notes. See [PERCUSSION.md](PERCUSSION.md).
+
+## Staff groups and measured repeats
+
+`DocumentLayout.groups` distinguishes legacy automatic presentation (`None`) from explicit groups, including an intentionally empty list. Saved linked layouts address source staff indices; projection/extraction remaps truthful contiguous fragments and reports splits. Visual groups never establish semantic instrument identity. `groups.rs` resolves nested/overlapping barline policies independently for staff bodies and gaps.
+
+`Notation.tremolos` retains stable principal anchors and source rhythm. Cached indexes provide pair display durations and printed pitch means without repeated dense-measure scans. Performance expansion follows grace borrowing and precedes gating/tie interpretation, with bounded pulse counts. Fractional attack positions remain separate from stable source anchors so dynamics progress within a roll and reset on repeat visits. Region/event clipboard domains and structural anchor lifecycle preserve supported single/pair semantics.

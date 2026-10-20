@@ -305,16 +305,31 @@ impl ExpressionMap {
         Self { width, lanes }
     }
     pub fn velocity(&self, at: Anchor, note: &Note) -> u8 {
+        self.velocity_at_tick(
+            at,
+            note,
+            at.measure as f64 * self.width as f64 + f64::from(at.tick),
+        )
+    }
+    /// Evaluate the layer envelope at a performed attack's fractional source
+    /// tick while retaining the stable principal anchor and velocity context.
+    pub fn velocity_at_tick(&self, at: Anchor, note: &Note, now: f64) -> u8 {
         if note.velocity == 0 {
             return 0;
         }
         let Some(lane) = self.lanes.get(&(at.part, at.layer)) else {
             return note.playback_velocity();
         };
-        let now = at.measure as u64 * self.width + u64::from(at.tick);
+        let now = if now.is_finite() {
+            now.max(0.)
+        } else {
+            at.measure as f64 * self.width as f64 + f64::from(at.tick)
+        };
         let position = |anchor: Anchor| anchor.measure as u64 * self.width + u64::from(anchor.tick);
-        let dynamic = |tick: u64, fallback: u8| {
-            let index = lane.dynamics.partition_point(|(at, _)| *at <= tick);
+        let dynamic = |tick: f64, fallback: u8| {
+            let index = lane
+                .dynamics
+                .partition_point(|(at, _)| (*at as f64) <= tick);
             if index == 0 {
                 fallback
             } else {
@@ -324,32 +339,35 @@ impl ExpressionMap {
         let mut value = dynamic(now, note.velocity);
         let index = lane
             .hairpins
-            .partition_point(|line| position(line.start) <= now);
+            .partition_point(|line| position(line.start) as f64 <= now);
         if index > 0 {
             let line = &lane.hairpins[index - 1];
-            let start = position(line.start);
-            let end = position(line.end);
-            let later_dynamic = lane.printed_dynamics.partition_point(|(at, _)| *at <= now);
+            let start = position(line.start) as f64;
+            let end = position(line.end) as f64;
+            let later_dynamic = lane
+                .printed_dynamics
+                .partition_point(|(at, _)| (*at as f64) <= now);
             let superseded = now >= end
                 && later_dynamic > 0
-                && lane.printed_dynamics[later_dynamic - 1].0 >= end;
+                && lane.printed_dynamics[later_dynamic - 1].0 as f64 >= end;
             if !superseded {
                 let initial = line
                     .start_velocity
                     .unwrap_or_else(|| dynamic(start, note.velocity));
                 let target = line.end_velocity.unwrap_or_else(|| {
-                    let index = lane.printed_dynamics.partition_point(|(at, _)| *at < end);
+                    let index = lane
+                        .printed_dynamics
+                        .partition_point(|(at, _)| (*at as f64) < end);
                     lane.printed_dynamics
                         .get(index)
-                        .filter(|(at, _)| *at == end)
+                        .filter(|(at, _)| *at as f64 == end)
                         .and_then(|(_, velocity)| *velocity)
                         .unwrap_or_else(|| match line.kind {
                             HairpinKind::Crescendo => initial.saturating_add(24).min(127),
                             HairpinKind::Diminuendo => initial.saturating_sub(24),
                         })
                 });
-                let fraction = (now.saturating_sub(start) as f64 / (end - start).max(1) as f64)
-                    .clamp(0.0, 1.0);
+                let fraction = ((now - start).max(0.) / (end - start).max(1.)).clamp(0.0, 1.0);
                 value = (f64::from(initial) + (f64::from(target) - f64::from(initial)) * fraction)
                     .round()
                     .clamp(0.0, 127.0) as u8;

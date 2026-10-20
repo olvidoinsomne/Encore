@@ -260,6 +260,11 @@ music changes; their view/navigation, formatting and extraction controls remain
 available. Ornament assignment uses Notation → Ornaments and arpeggios; Finale
 articulation trigger keys and programmable metatools remain pending.
 
+Measured tremolos use **Notation → Measured tremolos**. The editor assigns a
+single-note/chord roll or pairs the selected principal with its next same-voice
+entry in the bar. Stroke count, playback and offsets are editable; there is no
+new fixed keyboard shortcut or claim of programmable Finale metatool parity.
+
 ## Unpitched percussion context
 
 On a percussion staff, Enter uses the selected named sound and duration; Shift-click in the sound palette enters it directly. Up/Down walks mapped sounds in staff-position order, including alternatives sharing a position. Simple Entry modifies the selected chord sound; Speedy moves its entry sound. Duration, rest, tie, chord, layer/voice and navigation commands retain their ordinary context. A–G, intervals, octave shifts, accidental/respelling and melodic transposition commands do not reinterpret drum IDs. Grace editing offers the same named sounds. MIDI keyboard entry and mouse-drag sound cycling remain pending. This follows the public [Finale percussion entry reference](https://usermanuals.finalemusic.com/FinaleWin/Content/Finale/Percussion.htm) within Encore’s currently implemented entry profiles.

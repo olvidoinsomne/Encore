@@ -45,8 +45,9 @@ fn endpoint(
     anchor: &Anchor,
     region: &StaffRegion,
     above: bool,
+    avoid_marks: bool,
 ) -> f32 {
-    note_at(score, anchor)
+    let edge = note_at(score, anchor)
         .map(|n| {
             n.pitches
                 .iter()
@@ -54,8 +55,19 @@ fn endpoint(
                 .reduce(|a, b| if above { a.min(b) } else { a.max(b) })
                 .unwrap_or(region.y + 20.0)
         })
-        .unwrap_or(region.y + 20.0)
-        + if above { -10.0 } else { 10.0 }
+        .unwrap_or(region.y + 20.0);
+    let edge = if avoid_marks {
+        index.tremolo_bounds(*anchor).map_or(edge, |(top, bottom)| {
+            if above {
+                edge.min(region.y + top)
+            } else {
+                edge.max(region.y + bottom)
+            }
+        })
+    } else {
+        edge
+    };
+    edge + if above { -10.0 } else { 10.0 }
 }
 #[derive(Clone)]
 struct Fragment<'a> {
@@ -120,7 +132,8 @@ fn fragments<'a>(score: &'a Score, regions: &[StaffRegion]) -> Vec<Fragment<'a>>
             let a = if let Some(r) = start_region {
                 (
                     r.x_at_anchor(&s.start) + s.start_offset[0],
-                    endpoint(score, &pitch_index, &s.start, r, above) + s.start_offset[1],
+                    endpoint(score, &pitch_index, &s.start, r, above, s.shape.is_none())
+                        + s.start_offset[1],
                 )
             } else {
                 (
@@ -135,7 +148,8 @@ fn fragments<'a>(score: &'a Score, regions: &[StaffRegion]) -> Vec<Fragment<'a>>
             let b = if let Some(r) = end_region {
                 (
                     r.x_at_anchor(&s.end) + s.end_offset[0],
-                    endpoint(score, &pitch_index, &s.end, r, above) + s.end_offset[1],
+                    endpoint(score, &pitch_index, &s.end, r, above, s.shape.is_none())
+                        + s.end_offset[1],
                 )
             } else {
                 (
@@ -177,8 +191,15 @@ fn fragments<'a>(score: &'a Score, regions: &[StaffRegion]) -> Vec<Fragment<'a>>
                                 continue;
                             }
                             let linear = a.1 + (b.1 - a.1) * t;
-                            for p in &n.pitches {
-                                let y = pitch_index.y(anchor, *p, r.y);
+                            let mut obstacles = n
+                                .pitches
+                                .iter()
+                                .map(|p| pitch_index.y(anchor, *p, r.y))
+                                .collect::<Vec<_>>();
+                            if let Some((top, bottom)) = pitch_index.tremolo_bounds(anchor) {
+                                obstacles.push(r.y + if above { top } else { bottom });
+                            }
+                            for y in obstacles {
                                 let needed = if above {
                                     linear - y + 14.0
                                 } else {

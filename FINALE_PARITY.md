@@ -7,7 +7,7 @@ This is a functional compatibility checklist, not a claim that Encore has
 already reached parity. The modern Encore interface remains the intended UI.
 
 The starting point is Encore 0.5, commit `55f2cc0`; the tables also incorporate
-the Encore 0.6–0.12 implementation passes recorded below. Source evidence was inspected
+the Encore 0.6–0.13 implementation passes recorded below. Source evidence was inspected
 in `src/model.rs`, `src/app.rs`, `src/engraving.rs`, `src/export.rs`,
 `src/audio.rs`, `src/sampled.rs`, `src/synth.rs`, and the three format readers.
 Changes made after that commit must pass the acceptance checks below before a
@@ -21,6 +21,8 @@ Most rows remain open. There is deliberately no percentage based on counting
 rows: a VST host and a keyboard command are very different amounts of work.
 
 ## Notation and engraving
+
+Measured tremolos follow the public [Finale tremolo workflow](https://usermanuals.finalemusic.com/FinaleWin/Content/Finale/Tremolos.htm) and [MusicXML tremolo duration/mark rules](https://www.w3.org/2021/06/musicxml40/musicxml-reference/elements/tremolo/). Encore uses deterministic measured attacks; a string tremolo patch is a separate technique selection. Fermata timing remains deferred.
 
 The reference includes [independent layers and voices](https://usermanuals.finalemusic.com/FinaleMac/Content/Finale/sub-select-layer.htm),
 [tuplets](https://usermanuals.finalemusic.com/FinaleWin/Content/Finale/Tuplets.htm),
@@ -48,7 +50,7 @@ Linux verification.
 | Dynamics and articulations | Partial | Velocity-derived dynamics, legacy staccato, accent, marcato, tenuto and staccatissimo now have editable marks, vector glyphs and playback. Custom marking definitions, fermata timing, ornaments and complete placement/performance rules remain open. |
 | Slurs and phrase curves | Partial | Entry-anchored phrases now cross voices/layers on one staff, with solid/dashed/dotted styling, dash/gap lengths, editable endpoint offsets and asymmetric normalized controls; vector continuations and source handles span systems/pages. Native and Encore MusicXML round trips retain manual curves, standard line styles interchange, and MuseScore voice endpoints/styles import. Reset restores automatic shaping without changing style. Cross-staff/beat-attached curves, wavy lines, independent fragment controls and complete automatic collision profiles remain open. |
 | Hairpins, octave lines, pedal, trills, glissandi and custom lines | Partial | Editable native/vector/MusicXML spans now cover crescendo/diminuendo, ±1–3 octave display, damper/sostenuto, explicit-interval trills and consecutive-note chromatic glissandi; supported basic MuseScore spanners import. Held-note CC11 swells, pedal holds and discrete ornaments share audio/MIDI scheduling. Niente/custom line styles, partial/soft pedal, automatic trill neighbors, continuous slides and harp/diatonic glissandi remain open. |
-| Tremolos, measured repeats and ornaments | Partial | Explicit-interval trills, key-aware or explicit turns/inverted turns, lower/upper mordents and up/down chord rolls share native notation, vector marks, interchange and all three performed backends. Non-arpeggiate is supported. A recognized string tremolo Technique selects GM tremolo strings. Measured tremolo notation/repeats, fermata timing, custom long/accelerating ornaments and full ornament rules remain open. |
+| Tremolos, measured repeats and ornaments | Partial | Explicit-interval trills, key-aware or explicit turns/inverted turns, lower/upper mordents and up/down chord rolls share native notation, vector marks, interchange and all three performed backends. Non-arpeggiate is supported. A recognized string tremolo Technique selects GM tremolo strings. Measured 1–8-stroke single-note/chord rolls now preserve written dots/tuplets; bounded two-principal rolls alternate consecutive equal undotted non-tuplet stored quarters/halves, display doubled values, and retain tokens on percussion staves. Grace borrowing precedes pulse expansion; all three backends and repeat visits share the same plan. Native/standard MusicXML and basic MuseScore single-roll import are supported. Paired ties/internal grace groups and conflicting played ornaments/trill/gliss lines are rejected; sub-tick or over-two-million-pitch expansions fail explicitly. Unmeasured/buzz rolls, MuseScore paired rolls, broader paired rhythms, one/two-bar repeat signs, fermata timing and long/accelerating/custom ornament rules remain open. |
 | Repeat barlines, endings, D.C./D.S., coda and Fine | Partial | Inclusive repeat regions support nested noncrossing repeats, 2–16 passes, contiguous numbered endings, vector barlines/voltas and bounded performed audio/MIDI. D.C./D.S., al Fine/al Coda, unique segno/coda targets and optional repeat replay use the same traversal, MusicXML import/export and MuseScore import. Custom labels with multiple targets, per-pass/custom conditional jumps, within-measure navigation, manual bracket placement and direct MUSX repeat import remain open. |
 | Lyrics | Partial | Numbered verses/choruses/sections, atomic syllable typing/assignment, hyphens, melismas and elisions, adjustable baselines, lyric-aware spacing and vector continuations; native and MusicXML preservation and MuseScore import. Rich typography, above-staff underlay, verse-number alignment and Finale’s full Lyrics window/metatools remain open. |
 | Chord symbols and fretboards | Partial | Free-beat letter-name chords support standard triads, sevenths/extensions, altered/add/omit degrees, alternate basses, N.C., eight stack slots and per-symbol printing/playback. Original vector fretboards have bounded guitar suggestions, 4–12 custom strings, open/muted stops, fingering, barres and known/unknown tunings. Native/MusicXML harmony/frame interchange, linked transposition and regional editing retain the supported semantics. Finale suffix/fretboard libraries, MIDI analysis/learned chords, numeric/Roman naming and arbitrary suffix typography remain open. |
@@ -139,7 +141,7 @@ and [graphics](https://usermanuals.finalemusic.com/FinaleWin/Content/Finale/menu
 | Full ensemble system layout | Partial | Automatic grouping follows saved physical page formats, margins, scaled staff size, lyrical/expression clearance and forced boundaries. Comprehensive collision avoidance for dense/custom engraving remains open. |
 | Page size, margins, scaling and orientation | Partial | Full scores and linked parts save Letter/A4/Legal/Tabloid formats, portrait/landscape, editable margins and uniform 50–150% staff scale. Custom paper, mirrored margins, mixed per-staff sizes and complete page-format options remain open. |
 | System breaks, locks and measure widths | Partial | Explicit system/page boundaries, visible/selected-system locks and per-measure width weights are editable and persistent. Locked membership is honored; internal beat-chart adjustments, drag layout tools, proportional absolute widths and complete collision resolution remain open. |
-| Staff groups, brackets, braces and labels | Partial | Basic automatic staff presentation. Needs editable groups, bracket placement, barline spans and independent abbreviations. |
+| Staff groups, brackets, braces and labels | Partial | Independent score/part definitions support nested/overlapping brackets, braces, lines and square symbols, full/abbreviated labels, endpoint offsets and separate/through/between barline policies. Source-aware projection/extraction and native/MusicXML/basic MuseScore support preserve visual groups. Regional scopes, custom bracket shapes, semantic multi-staff XML export, group-aware hiding and direct MUSX groups remain open. |
 | Hide empty staves, multimeasure rests and staff spacing | Partial | Linked parts store extra staff spacing. Empty-staff hiding, multimeasure-rest ranges and per-system staff management remain pending. |
 | Linked part definitions and voicing | Partial | Named stable definitions support individual/custom/multi-staff parts, piano grand-staff generation, source-linked editing and spelled written-pitch transpositions. Per-staff layer/voice masks, highest/lowest/ranked chord-tone selection, conditional multi-layer policies and self-contained extraction are implemented with exact source maps and documented metadata filtering. Per-part clefs and imported linked definitions remain pending. |
 | Independent part formatting | Partial | Each part stores paper, orientation, margins, staff scale/gap, system membership, measure width weights and publication text. Per-item unlink/relink, visibility/position overrides and layout-copy workflows remain open. |
@@ -564,3 +566,44 @@ are exact; MIDI reports inferred voice splitting. Two-page full-score and
 one-line part PDFs and the 980×680 map dialog were inspected. The study and parts
 do not clip; Carol remains byte-identical to 0.11. First Light's two SVG pages are
 also byte-identical. See [PERCUSSION.md](PERCUSSION.md) for the remaining gaps.
+
+### Encore 0.13 integration qualification
+
+Visual staff groups are saved independently in full-score and linked-part page
+formats. Nested/overlapping bracket, brace, line and square symbols have full and
+abbreviated labels, endpoint adjustments and separate/through/between barline
+policies. Most-specific spans take precedence, with later definitions breaking
+ties. Legacy automatic presentation and an explicitly empty group list remain
+distinct. Source-aware projection/extraction splits misleading reordered spans
+with warnings; structural staff removal repairs definitions. MusicXML numbered
+part groups, initial multi-staff part symbols and basic MuseScore brackets
+interchange without merging instrument or voice identities.
+
+Measured single-note/chord tremolos and alternating equal quarter/half pairs
+retain source durations while paired printed values double. Cached vector
+geometry supports strokes, paired connectors, common automatic stems and
+slur/grace/underlay clearance. The shared performed timeline handles borrowed
+grace timing, articulation, dynamics, repeats, bounded pulses and percussion
+mapping. Same-key slur gates cannot cut later attacks; drum hairpins progress
+across roll pulses and reset on repeat visits. Native and standard MusicXML
+representations retain the supported semantics, including the paired 2:1 ratio;
+basic MuseScore single-chord tremolos import. Event clipboard v8 retains single
+marks; region v5 retains complete pairs and structural anchor changes. Copying a
+single pair endpoint reports the omitted span.
+
+Local Linux qualification: **425 library and 157 editor/CLI tests** pass, along
+with all-target Clippy with warnings denied, formatting and the optimized build.
+Real-frame tests exercise draft saving, source rhythm preservation, independent
+part formatting, minimum-window controls and undo. The new study exports
+PDF/SVG/XML/MIDI/sampled WAV; its twelve tremolos, source rhythms and group maps
+roundtrip exactly, including independently extracted piano and kit parts. Both
+full-score pages, both part PDFs and dark/light editor dialogs were inspected.
+Sampled renders do not clip. Carol audio and both First Light SVG pages remain
+byte-identical to the previous checkpoint.
+
+This closes the current group/tremolo foundation. Fermata clock holds,
+unmeasured/buzz and complex paired tremolos, measure-repeat presentation,
+empty-staff hiding, multimeasure rests, semantic multi-staff XML export and full
+Finale shortcut/production parity remain open. Very large tremolo-heavy scores
+also need broader profiling of annotation display-index reuse. See
+[STAFF_GROUPS.md](STAFF_GROUPS.md) and [TREMOLOS.md](TREMOLOS.md).

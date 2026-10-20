@@ -15,6 +15,7 @@ mod clipboard;
 mod entry;
 mod expressions;
 mod grace;
+mod groups;
 mod layout;
 mod lines;
 mod navigation;
@@ -25,6 +26,7 @@ mod percussion;
 mod playback;
 mod regions;
 mod style;
+mod tremolos;
 mod voicing;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -168,6 +170,8 @@ pub struct EncoreApp {
     lines_editor: lines::Editor,
     ornaments_editor: ornaments::Editor,
     percussion_editor: percussion::Editor,
+    groups_editor: groups::Editor,
+    tremolos_editor: tremolos::Editor,
     master: f32,
     theme: Theme,
     needs_native_save: bool,
@@ -282,6 +286,8 @@ impl EncoreApp {
             lines_editor: Default::default(),
             ornaments_editor: Default::default(),
             percussion_editor: Default::default(),
+            groups_editor: Default::default(),
+            tremolos_editor: Default::default(),
             master: 0.8,
             theme: Theme::Dark,
             needs_native_save: false,
@@ -426,6 +432,8 @@ impl EncoreApp {
         self.lines_editor = Default::default();
         self.ornaments_editor = Default::default();
         self.percussion_editor = Default::default();
+        self.groups_editor = Default::default();
+        self.tremolos_editor = Default::default();
         self.preview_percussion = None;
         self.cursor_measure = 0;
         self.cursor_tick = 0;
@@ -441,6 +449,8 @@ impl EncoreApp {
             self.midi_grid = None;
             self.midi_import_error = None;
             self.percussion_editor.open = false;
+            self.groups_editor.open = false;
+            self.tremolos_editor.open = false;
             self.properties = false;
             self.help = false;
             self.show_history = false;
@@ -1171,6 +1181,8 @@ impl EncoreApp {
             || self.lines_editor.open
             || self.ornaments_editor.open
             || self.percussion_editor.open
+            || self.groups_editor.open
+            || self.tremolos_editor.open
         {
             return;
         }
@@ -1228,6 +1240,8 @@ impl EncoreApp {
                 || self.lines_editor.open
                 || self.ornaments_editor.open
                 || self.percussion_editor.open
+                || self.groups_editor.open
+                || self.tremolos_editor.open
             {
                 break;
             }
@@ -1656,6 +1670,10 @@ impl EncoreApp {
                                 ui.close();
                             }
                             ui.separator();
+                            if ui.button("Staff groups and barlines…").clicked() {
+                                self.open_groups();
+                                ui.close();
+                            }
                             if ui.button("Page and system layout…").clicked() {
                                 self.show_layout = true;
                                 ui.close();
@@ -1675,6 +1693,10 @@ impl EncoreApp {
                                 .clicked()
                             {
                                 self.open_lines();
+                                ui.close();
+                            }
+                            if ui.button("Measured tremolos…").clicked() {
+                                self.open_tremolos();
                                 ui.close();
                             }
                             if ui.button("Ornaments and arpeggios…").clicked() {
@@ -3491,6 +3513,8 @@ impl EncoreApp {
         self.lines_window(ctx);
         self.ornaments_window(ctx);
         self.percussion_window(ctx);
+        self.groups_window(ctx);
+        self.tremolos_window(ctx);
         self.chord_dialog(ctx);
         self.instrument_lab(ctx);
         self.protect_voiced_music(&before);

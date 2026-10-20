@@ -1777,3 +1777,112 @@ mod percussion_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod measured_tremolo_tests {
+    use super::*;
+    use crate::{
+        document::Anchor,
+        model::Duration,
+        tremolos::{
+            Tremolo,
+            tests::{fixture, note},
+        },
+    };
+    #[test]
+    fn slurred_same_key_roll_has_no_stale_sampler_off_after_the_next_attack() {
+        let (mut s, a) = fixture();
+        s.parts[0].instrument = Instrument::Violin;
+        s.parts[0].measures[0].notes = vec![
+            note(0, Duration::Quarter, &[60]),
+            note(480, Duration::Quarter, &[60]),
+            note(960, Duration::Quarter, &[60]),
+        ];
+        let mut mark = Tremolo::new(a);
+        mark.strokes = 2;
+        s.notation.tremolos.push(mark);
+        s.notation
+            .slurs
+            .push(crate::slurs::Slur::new(a, Anchor { tick: 960, ..a }));
+        let timeline = crate::performance::Timeline::new(&s).unwrap();
+        for pair in timeline.notes.windows(2) {
+            assert!(pair[0].sampler_end <= pair[1].start, "{:?}", pair);
+        }
+        let commands = decorated_commands(&timeline, 0, 0);
+        let ons: Vec<_> = commands
+            .iter()
+            .filter(|e| matches!(e.kind, Kind::On(_)))
+            .map(|e| e.frame)
+            .collect();
+        let offs: Vec<_> = commands
+            .iter()
+            .filter(|e| e.kind == Kind::Off)
+            .map(|e| e.frame)
+            .collect();
+        assert_eq!(ons.len(), 6);
+        assert_eq!(offs.len(), 6);
+        for i in 0..ons.len() - 1 {
+            assert!(offs[i] <= ons[i + 1]);
+        }
+        for start in ons.iter().skip(1) {
+            let simultaneous: Vec<_> = commands
+                .iter()
+                .filter(|e| e.frame == *start && e.midi == 60)
+                .collect();
+            if simultaneous.len() == 2 {
+                assert_eq!(simultaneous[0].kind, Kind::Off);
+                assert!(matches!(simultaneous[1].kind, Kind::On(_)));
+            }
+        }
+    }
+    #[test]
+    fn sampled_tremolos_rearticulate_melodic_and_shared_drum_engines() {
+        let path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/soundfonts/GeneralUser-GS.sf2");
+        if !path.exists() {
+            return;
+        }
+        let bank = SampleBank::load(&path).unwrap();
+        let (mut s, a) = fixture();
+        s.parts[0].instrument = Instrument::Violin;
+        s.parts[0].measures[0]
+            .notes
+            .push(note(480, Duration::Quarter, &[67]));
+        let mut mark = Tremolo::new(a);
+        mark.end = Some(Anchor { tick: 480, ..a });
+        mark.strokes = 2;
+        s.notation.tremolos.push(mark);
+        let t = crate::performance::Timeline::new(&s).unwrap();
+        assert_eq!(
+            decorated_commands(&t, 0, 0)
+                .iter()
+                .filter(|c| matches!(c.kind, Kind::On(_)))
+                .count(),
+            8
+        );
+        let plain = {
+            let mut plain = s.clone();
+            plain.notation.tremolos.clear();
+            bank.render(&plain).unwrap()
+        };
+        let audio = bank.render(&s).unwrap();
+        assert!(audio.iter().all(|v| v.is_finite()));
+        assert!(audio.iter().any(|v| v.abs() > 0.001));
+        assert_ne!(audio, plain);
+        let mut drums = crate::performance::percussion_tests::fixture();
+        let mut mark = Tremolo::new(a);
+        mark.strokes = 3;
+        drums.notation.tremolos.push(mark);
+        let t = crate::performance::Timeline::new(&drums).unwrap();
+        assert_eq!(
+            drum_commands(&t, 0)
+                .iter()
+                .filter(|c| matches!(c.kind, Kind::On(_)))
+                .count(),
+            8
+        );
+        let audio = bank.render(&drums).unwrap();
+        assert!(audio.iter().all(|v| v.is_finite()));
+        assert!(audio.iter().any(|v| v.abs() > 0.001));
+    }
+}

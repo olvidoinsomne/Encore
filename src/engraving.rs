@@ -11,6 +11,7 @@ mod display;
 mod entry_style;
 mod expressions;
 mod grace;
+mod groups;
 mod lines;
 mod lyrics;
 mod ornaments;
@@ -18,6 +19,7 @@ mod ornaments;
 mod percussion_tests;
 mod repeats;
 mod slurs;
+mod tremolos;
 #[cfg(test)]
 mod voices;
 
@@ -470,6 +472,7 @@ struct RenderContext<'a> {
     pitches: display::Index,
     offsets: VoiceOffsets,
     ornaments: ornaments::Index<'a>,
+    tremolos: tremolos::Index<'a>,
 }
 fn paired_layers(notes: &[Note]) -> u8 {
     let mut layers = [0u8; 4];
@@ -689,20 +692,24 @@ pub fn engrave(score: &Score, options: &EngravingOptions) -> Vec<Page> {
     let measure_spacing = (0..count)
         .map(|measure| temporal_spacing(score, &parts, measure, &offsets, &ornaments))
         .collect::<Vec<_>>();
+    let tremolos = tremolos::Index::new(score, &pitches);
     let context = RenderContext {
         pitches,
         offsets,
         spacing: measure_spacing,
         styles,
         ornaments,
+        tremolos,
     };
+    let groups = groups::Index::new(&layout, &parts);
     let key = if parts.iter().any(|p| score.parts[*p].percussion.is_none()) {
         score.key_fifths.clamp(-7, 7)
     } else {
         0
     };
-    let label_x = layout.margins.left / scale;
-    let left = label_x + if parts.len() == 1 { 46.0 } else { 85.0 };
+    let group_label_x = layout.margins.left / scale;
+    let label_x = group_label_x + groups.name_padding();
+    let left = label_x + if parts.len() == 1 { 46.0 } else { 85.0 } + groups.symbol_padding();
     let right = (physical_w - layout.margins.right) / scale;
     let available = right - left;
     let group_size = 8;
@@ -828,7 +835,7 @@ pub fn engrave(score: &Score, options: &EngravingOptions) -> Vec<Page> {
                 *chunk.last().unwrap(),
                 cursor_y + staff_offsets[chunk.len() - 1],
             );
-            if chunk.len() > 1 {
+            if groups.legacy() && chunk.len() > 1 {
                 page.line(left - 4.0, first_y, left - 4.0, last_y, 1.3, INK);
                 if chunk.len() == 2
                     && score.parts[chunk[0]].instrument == crate::model::Instrument::Piano
@@ -843,7 +850,7 @@ pub fn engrave(score: &Score, options: &EngravingOptions) -> Vec<Page> {
                     page.line(left - 9.0, last_y, left - 2.0, last_y, 2.4, INK);
                 }
             }
-            if chunk.len() > 2 {
+            if groups.legacy() && chunk.len() > 2 {
                 for pair in 0..chunk.len() - 1 {
                     if score.parts[chunk[pair]].instrument == crate::model::Instrument::Piano
                         && score.parts[chunk[pair + 1]].instrument
@@ -904,7 +911,9 @@ pub fn engrave(score: &Score, options: &EngravingOptions) -> Vec<Page> {
                 } else {
                     line_bottom
                 };
-                page.line(left, bar_top, left, bar_bottom, 1.0, INK);
+                if groups.staff_bars(part_index) {
+                    page.line(left, bar_top, left, bar_bottom, 1.0, INK);
+                }
                 if part.percussion.is_some() {
                     percussion_clef(page, left + 17.0, y + 20.0);
                 } else {
@@ -962,7 +971,7 @@ pub fn engrave(score: &Score, options: &EngravingOptions) -> Vec<Page> {
                     }
                     draw_measure(page, score, &region, options, &context);
                     page.staves.push(region);
-                    if m + 1 == count {
+                    if groups.staff_bars(part_index) && m + 1 == count {
                         page.line(
                             x + width - 5.0,
                             bar_top,
@@ -979,12 +988,13 @@ pub fn engrave(score: &Score, options: &EngravingOptions) -> Vec<Page> {
                             2.8,
                             INK,
                         );
-                    } else {
+                    } else if groups.staff_bars(part_index) {
                         page.line(x + width, bar_top, x + width, bar_bottom, 0.9, INK);
                     }
                     x += width;
                 }
             }
+            groups.draw(page, score, chunk, measure, bars, group_label_x);
             if let Some(beat) = options.playhead {
                 let absolute = beat * PPQ as f32;
                 let first = measure as f32 * ticks as f32;
@@ -1014,7 +1024,7 @@ pub fn engrave(score: &Score, options: &EngravingOptions) -> Vec<Page> {
         context.ornaments.draw(page, score);
         slurs::draw(page, score);
         lyrics::draw(page, score);
-        repeats::draw(page, score);
+        repeats::draw(page, score, &groups);
         expressions::draw(page, score);
     }
     finish_layout_pages(&mut pages, score, &layout, scale);
@@ -1305,14 +1315,18 @@ fn system_layout(
                         .iter()
                         .map(|p| context.pitches.y(anchor, *p, 0.0))
                         .collect();
-                    let automatic = default_stem_up(
-                        paired,
-                        note,
-                        ys.iter().sum::<f32>() / ys.len() as f32,
-                        multiple_layers,
+                    let mean = context
+                        .tremolos
+                        .pair_mean(anchor, 0.0)
+                        .unwrap_or_else(|| ys.iter().sum::<f32>() / ys.len() as f32);
+                    let display_duration = context.tremolos.display_duration(&anchor, note);
+                    let stem_length = tremolos::stem_length(
+                        display_duration,
+                        context.tremolos.at(&anchor).map(|(mark, _)| mark.strokes),
                     );
+                    let automatic = default_stem_up(paired, note, mean, multiple_layers);
                     let up = style.map_or(automatic, |s| entry_style::stem_up(s, automatic));
-                    let stem = note.duration.has_stem()
+                    let stem = display_duration.has_stem()
                         && style.is_none_or(|s| s.stem != crate::entry_style::StemDirection::None);
                     if let Some(clearance) = articulation_clearance(note) {
                         if up {
@@ -1323,17 +1337,17 @@ fn system_layout(
                             above = above.max(-top + clearance);
                         }
                     }
-                    for y in ys {
+                    for &y in &ys {
                         above = above.max(
                             -y + if up && stem {
-                                stem_length(note.duration) * entry_scale + 4.0
+                                stem_length * entry_scale + 4.0
                             } else {
                                 9.0 * entry_scale
                             } + if note.tuplet.is_some() { 20.0 } else { 0.0 },
                         );
                         below = below.max(
                             y + if !up && stem {
-                                stem_length(note.duration) * entry_scale + 4.0
+                                stem_length * entry_scale + 4.0
                             } else {
                                 11.0 * entry_scale
                             } + if note.tuplet.is_some() { 20.0 } else { 0.0 },
@@ -1343,6 +1357,16 @@ fn system_layout(
                                 .max(65.0_f32.max(y + if !up && stem { 50.0 } else { 25.0 }) + 7.0);
                         }
                     }
+                    let tremolo_space = tremolos::clearance(
+                        note,
+                        context.tremolos.at(&anchor),
+                        &ys,
+                        up,
+                        stem,
+                        entry_scale,
+                    );
+                    above = above.max(tremolo_space.0);
+                    below = below.max(tremolo_space.1);
                 }
             }
         }
@@ -1487,6 +1511,7 @@ struct NoteLayout {
     stem: bool,
     forced_up: Option<bool>,
     beam: crate::entry_style::BeamStyle,
+    tremolo: Option<tremolos::Stroke>,
 }
 
 fn draw_measure(
@@ -1622,6 +1647,7 @@ fn draw_measure_layer(
             tick: note.start,
             layer: note.layer,
         };
+        let display_duration = context.tremolos.display_duration(&anchor, note);
         let default_style = crate::entry_style::EntryStyle::new(anchor);
         let style = styles.get(&anchor).copied().unwrap_or(&default_style);
         if !style.visible {
@@ -1678,7 +1704,8 @@ fn draw_measure_layer(
         } else {
             let top = ys.iter().copied().fold(f32::INFINITY, f32::min);
             let bottom = ys.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-            let automatic = default_stem_up(paired, note, mid - region.y, multiple_layers);
+            let pair_mid = context.tremolos.pair_mean(anchor, region.y).unwrap_or(mid);
+            let automatic = default_stem_up(paired, note, pair_mid - region.y, multiple_layers);
             let up = entry_style::stem_up(style, automatic);
             let mut sorted: Vec<usize> = (0..note.pitches.len()).collect();
             sorted.sort_by_key(|&i| context.pitches.position(anchor, note.pitches[i]));
@@ -1756,12 +1783,12 @@ fn draw_measure_layer(
                     hx,
                     py,
                     matches!(
-                        note.duration,
+                        display_duration,
                         Duration::DoubleWhole | Duration::Whole | Duration::Half
                     ),
-                    !note.duration.has_stem(),
+                    !display_duration.has_stem(),
                 );
-                if note.duration == Duration::DoubleWhole {
+                if display_duration == Duration::DoubleWhole {
                     for dx in [-12.0, -9.0, 9.0, 12.0] {
                         page.line(hx + dx, py - 7.0, hx + dx, py + 7.0, 1.2, INK);
                     }
@@ -1880,7 +1907,11 @@ fn draw_measure_layer(
                 bottom,
                 mid,
                 up,
-                duration: note.duration,
+                duration: display_duration,
+                tremolo: context
+                    .tremolos
+                    .at(&anchor)
+                    .map(|(mark, _)| tremolos::Stroke::from(mark)),
                 start: note.start,
                 end: note.start.saturating_add(note.ticks()),
                 scale: style.scale,
@@ -1940,6 +1971,10 @@ fn draw_measure_layer(
             i += 1;
         }
     }
+    for n in layouts.iter().filter(|n| !n.stem || !n.duration.has_stem()) {
+        tremolos::single(page, n, n.up);
+    }
+    tremolos::pairs(page, &layouts, &context.tremolos, region, layer, voice);
     let layer_notes = notes
         .iter()
         .filter(|note| note.layer == layer && note.voice == voice)
@@ -2093,7 +2128,7 @@ fn staff_dynamic_baseline(
     multiple_layers: bool,
 ) -> f32 {
     let paired = paired_layers(notes);
-    notes
+    let baseline = notes
         .iter()
         .filter(|note| !note.pitches.is_empty())
         .map(|note| {
@@ -2142,7 +2177,10 @@ fn staff_dynamic_baseline(
         .fold(
             y + if display.lines(part) == 1 { 45.0 } else { 65.0 },
             f32::max,
-        )
+        );
+    display
+        .tremolo_bottom(part, measure)
+        .map_or(baseline, |bottom| baseline.max(y + bottom + 19.0))
 }
 
 fn dynamic_change(previous: &mut Option<&'static str>, note: &Note) -> Option<&'static str> {
@@ -2368,9 +2406,9 @@ fn stem_flag(page: &mut Page, n: &NoteLayout) {
     let x = n.x + if n.up { 5.0 * n.scale } else { -5.0 * n.scale };
     let y0 = if n.up { n.bottom } else { n.top };
     let y1 = if n.up {
-        n.top - stem_length(n.duration) * n.scale
+        n.top - tremolos::stem_length(n.duration, n.tremolo.map(|t| t.strokes)) * n.scale
     } else {
-        n.bottom + stem_length(n.duration) * n.scale
+        n.bottom + tremolos::stem_length(n.duration, n.tremolo.map(|t| t.strokes)) * n.scale
     };
     page.line(x, y0, x, y1, 1.25 * n.scale, INK);
     let flags = n.duration.flags();
@@ -2396,6 +2434,7 @@ fn stem_flag(page: &mut Page, n: &NoteLayout) {
         );
         page.path(p, true, Some(INK), None, 0.0);
     }
+    tremolos::single(page, n, n.up);
 }
 fn stem_length(duration: Duration) -> f32 {
     31.0 + duration.flags().saturating_sub(2) as f32 * 7.0
@@ -2403,7 +2442,9 @@ fn stem_length(duration: Duration) -> f32 {
 fn beam_group(page: &mut Page, notes: &[NoteLayout]) {
     let stem_length = notes
         .iter()
-        .map(|note| stem_length(note.duration) * note.scale)
+        .map(|note| {
+            tremolos::stem_length(note.duration, note.tremolo.map(|t| t.strokes)) * note.scale
+        })
         .fold(0.0, f32::max);
     let up = notes
         .iter()
@@ -2445,6 +2486,9 @@ fn beam_group(page: &mut Page, notes: &[NoteLayout]) {
             1.25 * scale,
             INK,
         );
+    }
+    for n in notes {
+        tremolos::single(page, n, up);
     }
     let sign = if up { 1.0 } else { -1.0 };
     beam_segment(page, x1, beam_y(x1), x2, beam_y(x2), sign, scale);
@@ -3639,6 +3683,7 @@ mod tests {
         assert!(pdf(&pages).starts_with(b"%PDF"));
         let mut page = Page::new();
         let layout = |x, start| NoteLayout {
+            tremolo: None,
             voice_launch: None,
             x,
             top: 20.0,

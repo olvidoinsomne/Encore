@@ -63,24 +63,47 @@ impl EncoreApp {
                             Clef::Bass => 22,
                             Clef::Alto => 28,
                         };
+                        let span = self.score.notation.tremolos.iter().find(|mark| {
+                            mark.end.is_some()
+                                && (mark.anchor == anchor || mark.end == Some(anchor))
+                        });
+                        let principals = span.map_or_else(
+                            || vec![(anchor, note)],
+                            |mark| {
+                                [Some(mark.anchor), mark.end]
+                                    .into_iter()
+                                    .flatten()
+                                    .filter_map(|a| {
+                                        encore::document::note_at(&self.score, &a)
+                                            .map(|note| (a, note))
+                                    })
+                                    .collect::<Vec<_>>()
+                            },
+                        );
+                        let pitches = principals
+                            .iter()
+                            .flat_map(|(a, note)| {
+                                note.pitches.iter().map(move |pitch| (*a, *pitch))
+                            })
+                            .collect::<Vec<_>>();
                         if let Some(map) = &self.score.parts[selection.part].percussion {
                             let center = if map.lines == 1 { 0 } else { 4 };
-                            note.pitches
+                            pitches
                                 .iter()
-                                .filter_map(|pitch| map.sound(pitch.midi()))
+                                .filter_map(|(_, pitch)| map.sound(pitch.midi()))
                                 .map(|sound| i32::from(sound.position))
                                 .sum::<i32>()
-                                <= center * note.pitches.len() as i32
+                                <= center * pitches.len() as i32
                         } else {
-                            note.pitches
+                            pitches
                                 .iter()
-                                .map(|pitch| {
-                                    self.written_pitch_at(*pitch, anchor)
+                                .map(|(a, pitch)| {
+                                    self.written_pitch_at(*pitch, *a)
                                         .unwrap_or(*pitch)
                                         .staff_step()
                                 })
                                 .sum::<i32>()
-                                <= center * note.pitches.len() as i32
+                                <= center * pitches.len() as i32
                         }
                     }
                 });
@@ -303,6 +326,29 @@ impl EncoreApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn flip_stem_uses_the_common_pair_mean_for_measured_tremolos() {
+        let mut app = EncoreApp::from_score(Score::blank(), None, "Ready".into());
+        app.enter_note(0, 0, 0, Pitch::from_midi(60), false);
+        app.enter_note(0, 0, 480, Pitch::from_midi(84), false);
+        let a = Anchor {
+            part: 0,
+            measure: 0,
+            tick: 0,
+            layer: 0,
+            voice: 0,
+        };
+        let mut mark = encore::tremolos::Tremolo::new(a);
+        mark.end = Some(Anchor { tick: 480, ..a });
+        app.score.notation.tremolos.push(mark);
+        app.selected = a.selection(&app.score);
+        app.apply_style_command(StyleCommand::FlipStem);
+        assert_eq!(
+            entry_style::at(&app.score, &a).unwrap().stem,
+            StemDirection::Up
+        );
+        app.score.validate().unwrap();
+    }
     fn chord() -> EncoreApp {
         let mut app = EncoreApp::from_score(Score::blank(), None, "Ready".into());
         app.enter_note(0, 0, 0, Pitch::from_midi(61), false);

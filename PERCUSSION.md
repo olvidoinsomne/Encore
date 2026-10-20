@@ -61,6 +61,8 @@ Dynamics and hairpins change strike velocities. Sustained per-layer CC11
 expression is not applied to a shared drum channel. Procedural synthesis does
 not invent drum sounds: choose Sampled library for active unpitched staves.
 
+Measured single-entry and bounded alternating [tremolos](TREMOLOS.md) provide sampled drum rolls, with dynamics progressing across their attacks.
+
 Pitch ornaments, octave shifts, trill/glissando/pedal lines and playable chord
 realization on drum staves are rejected. Written chord symbols can remain as
 silent annotations. Pitched instruments elsewhere in the score retain their

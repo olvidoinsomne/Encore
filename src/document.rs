@@ -60,6 +60,8 @@ impl Anchor {
 #[serde(default)]
 pub struct Notation {
     #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tremolos: Vec<crate::tremolos::Tremolo>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub ornaments: Vec<crate::ornaments::Ornament>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub grace: Vec<crate::grace::GraceGroup>,
@@ -91,7 +93,8 @@ pub struct Notation {
 
 impl Notation {
     pub fn is_empty(&self) -> bool {
-        self.grace.is_empty()
+        self.tremolos.is_empty()
+            && self.grace.is_empty()
             && self.ornaments.is_empty()
             && self.chords.is_empty()
             && self.lines.is_empty()
@@ -128,6 +131,11 @@ pub fn validate(score: &Score) -> Result<(), String> {
         .ornaments
         .iter()
         .map(|o| &o.anchor)
+        .chain(
+            n.tremolos
+                .iter()
+                .flat_map(|t| std::iter::once(&t.anchor).chain(t.end.as_ref())),
+        )
         .chain(n.grace.iter().map(|g| &g.anchor))
         .chain(n.chords.iter().map(|c| &c.anchor))
         .chain(n.lines.iter().flat_map(|s| [&s.start, &s.end]))
@@ -143,6 +151,7 @@ pub fn validate(score: &Score) -> Result<(), String> {
     if anchors.into_iter().any(|a| a.layer > 3 || a.voice > 1) {
         return Err("Notation must refer to one of four layers and two voices per layer.".into());
     }
+    crate::tremolos::validate(score)?;
     crate::grace::validate(score)?;
     crate::ornaments::validate(score)?;
     crate::chords::validate(score)?;
@@ -152,6 +161,7 @@ pub fn validate(score: &Score) -> Result<(), String> {
         .notation
         .layout
         .validate_for_score(score.measure_count())?;
+    crate::groups::validate_layout(&score.notation.layout, score.parts.len())?;
     crate::expressions::validate(score)?;
     crate::lyrics::validate(score)?;
     crate::slurs::validate(score)?;
@@ -159,11 +169,13 @@ pub fn validate(score: &Score) -> Result<(), String> {
     crate::parts::validate_definitions(&score.notation.parts, score.parts.len())?;
     for part in &score.notation.parts {
         part.layout.validate_for_score(score.measure_count())?;
+        crate::groups::validate_layout(&part.layout, score.parts.len())?;
     }
     Ok(())
 }
 
 pub fn remove_anchor(score: &mut Score, anchor: &Anchor) {
+    crate::tremolos::remove_anchor(score, anchor);
     crate::ornaments::remove_anchor(score, anchor);
     crate::grace::remove_anchor(score, anchor);
     crate::lines::remove_anchor(score, anchor);
@@ -179,6 +191,14 @@ pub fn move_anchor(score: &mut Score, from: Anchor, to: Anchor) -> Result<(), St
         return Ok(());
     }
     let old = score.notation.clone();
+    for tremolo in &mut score.notation.tremolos {
+        if tremolo.anchor == from {
+            tremolo.anchor = to;
+        }
+        if tremolo.end == Some(from) {
+            tremolo.end = Some(to);
+        }
+    }
     for ornament in &mut score.notation.ornaments {
         if ornament.anchor == from {
             ornament.anchor = to;
@@ -242,6 +262,9 @@ pub fn move_anchor(score: &mut Score, from: Anchor, to: Anchor) -> Result<(), St
 
 /// Call before removing the source staff, so every remaining anchor stays valid.
 pub fn remove_staff(score: &mut Score, staff: usize) {
+    crate::groups::remove_staff(&mut score.notation.layout, staff);
+    crate::tremolos::remove_part(score, staff);
+    crate::tremolos::reindex_parts(score, staff);
     crate::ornaments::remove_part(score, staff);
     crate::ornaments::reindex_parts(score, staff);
     crate::grace::remove_part(score, staff);
@@ -277,6 +300,7 @@ pub fn remove_staff(score: &mut Score, staff: usize) {
     crate::lyrics::reindex_parts(score, staff);
     crate::slurs::reindex_parts(score, staff);
     for part in &mut score.notation.parts {
+        crate::groups::remove_staff(&mut part.layout, staff);
         part.voicing.retain(|rule| rule.staff != staff);
         for rule in &mut part.voicing {
             if rule.staff > staff {
@@ -295,6 +319,7 @@ pub fn remove_staff(score: &mut Score, staff: usize) {
 
 /// Discard annotations whose source measures have been explicitly removed.
 pub fn truncate_measures(score: &mut Score) -> Result<(), String> {
+    crate::tremolos::prune(score);
     crate::ornaments::prune(score);
     crate::grace::prune(score);
     crate::chords::prune(score);

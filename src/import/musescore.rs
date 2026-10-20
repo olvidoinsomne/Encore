@@ -241,6 +241,7 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
     let mut grace_sets = Vec::new();
     let mut line_sets = Vec::new();
     let mut ornament_sets = Vec::new();
+    let mut tremolo_sets = Vec::new();
     let mut staff_ids = Vec::new();
     for staff in source.children().filter(|n| n.has_tag_name("Staff")) {
         if parts.len() >= MAX_PARTS {
@@ -281,6 +282,7 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
         let mut grace = super::grace::GraceCollector::default();
         let mut lines = super::lines::Lines::default();
         let mut ornaments = super::ornaments::Ornaments::default();
+        let mut tremolos = super::tremolos::Tremolos::default();
         let source_staff = id
             .parse::<u32>()
             .map_err(|_| "MuseScore staff id must be numeric.")?;
@@ -499,6 +501,7 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
                             let at=SourceAnchor{staff:source_staff,voice:voice_index.to_string(),measure:measure_index,tick:cursor as u32};
                             if !pitches.is_empty(){grace.main(item,at.clone(),&mut warnings)?;}
                             ornaments.muse(item, at.clone(), legacy_ornaments, &mut warnings)?;
+                            tremolos.muse(item, at.clone(), &mut warnings)?;
                             for line in item.descendants().filter(|n|n.has_tag_name("Spanner")&&matches!(n.attribute("type"),Some("Trill"|"Glissando"|"Ottava"|"Pedal"))){lines.muse(line,at.clone(),division,&mut warnings)?;}
                             annotations.muse(item,SourceAnchor{staff:source_staff,voice:voice_index.to_string(),measure:measure_index,tick:cursor as u32},division,&mut warnings)?;
                             let (staccato, articulations) = read_articulations(item, &mut warnings);
@@ -511,7 +514,6 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
                                     .map(|()| super::musicxml::decorate_split_event(&mut notes[first_piece..], articulations, &mut warnings))
                             }.map_err(|e| format!("{context}: {e}"))?;
                             cursor += i64::from(ticks);
-                            if item.descendants().any(|n| n.has_tag_name("Tremolo")) { warnings.add("Tremolo notation is not retained in the editable score."); }
                             if number::<i16>(item, "staffMove")?.unwrap_or(0) != 0 { warnings.add("Cross-staff notes remain on their source staff; sounding pitches are preserved."); }
                         }
                         "Slur" | "endSpanner" => annotations.muse_spanner(item,SourceAnchor{staff:source_staff,voice:voice_index.to_string(),measure:measure_index,tick:cursor.try_into().map_err(|_|"Invalid MuseScore slur location.")?},&mut warnings)?,
@@ -550,6 +552,7 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
                 grace.shift(measure_index, pickup_shift);
                 lines.shift(measure_index, pickup_shift);
                 ornaments.shift(measure_index, pickup_shift);
+                tremolos.shift(measure_index, pickup_shift);
             }
             source_start = source_start
                 .checked_add(actual_ticks)
@@ -627,6 +630,7 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
         grace_sets.push((grace, annotation_mapping.clone()));
         line_sets.push((lines, annotation_mapping.clone()));
         ornament_sets.push((ornaments, annotation_mapping.clone()));
+        tremolo_sets.push((tremolos, annotation_mapping.clone()));
         annotation_sets.push((annotations, annotation_mapping));
     }
     if initial_tempo.is_none() {
@@ -635,6 +639,7 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
         warnings.add("No explicit tempo was found; playback uses MuseScore's default of 120 quarter notes per minute. Set the tempo to match your intended performance.");
     }
     score.parts = parts;
+    score.notation.layout.groups = super::groups::muse(source, &staff_ids, &mut warnings)?;
     for (annotations, mapping) in annotation_sets {
         annotations.finish(&mut score, &mapping, &mut warnings)?;
     }
@@ -652,6 +657,9 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
     }
     for (ornaments, mapping) in ornament_sets {
         ornaments.finish(&mut score, &mapping, &mut warnings)?;
+    }
+    for (tremolos, mapping) in tremolo_sets {
+        tremolos.finish(&mut score, &mapping)?;
     }
     let parts = std::mem::take(&mut score.parts);
     finish_parts(score, parts, warnings)

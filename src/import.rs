@@ -16,12 +16,14 @@ mod entry_style;
 mod expressions;
 mod finale;
 mod grace;
+mod groups;
 mod lines;
 mod midi;
 mod musescore;
 mod musicxml;
 mod ornaments;
 mod percussion;
+mod tremolos;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct VoiceTarget {

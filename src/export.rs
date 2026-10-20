@@ -4,7 +4,7 @@ use crate::model::{Clef, Duration, Note, PPQ, Part, Pitch, Score};
 use std::collections::HashMap;
 use std::fmt::Write as _;
 
-fn xml(text: &str) -> String {
+pub(crate) fn xml(text: &str) -> String {
     text.chars()
         .filter(|&c| {
             c == '\t'
@@ -274,13 +274,15 @@ pub fn musicxml(score: &Score) -> String {
     );
     let _ = writeln!(
         out,
-        "  <work><work-title>{}</work-title></work>\n  <movement-title>{}</movement-title>\n  <identification><creator type=\"composer\">{}</creator><encoding><software>Encore</software></encoding></identification>",
+        "  <work><work-title>{}</work-title></work>\n  <movement-title>{}</movement-title>\n  <identification><creator type=\"composer\">{}</creator><encoding><software>Encore</software></encoding>{}</identification>",
         xml(&score.title),
         xml(&score.title),
-        xml(&score.composer)
+        xml(&score.composer),
+        crate::groups::native_metadata(score)
     );
     out.push_str("  <defaults><scaling><millimeters>7</millimeters><tenths>40</tenths></scaling></defaults>\n  <part-list>\n");
     for (pi, part) in score.parts.iter().enumerate() {
+        out.push_str(&crate::groups::musicxml_start(score, pi));
         let id = pi + 1;
         let volume = if part.muted || (score.parts.iter().any(|p| p.solo && !p.muted) && !part.solo)
         {
@@ -290,6 +292,7 @@ pub fn musicxml(score: &Score) -> String {
         };
         if part.percussion.is_some() {
             out.push_str(&percussion::part_list(pi, part, volume));
+            out.push_str(&crate::groups::musicxml_stop(score, pi));
             continue;
         }
         let _ = writeln!(
@@ -303,12 +306,14 @@ pub fn musicxml(score: &Score) -> String {
             part.instrument.gm_program() + 1,
             part.pan * 90.0
         );
+        out.push_str(&crate::groups::musicxml_stop(score, pi));
     }
     out.push_str("  </part-list>\n");
     let style_index = crate::entry_style::Index::new(score);
     let grace = crate::grace::MusicXmlIndex::new(score);
     let lines = crate::lines::MusicXmlIndex::new(score);
     let ornaments = crate::ornaments::MusicXmlIndex::new(score);
+    let tremolos = crate::tremolos::Index::new(score);
     let notation = xml_annotations(score, &grace, &lines);
     let measure_ticks = score.measure_ticks();
     for (pi, part) in score.parts.iter().enumerate() {
@@ -415,6 +420,7 @@ pub fn musicxml(score: &Score) -> String {
                             ("", ""),
                             style_index.get(&anchor),
                             None,
+                            false,
                         );
                     } else {
                         let dynamic = crate::model::dynamic_name(note.velocity);
@@ -438,7 +444,7 @@ pub fn musicxml(score: &Score) -> String {
                                 chord_index > 0,
                             );
                             let notation_marks = if chord_index == 0 {
-                                marks.0.to_owned() + &ornament
+                                marks.0.to_owned() + &ornament + &tremolos.notations(&anchor)
                             } else {
                                 ornament
                             };
@@ -474,6 +480,7 @@ pub fn musicxml(score: &Score) -> String {
                                     .as_ref()
                                     .and_then(|staff| staff.sound(pitch.midi()))
                                     .map(|sound| (pi, sound)),
+                                tremolos.at(&anchor).is_some_and(|(m, _)| m.end.is_some()),
                             );
                         }
                     }
@@ -639,6 +646,7 @@ fn write_gap(out: &mut String, mut ticks: u32, layer: u8) {
                     ("", ""),
                     None,
                     None,
+                    false,
                 );
                 ticks -= size;
             }
@@ -665,6 +673,7 @@ fn write_xml_note(
     annotations: (&str, &str),
     style: Option<&crate::entry_style::EntryStyle>,
     drum: Option<(usize, &crate::percussion::Sound)>,
+    paired_tremolo: bool,
 ) {
     let attributes = crate::entry_style::xml_attributes(style);
     if pitch.is_some() {
@@ -708,7 +717,16 @@ fn write_xml_note(
         out,
         "<voice>{}</voice><type>{}</type>",
         note.lane() + 1,
-        note.duration.musicxml_type()
+        if paired_tremolo {
+            match note.duration {
+                Duration::Quarter => Duration::Half,
+                Duration::Half => Duration::Whole,
+                d => d,
+            }
+        } else {
+            note.duration
+        }
+        .musicxml_type()
     );
     if note.dotted {
         out.push_str("<dot/>");
@@ -720,7 +738,9 @@ fn write_xml_note(
             pitch.map(|pitch| pitch.midi()),
         ));
     }
-    if let Some(tuplet) = note.tuplet {
+    if paired_tremolo {
+        out.push_str("<time-modification><actual-notes>2</actual-notes><normal-notes>1</normal-notes></time-modification>");
+    } else if let Some(tuplet) = note.tuplet {
         let _ = write!(
             out,
             "<time-modification><actual-notes>{}</actual-notes><normal-notes>{}</normal-notes></time-modification>",

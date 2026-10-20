@@ -77,6 +77,7 @@ impl EncoreApp {
         self.lines_editor.open = false;
         self.ornaments_editor.open = false;
         self.percussion_editor.open = false;
+        self.tremolos_editor.open = false;
         self.chord_editor.active = false;
         self.chord_editor.open = false;
     }

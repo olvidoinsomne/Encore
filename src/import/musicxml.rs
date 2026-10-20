@@ -152,10 +152,12 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
     let mut grace_sets = Vec::new();
     let mut line_sets = Vec::new();
     let mut ornament_sets = Vec::new();
+    let mut tremolo_sets = Vec::new();
     let mut initial_meter = None;
     let mut initial_key = None;
     let mut initial_tempo = None;
     let mut seen_parts = Vec::new();
+    let mut group_staves = BTreeMap::new();
     for source in root.children().filter(|n| n.has_tag_name("part")) {
         if parts.len() >= MAX_PARTS {
             return Err(format!("Import exceeds Encore's {MAX_PARTS}-staff limit."));
@@ -165,6 +167,7 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
             return Err("MusicXML has duplicate score parts.".into());
         }
         seen_parts.push(id);
+        let group_first_staff = parts.len();
         let info = infos.get(id).cloned().unwrap_or_else(|| {
             warnings.add("A part without MIDI instrumentation was imported as piano.");
             PartInfo {
@@ -190,6 +193,7 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
         let mut grace = super::grace::GraceCollector::default();
         let mut lines = super::lines::Lines::default();
         let mut ornaments = super::ornaments::Ornaments::default();
+        let mut tremolos = super::tremolos::Tremolos::default();
         let mut annotation_mapping = BTreeMap::new();
         let repeat_map = crate::repeats::parse_musicxml(source, measures.len())?;
         if !repeat_map.is_empty() {
@@ -524,8 +528,6 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
                             continue;
                         }
                         let ticks = xml_ticks(item, divisions, &context)?;
-                        let rhythm = read_rhythm(item, ticks)
-                            .map_err(|error| format!("{context}: {error}"))?;
                         let chord = child(item, "chord").is_some();
                         let start = if chord {
                             chord_start
@@ -587,6 +589,13 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
                             measure: measure_index,
                             tick: start,
                         };
+                        let paired_tremolo = tremolos.xml(item, at.clone(), &mut warnings)?;
+                        let rhythm = if paired_tremolo {
+                            super::tremolos::paired_rhythm(item, ticks)
+                        } else {
+                            read_rhythm(item, ticks)
+                        }
+                        .map_err(|error| format!("{context}: {error}"))?;
                         let excluded = if !chord && !pitches.is_empty() {
                             grace.main(item, at.clone(), &mut warnings)?
                         } else {
@@ -694,6 +703,7 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
                                                     | "mordent"
                                                     | "inverted-mordent"
                                                     | "accidental-mark"
+                                                    | "tremolo"
                                             )
                                         },
                                     ))
@@ -767,6 +777,7 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
             grace.shift(measure_index, pickup_shift);
             lines.shift(measure_index, pickup_shift);
             ornaments.shift(measure_index, pickup_shift);
+            tremolos.shift(measure_index, pickup_shift);
             if extent > measure_ticks {
                 return Err(format!(
                     "{context}: music extends beyond the fixed time signature."
@@ -926,17 +937,23 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
                 solo: false,
             });
         }
+        group_staves.insert(
+            id.to_owned(),
+            (group_first_staff..parts.len()).collect::<Vec<_>>(),
+        );
         expression_sets.push((expressions, annotation_mapping.clone()));
         chord_sets.push((chords, annotation_mapping.clone()));
         grace_sets.push((grace, annotation_mapping.clone()));
         line_sets.push((lines, annotation_mapping.clone()));
         ornament_sets.push((ornaments, annotation_mapping.clone()));
+        tremolo_sets.push((tremolos, annotation_mapping.clone()));
         annotation_sets.push((annotations, annotation_mapping));
     }
     if initial_tempo.is_none() {
         warnings.add("No explicit tempo was found; playback uses 120 quarter notes per minute. Set the tempo to match your intended performance.");
     }
     score.parts = parts;
+    score.notation.layout.groups = super::groups::xml(root, &group_staves, &mut warnings)?;
     for (annotations, mapping) in annotation_sets {
         annotations.finish(&mut score, &mapping, &mut warnings)?;
     }
@@ -954,6 +971,9 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
     }
     for (ornaments, mapping) in ornament_sets {
         ornaments.finish(&mut score, &mapping, &mut warnings)?;
+    }
+    for (tremolos, mapping) in tremolo_sets {
+        tremolos.finish(&mut score, &mapping)?;
     }
     let parts = std::mem::take(&mut score.parts);
     finish_parts(score, parts, warnings)
