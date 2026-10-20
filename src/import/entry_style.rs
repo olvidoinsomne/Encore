@@ -95,7 +95,7 @@ impl Styles {
             let pitch = Pitch {
                 step,
                 octave: number::<i8>(pitch, "octave")?.ok_or("MusicXML pitch needs an octave.")?,
-                alter: number::<i8>(pitch, "alter")?.unwrap_or(0),
+                alter: super::pitch_alter(pitch)?,
             };
             let tied = node
                 .children()

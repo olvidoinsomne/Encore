@@ -4,7 +4,7 @@ use super::{Warnings, child, number, text, value};
 use crate::document::Anchor;
 use crate::lyrics::{Lyric, LyricKind, Syllabic};
 use crate::model::Score;
-use crate::slurs::{Slur, SlurDirection};
+use crate::slurs::{Slur, SlurDirection, SlurShape, SlurStyle};
 use roxmltree::Node;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -36,13 +36,20 @@ struct RawSlur {
     end: SourceAnchor,
     value: Slur,
 }
+struct SlurMark {
+    at: SourceAnchor,
+    number: String,
+    start: bool,
+    value: Slur,
+    control: Option<f32>,
+}
 #[derive(Default)]
 pub(super) struct Annotations {
     styles: super::entry_style::Styles,
     lyrics: Vec<RawLyric>,
     slurs: Vec<RawSlur>,
     lyric_keys: BTreeSet<(SourceAnchor, LyricKind, u16)>,
-    open_slurs: BTreeMap<String, (SourceAnchor, Slur)>,
+    slur_marks: Vec<SlurMark>,
     extensions: BTreeMap<(u32, String, LyricKind, u16), usize>,
 }
 impl Annotations {
@@ -145,30 +152,80 @@ impl Annotations {
                 warnings.add("Lyric font styling is re-engraved using Encore's lyric font.");
             }
         }
+        let mut geometry = BTreeMap::new();
+        for element in node
+            .descendants()
+            .filter(|n| n.has_tag_name("other-notation"))
+        {
+            if let Some(json) = element
+                .text()
+                .and_then(|s| s.strip_prefix(crate::slurs::XML_METADATA_PREFIX))
+            {
+                if json.len() > 2048 {
+                    return Err("Encore slur metadata is too long.".into());
+                }
+                let value: crate::slurs::XmlGeometry = serde_json::from_str(json)
+                    .map_err(|_| "Invalid Encore slur geometry metadata.")?;
+                if geometry.insert(value.number.to_string(), value).is_some() {
+                    return Err("Duplicate Encore slur geometry metadata.".into());
+                }
+            }
+        }
         for element in node.descendants().filter(|n| n.has_tag_name("slur")) {
             let number = element.attribute("number").unwrap_or("1");
             if excluded.contains(number) {
                 continue;
             }
-            if number.len() > 64 {
-                return Err("MusicXML slur number is too long.".into());
+            if number
+                .parse::<u8>()
+                .ok()
+                .is_none_or(|n| !(1..=16).contains(&n))
+            {
+                return Err("MusicXML slur number must be 1–16.".into());
             }
-            let key = format!("{}:{}:{number}", at.staff, at.voice);
-            match element.attribute("type"){
-                Some("start")=>{
-                    let mut slur=Slur::new(at.dummy(),at.dummy());
-                    slur.direction=direction(element.attribute("placement").or(element.attribute("orientation")));
-                    slur.start_offset=xml_offset(element)?;
-                    if let Some(y)=xml_float(element,"bezier-y")?{slur.height=y.abs().clamp(4.0,100.0);}
-                    if self.open_slurs.insert(key,(at.clone(),slur)).is_some(){return Err("A MusicXML slur starts again before its previous endpoint.".into());}
+            let start = match element.attribute("type") {
+                Some("start") => true,
+                Some("stop") => false,
+                Some("continue") => {
+                    warnings.add("Slur continuation control points are re-engraved from the preserved endpoint shape.");
+                    continue;
                 }
-                Some("stop")=>{
-                    if let Some((start,mut slur))=self.open_slurs.remove(&key){slur.end_offset=xml_offset(element)?;self.slurs.push(RawSlur{start,end:at.clone(),value:slur});}else{warnings.add("A slur stop without a matching start was omitted.");}
-                }
-                Some("continue")=>warnings.add("Slurs retain their endpoints; additional cross-system control points are re-engraved."),
-                _=>return Err("MusicXML slur requires a start, stop, or continue type.".into()),
+                _ => return Err("MusicXML slur requires a start, stop, or continue type.".into()),
+            };
+            let mut slur = Slur::new(at.dummy(), at.dummy());
+            slur.direction = direction(
+                element
+                    .attribute("placement")
+                    .or(element.attribute("orientation")),
+            );
+            let offset = xml_offset(element)?;
+            if start {
+                slur.start_offset = offset;
+            } else {
+                slur.end_offset = offset;
             }
-            if [
+            slur.style = match element.attribute("line-type").unwrap_or("solid") {
+                "solid" => SlurStyle::Solid,
+                "dashed" => SlurStyle::Dashed,
+                "dotted" => SlurStyle::Dotted,
+                _ => {
+                    warnings.add("Wavy slurs are imported as solid curves; solid, dashed, and dotted styles are retained.");
+                    SlurStyle::Solid
+                }
+            };
+            slur.dash_length = xml_float(element, "dash-length")?.unwrap_or(6.0);
+            slur.gap = xml_float(element, "space-length")?.unwrap_or(4.0);
+            let control = xml_float(element, "bezier-y")?;
+            if let Some(y) = control {
+                slur.height = y.abs().clamp(4.0, 100.0);
+            }
+            if let Some(native) = geometry.remove(number) {
+                if !start {
+                    return Err("Encore slur geometry must attach to the start entry.".into());
+                }
+                slur.height = native.height;
+                slur.shape = native.shape;
+            } else if [
                 "bezier-x",
                 "bezier-x2",
                 "bezier-y2",
@@ -178,11 +235,15 @@ impl Annotations {
             .iter()
             .any(|name| element.attribute(*name).is_some())
             {
-                warnings.add("Custom slur control points and absolute placement are re-engraved from the preserved endpoints and direction.");
+                warnings.add("Absolute MusicXML slur coordinates and horizontal control distances are re-engraved; endpoint offsets and vertical controls are retained.");
             }
-            if element.attribute("line-type").is_some_and(|s| s != "solid") {
-                warnings.add("Dashed/dotted slurs are rendered as solid phrase curves.");
-            }
+            self.slur_marks.push(SlurMark {
+                at: at.clone(),
+                number: format!("xml:{number}"),
+                start,
+                value: slur,
+                control,
+            });
         }
         self.check_size()
     }
@@ -216,9 +277,9 @@ impl Annotations {
                 s.end.tick += ticks;
             }
         }
-        for (at, _) in self.open_slurs.values_mut() {
-            if at.measure == measure {
-                at.tick += ticks;
+        for mark in &mut self.slur_marks {
+            if mark.at.measure == measure {
+                mark.at.tick += ticks;
             }
         }
     }
@@ -330,16 +391,23 @@ impl Annotations {
             let id = element.attribute("id").ok_or("MuseScore slur has no id.")?;
             let mut slur = Slur::new(at.dummy(), at.dummy());
             slur.direction = direction(value(element, "up").or(value(element, "direction")));
-            self.open_slurs.insert(format!("muse:{id}"), (at, slur));
+            muse_style(element, &mut slur, warnings)?;
+            self.slur_marks.push(SlurMark {
+                at,
+                number: format!("muse:{id}"),
+                start: true,
+                value: slur,
+                control: None,
+            });
         } else if element.has_tag_name("endSpanner") {
             let id = element.attribute("id").unwrap_or("");
-            if let Some((start, value)) = self.open_slurs.remove(&format!("muse:{id}")) {
-                self.slurs.push(RawSlur {
-                    start,
-                    end: at,
-                    value,
-                });
-            }
+            self.slur_marks.push(SlurMark {
+                value: Slur::new(at.dummy(), at.dummy()),
+                at,
+                number: format!("muse:{id}"),
+                start: false,
+                control: None,
+            });
         } else if element.attribute("type") == Some("Slur")
             && let Some(next) = child(element, "next").and_then(|n| child(n, "location"))
         {
@@ -359,19 +427,28 @@ impl Annotations {
                 .ok_or("MuseScore slur endpoint tick is invalid.")? as u32;
             let staff_delta = number::<i32>(next, "staves")?.unwrap_or(0);
             let voice_delta = number::<i32>(next, "voices")?.unwrap_or(0);
-            if staff_delta != 0 || voice_delta != 0 {
-                warnings.add("Cross-staff or cross-voice MuseScore slurs are not supported and were omitted.");
+            if staff_delta != 0 {
+                warnings.add("Cross-staff MuseScore slurs require grouped staff export and are not supported yet; the slur was omitted.");
                 return Ok(());
             }
+            let voice = at
+                .voice
+                .parse::<i32>()
+                .map_err(|_| "Invalid MuseScore slur source voice.")?
+                .checked_add(voice_delta)
+                .filter(|v| (0..4).contains(v))
+                .ok_or("MuseScore slur endpoint voice lies outside 0–3.")?;
             let end = SourceAnchor {
                 measure,
                 tick,
+                voice: voice.to_string(),
                 ..at.clone()
             };
             let mut slur = Slur::new(at.dummy(), end.dummy());
             if let Some(properties) = child(element, "Slur") {
                 slur.direction =
                     direction(value(properties, "up").or(value(properties, "direction")));
+                muse_style(properties, &mut slur, warnings)?;
             }
             self.slurs.push(RawSlur {
                 start: at,
@@ -383,18 +460,72 @@ impl Annotations {
     }
     fn check_size(&self) -> Result<(), String> {
         if self.lyrics.len() > crate::lyrics::MAX_LYRICS
-            || self.slurs.len() + self.open_slurs.len() > 20_000
+            || self.slurs.len() + self.slur_marks.len().div_ceil(2) > 20_000
         {
             return Err("Imported score exceeds Encore's lyric or slur limit.".into());
         }
         Ok(())
     }
     pub(super) fn finish(
-        self,
+        mut self,
         score: &mut Score,
         mapping: &super::VoiceMapping,
         warnings: &mut Warnings,
     ) -> Result<(), String> {
+        // Match number levels in source document order, without assuming that
+        // a start precedes its stop in a serialized independent voice. A level
+        // cannot start twice before its pair: that would be ambiguous XML.
+        let mut pending = BTreeMap::<String, SlurMark>::new();
+        for mark in std::mem::take(&mut self.slur_marks) {
+            if let Some(prior) = pending.remove(&mark.number) {
+                if prior.start == mark.start {
+                    return Err(
+                        "Ambiguous slur number: two starts or stops share one overlapping level."
+                            .into(),
+                    );
+                }
+                let (start, stop) = if prior.start {
+                    (prior, mark)
+                } else {
+                    (mark, prior)
+                };
+                let mut slur = start.value;
+                slur.end_offset = stop.value.end_offset;
+                if slur.shape.is_none()
+                    && let Some(height) = stop.control
+                {
+                    if slur.direction == SlurDirection::Auto {
+                        slur.direction = if start.control.unwrap_or(height) < 0.0 {
+                            SlurDirection::Below
+                        } else {
+                            SlurDirection::Above
+                        };
+                    }
+                    let sign = if slur.direction == SlurDirection::Below {
+                        -1.0
+                    } else {
+                        1.0
+                    };
+                    slur.shape = Some(SlurShape {
+                        inset: [1.0 / 3.0; 2],
+                        heights: [
+                            start.control.map_or(slur.height, |y| y * sign),
+                            height * sign,
+                        ],
+                    });
+                }
+                self.slurs.push(RawSlur {
+                    start: start.at,
+                    end: stop.at,
+                    value: slur,
+                });
+            } else {
+                pending.insert(mark.number.clone(), mark);
+            }
+        }
+        if !pending.is_empty() {
+            warnings.add("Slurs without matching end notes were omitted.");
+        }
         let mt = score.measure_ticks();
         let resolve = |at: &SourceAnchor| -> Result<Anchor, String> {
             let target = mapping
@@ -413,19 +544,42 @@ impl Annotations {
             let mut slur = raw.value;
             slur.start = resolve(&raw.start)?;
             slur.end = resolve(&raw.end)?;
-            if slur.start.part != slur.end.part || slur.start.lane() != slur.end.lane() {
-                warnings.add("Cross-staff or cross-voice slurs are omitted; same-layer phrase curves are retained.");
+            if slur.start.part != slur.end.part {
+                warnings.add("Cross-staff slurs require grouped staff export and are not supported yet; the slur was omitted.");
             } else {
                 score.notation.slurs.push(slur);
             }
-        }
-        if !self.open_slurs.is_empty() {
-            warnings.add("Slurs without matching end notes were omitted.");
         }
         crate::lyrics::validate(score)?;
         crate::slurs::validate(score)?;
         Ok(())
     }
+}
+fn muse_style(node: Node<'_, '_>, slur: &mut Slur, warnings: &mut Warnings) -> Result<(), String> {
+    if let Some(style) = value(node, "lineType").or(value(node, "lineStyle")) {
+        slur.style = match style {
+            "0" | "solid" => SlurStyle::Solid,
+            "1" | "dotted" => SlurStyle::Dotted,
+            "2" | "3" | "dashed" | "wideDashed" => SlurStyle::Dashed,
+            _ => {
+                warnings.add("An unknown MuseScore slur line style was imported as solid.");
+                SlurStyle::Solid
+            }
+        };
+        if style == "3" || style == "wideDashed" {
+            slur.dash_length = 10.0;
+            slur.gap = 6.0;
+        }
+    }
+    if node.descendants().any(|n| {
+        matches!(
+            n.tag_name().name(),
+            "SlurSegment" | "o1" | "o2" | "o3" | "o4"
+        )
+    }) {
+        warnings.add("MuseScore per-system slur control points are re-engraved; direction, line style, and endpoints are retained.");
+    }
+    Ok(())
 }
 fn direction(value: Option<&str>) -> SlurDirection {
     match value {
@@ -438,7 +592,9 @@ fn xml_float(node: Node<'_, '_>, name: &str) -> Result<Option<f32>, String> {
     node.attribute(name)
         .map(|s| {
             s.parse::<f32>()
-                .map_err(|_| format!("Invalid slur {name}."))
+                .ok()
+                .filter(|v| v.is_finite())
+                .ok_or_else(|| format!("Invalid slur {name}."))
         })
         .transpose()
 }
@@ -479,6 +635,72 @@ mod tests {
         format!(
             "<note><pitch><step>{step}</step><octave>4</octave></pitch><duration>480</duration><voice>2</voice><type>quarter</type><notations>{notations}</notations>{lyrics}</note>"
         )
+    }
+    #[test]
+    fn cross_voice_stop_before_start_and_line_styles_roundtrip() {
+        let plain = note("C", "", "").replace("<voice>2</voice>", "<voice>1</voice>");
+        let stop = note("D", "<slur type='stop' number='1'/>", "")
+            .replace("<voice>2</voice>", "<voice>1</voice>");
+        let start = note(
+            "E",
+            "<slur type='start' number='1' line-type='dotted' dash-length='5' space-length='7'/>",
+            "",
+        );
+        let text = xml(&format!(
+            "{plain}{stop}<backup><duration>960</duration></backup>{start}"
+        ));
+        let doc = roxmltree::Document::parse(&text).unwrap();
+        let imported = super::super::musicxml::parse(&doc).unwrap();
+        let slur = &imported.score.notation.slurs[0];
+        assert_ne!(slur.start.lane(), slur.end.lane());
+        assert_eq!(slur.style, SlurStyle::Dotted);
+        assert_eq!(slur.gap, 7.0);
+        let exported = crate::export::musicxml(&imported.score);
+        let doc = super::super::parse_xml(&exported).unwrap();
+        let round = super::super::musicxml::parse(&doc).unwrap();
+        assert_eq!(round.score.notation.slurs, imported.score.notation.slurs);
+    }
+    #[test]
+    fn custom_curve_metadata_and_asymmetric_controls_roundtrip() {
+        let text = xml(&[
+            note(
+                "C",
+                "<slur type='start' line-type='dashed' placement='below'/>",
+                "",
+            ),
+            note("D", "<slur type='stop'/>", ""),
+        ]
+        .concat());
+        let doc = roxmltree::Document::parse(&text).unwrap();
+        let mut score = super::super::musicxml::parse(&doc).unwrap().score;
+        let slur = &mut score.notation.slurs[0];
+        slur.shape = Some(SlurShape {
+            inset: [0.15, 0.55],
+            heights: [60.0, -24.0],
+        });
+        slur.height = 27.0;
+        slur.start_offset = [4.0, 3.0];
+        slur.end_offset = [-2.0, 6.0];
+        slur.dash_length = 11.0;
+        slur.gap = 3.0;
+        let exported = crate::export::musicxml(&score);
+        assert!(exported.contains(crate::slurs::XML_METADATA_PREFIX));
+        let doc = super::super::parse_xml(&exported).unwrap();
+        let round = super::super::musicxml::parse(&doc).unwrap();
+        assert_eq!(round.score.notation.slurs, score.notation.slurs);
+    }
+    #[test]
+    fn ambiguous_numbered_slurs_fail_instead_of_joining_wrong_voices() {
+        let notes = [
+            note("C", "<slur type='start' number='2'/>", ""),
+            note("D", "<slur type='start' number='2'/>", ""),
+            note("E", "<slur type='stop' number='2'/>", ""),
+        ]
+        .concat();
+        let text = xml(&notes);
+        let doc = roxmltree::Document::parse(&text).unwrap();
+        let err = super::super::musicxml::parse(&doc).unwrap_err();
+        assert!(err.contains("Ambiguous slur number"));
     }
     #[test]
     fn musicxml_verses_elision_extensions_and_curves_roundtrip() {
@@ -543,13 +765,32 @@ mod tests {
         );
     }
     #[test]
-    fn dangling_and_unsupported_slur_styles_report_loss() {
+    fn musescore_cross_voice_locations_and_patterns_are_retained() {
+        let text = "<museScore version='4.30'><Score><Staff id='1'><Measure><voice><TimeSig><sigN>4</sigN><sigD>4</sigD></TimeSig><Chord><durationType>quarter</durationType><Spanner type='Slur'><Slur><up>1</up><lineType>3</lineType></Slur><next><location><voices>1</voices><fractions>1/4</fractions></location></next></Spanner><Note><pitch>60</pitch></Note></Chord></voice><voice><Rest><durationType>quarter</durationType></Rest><Chord><durationType>quarter</durationType><Note><pitch>64</pitch></Note></Chord></voice></Measure></Staff></Score></museScore>";
+        let doc = roxmltree::Document::parse(text).unwrap();
+        let imported = super::super::musescore::parse(&doc).unwrap();
+        let slur = &imported.score.notation.slurs[0];
+        assert_ne!(slur.start.lane(), slur.end.lane());
+        assert_eq!(slur.style, SlurStyle::Dashed);
+        assert_eq!(slur.dash_length, 10.0);
+        assert_eq!(slur.end.tick, 480);
+        let legacy = "<museScore version='2.06'><Score><Staff id='1'><Measure><voice><TimeSig><sigN>4</sigN><sigD>4</sigD></TimeSig><Chord><durationType>quarter</durationType><Slur id='5'><lineType>1</lineType></Slur><Note><pitch>60</pitch></Note></Chord></voice><voice><Rest><durationType>quarter</durationType></Rest><Chord><durationType>quarter</durationType><endSpanner id='5'/><Note><pitch>64</pitch></Note></Chord></voice></Measure></Staff></Score></museScore>";
+        let doc = roxmltree::Document::parse(legacy).unwrap();
+        let imported = super::super::musescore::parse(&doc).unwrap();
+        assert_eq!(imported.score.notation.slurs[0].style, SlurStyle::Dotted);
+        assert_ne!(
+            imported.score.notation.slurs[0].start.lane(),
+            imported.score.notation.slurs[0].end.lane()
+        );
+    }
+    #[test]
+    fn dangling_slurs_report_unmatched_endpoints() {
         let text = xml(&note("C", "<slur type='start' line-type='dashed'/>", ""));
         let doc = roxmltree::Document::parse(&text).unwrap();
         let result = super::super::musicxml::parse(&doc).unwrap();
         assert!(result.score.notation.slurs.is_empty());
         assert!(result.warnings.iter().any(|w| w.contains("matching end")));
-        assert!(result.warnings.iter().any(|w| w.contains("solid phrase")));
+        assert!(!result.warnings.iter().any(|w| w.contains("solid phrase")));
     }
     #[test]
     fn annotation_targets_outside_notes_fail_clearly() {

@@ -1,6 +1,6 @@
 # Platforms and score compatibility
 
-Encore 0.10 targets Linux, macOS and Windows. Linux builds and packaging are
+Encore 0.11 targets Linux, macOS and Windows. Linux builds and packaging are
 verified on the development machine. Native macOS and Windows validation is
 still required; their build commands, packaging scripts and manual GitLab CI
 jobs are in [BUILDING.md](BUILDING.md). A Rust target alone does not supply the
@@ -64,15 +64,32 @@ and per-repeat visibility produce loss notes. Non-numeric MusicXML lyric line
 labels currently use line 1 with a warning; rename them numerically in the
 source application when different lines would collide.
 
-Slurs preserve same-staff, same-layer start/end notes, automatic/above/below
-direction, arch height and endpoint offsets. Native persistence and MusicXML
-round trips preserve this geometry subset; MuseScore supports legacy numbered
-and modern location-based endpoints. Original page-specific control points,
-dashed/dotted styling and cross-staff/cross-voice slurs are re-engraved or omitted
-with explicit notes. Unmatched endpoints are reported. Curves attach to notes
-rather than chord tones; ties remain separate notation. Public editing and
-imports validate anchors and enforce at most 16 overlapping phrases per staff
-for reliable MusicXML numbering.
+Slurs join later pitched entries on the same staff, including different layers
+or voices. Native projects preserve automatic/above/below placement, arch height,
+endpoint offsets, solid/dashed/dotted styling, dash spacing and asymmetric
+normalized control insets/heights. Manual controls freeze automatic collision
+lifting; Reset curve restores automatic shaping while retaining the line style.
+Every system/page receives its own vector fragment and editable source handles.
+
+MusicXML retains standard line style, dash/gap lengths and relative endpoint
+offsets. Encore adds a bounded `encore-slur-v1:` other-notation record for exact
+normalized manual shape round trips; other applications may discard that record
+and re-engrave the horizontal contour. Standard vertical control distances are
+retained when both endpoint controls are available. Absolute horizontal and
+per-system continuation controls are re-engraved with an import note. Slur
+numbering uses serialized voice order, so cross-voice stops appearing before
+starts pair correctly. Ambiguous reused levels fail explicitly. MuseScore
+retains legacy numbered and modern location-based endpoints across voices on
+the same staff, plus solid/dotted/narrow or wide dashed styles; custom
+per-system control points produce an import note.
+
+Cross-staff slurs are explicitly rejected in native editing and omitted with
+an import note. Grouped multi-staff MusicXML export is required before that
+workflow can interchange reliably. Curves attach to entries rather than
+individual chord tones; beat-attached curves, wavy styles, per-fragment shape
+overrides and complete automatic obstacle avoidance remain open. At most 16
+slur levels may overlap in MusicXML document order. Cross-voice curves currently
+affect notation only; same-lane phrases retain bounded legato playback.
 
 ### Grace groups
 
@@ -289,7 +306,7 @@ and octave-transposing instruments. Note entry in a written part converts back
 to the source pitch. Unrepresentable MIDI pitches, accidentals beyond double
 sharps/flats and key signatures beyond seven sharps/flats produce visible
 errors rather than clamping or changing the source. Playback uses source
-concert pitches. Voiced extraction from layers/chord notes, automatic
+concert pitches. Voiced layer/chord-note extraction is implemented with the filters and read-only source workflow in LINKED_PARTS.md. Automatic
 multimeasure rests, per-part clefs and per-item unlink/relink are not yet
 implemented. See [linked parts](LINKED_PARTS.md).
 
@@ -372,3 +389,29 @@ Dynamics, techniques, hairpins and octave-display lines remain layer-scoped.
 Event clipboard v5 and region clipboard v2 carry secondary voice identity, accept earlier versions and
 warn when pasting an isolated secondary entry detaches its launch. Complete
 measure-region paste retains validated branch relationships.
+
+
+## Turns, mordents and chord rolls
+
+Seven voice-local kinds cover turn/inverted turn, lower/upper mordent, up/down
+arpeggiation and non-arpeggiate. Turns/mordents require one principal pitch;
+rolls/brackets require 2–16 chord pitches. Each entry accepts one mark, with a
+1–960 tick window, 0–75% delay, print offsets and an independent playback switch.
+Neighbors follow the key or explicit ±1–4 semitone overrides. Final principal
+pitches sustain through the remaining gate; rolled tied members remain held.
+Grace notes, repeat traversal, CC11 and pedal use the same performed plan.
+Generated repeated keys under sostenuto produce an explicit unsupported-capture
+error. Played trills/glissandi overlapping these principal ornaments are also
+rejected rather than combined unpredictably.
+
+Native projects preserve all controls. MusicXML writes standard ornaments,
+accidental marks, arpeggiate/non-arpeggiate plus bounded native options; basic
+MuseScore articulations/arpeggios import. Lower mordent uses MusicXML `mordent`
+and a vertical stroke; upper mordent uses `inverted-mordent` without that stroke.
+Cross-staff rolls, measured tremolos, fermata time, long/accelerating ornaments
+and complete Human Playback remain open. Reference: [MusicXML ornaments](https://www.w3.org/2021/06/musicxml40/musicxml-reference/elements/ornaments/).
+
+Event clipboard v6 additionally retains ornament controls; region v3 also
+preserves advanced slur styles/controls. Earlier supported versions remain
+readable. Voiced-part copying is routed through standalone extraction or source
+editing to avoid copying hidden voices unintentionally.

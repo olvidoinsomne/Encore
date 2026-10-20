@@ -86,6 +86,29 @@ impl EncoreApp {
         self.notation_editor.tool = Tool::Lyrics;
         self.write_mode = false;
     }
+    pub(super) fn active_slur_endpoints(&self) -> Option<(Anchor, Anchor)> {
+        self.score
+            .notation
+            .slurs
+            .get(self.notation_editor.slur_index)
+            .map(|s| (s.start, s.end))
+    }
+    pub(super) fn select_slur_handle(&mut self, hit: &encore::engraving::SlurHit) {
+        if let Some(index) = self
+            .score
+            .notation
+            .slurs
+            .iter()
+            .position(|s| s.start == hit.start && s.end == hit.end)
+        {
+            self.notation_editor.slur_index = index;
+            self.notation_editor.slur_start = None;
+            self.notation_editor.tab = Tab::Slurs;
+            self.notation_editor.open = true;
+            self.status =
+                "Slur selected. Adjust its endpoints or manual control points in Notation.".into();
+        }
+    }
     pub(super) fn open_slurs(&mut self) {
         self.exit_chord_entry();
         self.notation_editor.open = true;
@@ -132,8 +155,7 @@ impl EncoreApp {
             .is_some_and(|note| !note.pitches.is_empty())
         {
             self.notation_editor.slur_start = Some(anchor);
-            self.status =
-                "Slur start set. Click its final note on the same staff, layer, and voice.".into();
+            self.status = "Slur start set. Click a later pitched entry on the same staff.".into();
         } else {
             self.status = "A slur must start on a pitched note.".into();
         }
@@ -308,7 +330,7 @@ impl EncoreApp {
                 .slurs
                 .get_mut(self.notation_editor.slur_index)
             {
-                *slur = Slur::new(slur.start, slur.end);
+                slur.reset_curve();
             }
             return true;
         }
@@ -377,6 +399,8 @@ impl EncoreApp {
         egui::Window::new("Notation")
             .open(&mut open)
             .default_width(480.0)
+            .max_width((ctx.content_rect().width() - 48.0).max(280.0))
+            .max_height((ctx.content_rect().height() - 48.0).max(240.0))
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     ui.selectable_value(&mut self.notation_editor.tab, Tab::Lyrics, "Lyrics");
@@ -385,8 +409,8 @@ impl EncoreApp {
                 });
                 ui.separator();
                 egui::ScrollArea::vertical()
-                    .id_salt("notation-dialog-scroll")
-                    .max_height(560.0)
+                    .id_salt(("notation-dialog-scroll", self.notation_editor.tab as u8))
+                    .max_height((ctx.content_rect().height() - 180.0).max(180.0))
                     .show(ui, |ui| match self.notation_editor.tab {
                         Tab::Lyrics => self.lyrics_editor(ui),
                         Tab::Slurs => self.slurs_editor(ui),
@@ -543,7 +567,52 @@ impl EncoreApp {
                     ui.selectable_value(&mut slur.direction, direction, direction.name());
                 }
             });
+        egui::ComboBox::from_id_salt("slur-style")
+            .selected_text(slur.style.name())
+            .show_ui(ui, |ui| {
+                for style in encore::slurs::SlurStyle::ALL {
+                    ui.selectable_value(&mut slur.style, style, style.name());
+                }
+            });
+        if slur.style != encore::slurs::SlurStyle::Solid {
+            ui.horizontal_wrapped(|ui| {
+                ui.add(
+                    egui::DragValue::new(&mut slur.dash_length)
+                        .range(2.0..=24.0)
+                        .prefix("Dash "),
+                );
+                ui.add(
+                    egui::DragValue::new(&mut slur.gap)
+                        .range(2.0..=24.0)
+                        .prefix("Gap "),
+                );
+            });
+        }
         ui.add(egui::Slider::new(&mut slur.height, 4.0..=100.0).text("Curve height"));
+        let mut manual = slur.shape.is_some();
+        if ui.checkbox(&mut manual, "Manual control points").changed() {
+            slur.shape = manual.then(|| slur.shape_or_default());
+        }
+        if let Some(shape) = &mut slur.shape {
+            ui.label("Horizontal inset is a fraction of the span; heights follow the chosen side of the staff.");
+            for i in 0..2 {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(format!("Control {}", i + 1));
+                    ui.add(
+                        egui::DragValue::new(&mut shape.inset[i])
+                            .range(0.05..=0.9)
+                            .speed(0.01)
+                            .prefix("Inset "),
+                    );
+                    ui.add(
+                        egui::DragValue::new(&mut shape.heights[i])
+                            .range(-240.0..=240.0)
+                            .prefix("Height "),
+                    );
+                });
+            }
+        }
+
         for (label, offset) in [
             ("Start", &mut slur.start_offset),
             ("End", &mut slur.end_offset),
@@ -575,7 +644,7 @@ impl EncoreApp {
             }
         });
         if ui.button("Reset curve").clicked() {
-            slur = Slur::new(slur.start, slur.end);
+            slur.reset_curve();
         }
         if slur != original {
             let mut edited = self.score.clone();

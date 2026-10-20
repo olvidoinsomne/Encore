@@ -16,6 +16,8 @@ struct ClipboardEvent {
     style: Option<encore::entry_style::EntryStyle>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     grace: Vec<encore::grace::GraceGroup>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    ornaments: Vec<encore::ornaments::Ornament>,
 }
 
 #[cfg(test)]
@@ -31,14 +33,26 @@ fn encode_annotated_event(
     encode_document_event(note, lyrics, None, Vec::new())
 }
 
+#[cfg(test)]
 fn encode_document_event(
     note: Note,
     lyrics: Vec<encore::lyrics::Lyric>,
     style: Option<encore::entry_style::EntryStyle>,
     grace: Vec<encore::grace::GraceGroup>,
 ) -> Result<String, String> {
+    encode_complete_event(note, lyrics, style, grace, Vec::new())
+}
+fn encode_complete_event(
+    note: Note,
+    lyrics: Vec<encore::lyrics::Lyric>,
+    style: Option<encore::entry_style::EntryStyle>,
+    grace: Vec<encore::grace::GraceGroup>,
+    ornaments: Vec<encore::ornaments::Ornament>,
+) -> Result<String, String> {
     let data = serde_json::to_string(&ClipboardEvent {
-        version: if note.voice != 0 || note.voice_launch.is_some() {
+        version: if !ornaments.is_empty() {
+            6
+        } else if note.voice != 0 || note.voice_launch.is_some() {
             5
         } else if !grace.is_empty() {
             4
@@ -53,6 +67,7 @@ fn encode_document_event(
         lyrics,
         style,
         grace,
+        ornaments,
     })
     .map_err(|error| format!("Could not copy event: {error}"))?;
     if data.len() + CLIPBOARD_MARKER.len() > MAX_CLIPBOARD_BYTES {
@@ -70,7 +85,7 @@ fn decode_event(text: &str) -> Result<ClipboardEvent, String> {
         .ok_or("Copy a single note, chord, or rest in Encore before pasting.")?;
     let event: ClipboardEvent = serde_json::from_str(data)
         .map_err(|error| format!("Invalid Encore clipboard event: {error}"))?;
-    if ![1, 2, 3, 4, 5].contains(&event.version) {
+    if ![1, 2, 3, 4, 5, 6].contains(&event.version) {
         return Err("This clipboard event requires a different Encore version.".into());
     }
     Ok(event)
@@ -78,6 +93,11 @@ fn decode_event(text: &str) -> Result<ClipboardEvent, String> {
 
 impl EncoreApp {
     pub(super) fn copy_selection(&mut self, ctx: &egui::Context, cut: bool) {
+        if self.view_is_voiced() {
+            self.status =
+                "Extract this voiced part or edit the source score before copying music.".into();
+            return;
+        }
         if self.region_selection.is_some() {
             self.copy_selected_region(ctx, cut);
             return;
@@ -121,7 +141,15 @@ impl EncoreApp {
             .filter(|group| Some(group.anchor) == anchor)
             .cloned()
             .collect();
-        let text = match encode_document_event(note.clone(), lyrics, style, grace) {
+        let ornaments = self
+            .score
+            .notation
+            .ornaments
+            .iter()
+            .filter(|o| Some(o.anchor) == anchor)
+            .cloned()
+            .collect();
+        let text = match encode_complete_event(note.clone(), lyrics, style, grace, ornaments) {
             Ok(text) => text,
             Err(error) => {
                 self.status = error;
@@ -155,6 +183,9 @@ impl EncoreApp {
     }
 
     pub(super) fn paste_selection(&mut self, text: &str) {
+        if !self.allow_source_edit() {
+            return;
+        }
         let insert = std::mem::take(&mut self.region_editor.insert_paste_once);
         if let Some(text) = text.strip_prefix(REGION_MARKER) {
             if let Err(error) = self.try_paste_region(text, insert) {
@@ -265,6 +296,7 @@ impl EncoreApp {
             lyrics,
             style,
             grace,
+            ornaments,
             ..
         } = decode_event(text)?;
         let detached_launch = note.voice_launch.take().is_some();
@@ -326,6 +358,10 @@ impl EncoreApp {
             group.anchor = anchor;
             group.validate()?;
             candidate.notation.grace.push(group);
+        }
+        for mut ornament in ornaments {
+            ornament.anchor = anchor;
+            candidate.notation.ornaments.push(ornament);
         }
         candidate.validate()?;
         // Commit only after the complete score validates. A failed paste keeps
@@ -513,6 +549,7 @@ mod tests {
                 lyrics: Vec::new(),
                 style: None,
                 grace: Vec::new(),
+                ornaments: Vec::new(),
             })
             .unwrap()
         );
@@ -977,5 +1014,57 @@ mod secondary_voice_tests {
         app.copy_selection(&ctx, true);
         assert_eq!(app.score, before);
         assert!(ctx.output(|output| output.commands.is_empty()));
+    }
+}
+
+#[cfg(test)]
+mod ornament_tests {
+    use super::*;
+    #[test]
+    fn event_clipboard_preserves_ornament_controls_and_rebinds_the_principal() {
+        let mut score = Score::blank();
+        let note = Note {
+            layer: 0,
+            voice: 0,
+            voice_launch: None,
+            start: 0,
+            duration: Duration::Quarter,
+            dotted: false,
+            tuplet: None,
+            pitches: vec![Pitch::from_midi(64)],
+            velocity: 80,
+            staccato: false,
+            articulations: vec![],
+            tied: false,
+        };
+        score.parts[0].measures[0].notes.push(note.clone());
+        let anchor = encore::document::Anchor {
+            part: 0,
+            measure: 0,
+            tick: 0,
+            layer: 0,
+            voice: 0,
+        };
+        let mut ornament =
+            encore::ornaments::Ornament::new(anchor, encore::ornaments::OrnamentKind::Turn);
+        ornament.upper = Some(1);
+        ornament.lower = Some(-2);
+        ornament.window_ticks = 180;
+        ornament.delay_percent = 25.0;
+        ornament.offset = [5.0, -8.0];
+        let text =
+            encode_complete_event(note, vec![], None, vec![], vec![ornament.clone()]).unwrap();
+        assert_eq!(decode_event(&text).unwrap().version, 6);
+        let mut app = EncoreApp::from_score(score, None, "Ready".into());
+        app.active_layer = 2;
+        app.cursor_tick = 480;
+        app.try_paste_event(&text).unwrap();
+        ornament.anchor = encore::document::Anchor {
+            tick: 480,
+            layer: 2,
+            ..anchor
+        };
+        assert_eq!(app.score.notation.ornaments, vec![ornament]);
+        app.score.validate().unwrap();
     }
 }

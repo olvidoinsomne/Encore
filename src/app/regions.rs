@@ -165,6 +165,9 @@ impl EncoreApp {
     }
 
     pub(super) fn clear_selected_region(&mut self) {
+        if !self.allow_source_edit() {
+            return;
+        }
         let Some(region) = self.region_selection.clone() else {
             self.status = "Select a measure region to clear.".into();
             return;
@@ -179,6 +182,9 @@ impl EncoreApp {
         }
     }
     pub(super) fn delete_selected_measures(&mut self) {
+        if !self.allow_source_edit() {
+            return;
+        }
         let Some(region) = self.region_selection.clone() else {
             self.status = "Select a full staff stack to delete measures.".into();
             return;
@@ -204,6 +210,9 @@ impl EncoreApp {
         }
     }
     pub(super) fn insert_region_measures(&mut self) {
+        if !self.allow_source_edit() {
+            return;
+        }
         let at = self
             .region_selection
             .as_ref()
@@ -224,6 +233,9 @@ impl EncoreApp {
         }
     }
     pub(super) fn transpose_selected_region(&mut self) {
+        if !self.allow_source_edit() {
+            return;
+        }
         let Some(region) = self.region_selection.clone() else {
             self.status = "Select a measure region to transpose.".into();
             return;

@@ -138,6 +138,7 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
     let mut chord_sets = Vec::new();
     let mut grace_sets = Vec::new();
     let mut line_sets = Vec::new();
+    let mut ornament_sets = Vec::new();
     let mut initial_meter = None;
     let mut initial_key = None;
     let mut initial_tempo = None;
@@ -174,6 +175,7 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
         let mut chords = super::chords::Chords::default();
         let mut grace = super::grace::GraceCollector::default();
         let mut lines = super::lines::Lines::default();
+        let mut ornaments = super::ornaments::Ornaments::default();
         let mut annotation_mapping = BTreeMap::new();
         let repeat_map = crate::repeats::parse_musicxml(source, measures.len())?;
         if !repeat_map.is_empty() {
@@ -511,6 +513,7 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
                             &mut warnings,
                             &excluded,
                         )?;
+                        ornaments.xml(item, at.clone(), &mut warnings)?;
                         lines.xml_note(item, at, divisions.unwrap_or(480.0), &mut warnings)?;
                         let key = (staff, voice);
                         let voice_launch = item
@@ -592,12 +595,20 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
                                         |child| {
                                             !matches!(
                                                 child.tag_name().name(),
-                                                "trill-mark" | "wavy-line"
+                                                "trill-mark"
+                                                    | "wavy-line"
+                                                    | "turn"
+                                                    | "inverted-turn"
+                                                    | "delayed-turn"
+                                                    | "delayed-inverted-turn"
+                                                    | "mordent"
+                                                    | "inverted-mordent"
+                                                    | "accidental-mark"
                                             )
                                         },
                                     ))
                         }) {
-                            warnings.add("Ornaments and playing instructions are not retained in the editable score.");
+                            warnings.add("Unsupported ornaments and playing instructions are not retained in the editable score.");
                         }
                     }
                     "barline" => (),
@@ -665,6 +676,7 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
             chords.shift(measure_index, pickup_shift);
             grace.shift(measure_index, pickup_shift);
             lines.shift(measure_index, pickup_shift);
+            ornaments.shift(measure_index, pickup_shift);
             if extent > measure_ticks {
                 return Err(format!(
                     "{context}: music extends beyond the fixed time signature."
@@ -827,6 +839,7 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
         chord_sets.push((chords, annotation_mapping.clone()));
         grace_sets.push((grace, annotation_mapping.clone()));
         line_sets.push((lines, annotation_mapping.clone()));
+        ornament_sets.push((ornaments, annotation_mapping.clone()));
         annotation_sets.push((annotations, annotation_mapping));
     }
     if initial_tempo.is_none() {
@@ -847,6 +860,9 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
     }
     for (lines, mapping) in line_sets {
         lines.resolve(&mut score, &mapping, &mut warnings)?;
+    }
+    for (ornaments, mapping) in ornament_sets {
+        ornaments.finish(&mut score, &mapping, &mut warnings)?;
     }
     let parts = std::mem::take(&mut score.parts);
     finish_parts(score, parts, warnings)
@@ -1006,14 +1022,8 @@ fn read_pitch(node: Node<'_, '_>, transpose: i16) -> Result<Pitch, String> {
         _ => return Err("MusicXML pitch step must be C–B.".into()),
     };
     let octave = number::<i8>(node, "octave")?.ok_or("MusicXML pitch is missing an octave.")?;
-    let alter = number::<f32>(node, "alter")?.unwrap_or(0.0);
-    if !alter.is_finite() || alter.fract() != 0.0 || !(-2.0..=2.0).contains(&alter) {
-        return Err(
-            "Microtonal pitches and accidentals beyond double sharps/flats are not supported yet."
-                .into(),
-        );
-    }
-    let midi = (i16::from(octave) + 1) * 12 + step.semitone() as i16 + alter as i16 + transpose;
+    let alter = super::pitch_alter(node)?;
+    let midi = (i16::from(octave) + 1) * 12 + step.semitone() as i16 + i16::from(alter) + transpose;
     if !(0..=127).contains(&midi) {
         return Err("Imported pitch lies outside MIDI range 0–127.".into());
     }
@@ -1021,7 +1031,7 @@ fn read_pitch(node: Node<'_, '_>, transpose: i16) -> Result<Pitch, String> {
         Ok(Pitch {
             step,
             octave,
-            alter: alter as i8,
+            alter,
         })
     } else {
         Ok(Pitch::from_midi(midi as u8))

@@ -33,6 +33,15 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
             "MuseScore format version {major} is not supported yet. Export partwise MusicXML from MuseScore and open that file in Encore."
         ));
     }
+    let legacy_ornaments = value(root, "programVersion")
+        .and_then(|v| {
+            v.split('.')
+                .take(2)
+                .map(str::parse::<u16>)
+                .collect::<Result<Vec<_>, _>>()
+                .ok()
+        })
+        .map_or(major < 3, |v| v.as_slice() < [3, 6].as_slice());
     let source = child(root, "Score").ok_or("MuseScore file has no master Score.")?;
     let metadata = |key| {
         source
@@ -216,6 +225,7 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
     let mut chord_sets = Vec::new();
     let mut grace_sets = Vec::new();
     let mut line_sets = Vec::new();
+    let mut ornament_sets = Vec::new();
     let mut staff_ids = Vec::new();
     for staff in source.children().filter(|n| n.has_tag_name("Staff")) {
         if parts.len() >= MAX_PARTS {
@@ -254,6 +264,7 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
         let mut chords = super::chords::Chords::default();
         let mut grace = super::grace::GraceCollector::default();
         let mut lines = super::lines::Lines::default();
+        let mut ornaments = super::ornaments::Ornaments::default();
         let source_staff = id
             .parse::<u32>()
             .map_err(|_| "MuseScore staff id must be numeric.")?;
@@ -471,6 +482,7 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
                             }
                             let at=SourceAnchor{staff:source_staff,voice:voice_index.to_string(),measure:measure_index,tick:cursor as u32};
                             if !pitches.is_empty(){grace.main(item,at.clone(),&mut warnings)?;}
+                            ornaments.muse(item, at.clone(), legacy_ornaments, &mut warnings)?;
                             for line in item.descendants().filter(|n|n.has_tag_name("Spanner")&&matches!(n.attribute("type"),Some("Trill"|"Glissando"|"Ottava"|"Pedal"))){lines.muse(line,at.clone(),division,&mut warnings)?;}
                             annotations.muse(item,SourceAnchor{staff:source_staff,voice:voice_index.to_string(),measure:measure_index,tick:cursor as u32},division,&mut warnings)?;
                             let (staccato, articulations) = read_articulations(item, &mut warnings);
@@ -483,7 +495,7 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
                                     .map(|()| super::musicxml::decorate_split_event(&mut notes[first_piece..], articulations, &mut warnings))
                             }.map_err(|e| format!("{context}: {e}"))?;
                             cursor += i64::from(ticks);
-                            if item.descendants().any(|n| n.has_tag_name("Ornament") || n.has_tag_name("Tremolo")) { warnings.add("Ornaments and tremolo notation are not retained in the editable score."); }
+                            if item.descendants().any(|n| n.has_tag_name("Tremolo")) { warnings.add("Tremolo notation is not retained in the editable score."); }
                             if number::<i16>(item, "staffMove")?.unwrap_or(0) != 0 { warnings.add("Cross-staff notes remain on their source staff; sounding pitches are preserved."); }
                         }
                         "Slur" | "endSpanner" => annotations.muse_spanner(item,SourceAnchor{staff:source_staff,voice:voice_index.to_string(),measure:measure_index,tick:cursor.try_into().map_err(|_|"Invalid MuseScore slur location.")?},&mut warnings)?,
@@ -521,6 +533,7 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
                 chords.shift(measure_index, pickup_shift);
                 grace.shift(measure_index, pickup_shift);
                 lines.shift(measure_index, pickup_shift);
+                ornaments.shift(measure_index, pickup_shift);
             }
             source_start = source_start
                 .checked_add(actual_ticks)
@@ -596,6 +609,7 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
         chord_sets.push((chords, annotation_mapping.clone()));
         grace_sets.push((grace, annotation_mapping.clone()));
         line_sets.push((lines, annotation_mapping.clone()));
+        ornament_sets.push((ornaments, annotation_mapping.clone()));
         annotation_sets.push((annotations, annotation_mapping));
     }
     if initial_tempo.is_none() {
@@ -618,6 +632,9 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
     }
     for (lines, mapping) in line_sets {
         lines.resolve(&mut score, &mapping, &mut warnings)?;
+    }
+    for (ornaments, mapping) in ornament_sets {
+        ornaments.finish(&mut score, &mapping, &mut warnings)?;
     }
     let parts = std::mem::take(&mut score.parts);
     finish_parts(score, parts, warnings)
@@ -649,6 +666,9 @@ fn read_articulations(chord: Node<'_, '_>, warnings: &mut Warnings) -> (bool, Ve
         .filter(|node| node.has_tag_name("Articulation"))
     {
         let subtype = value(marking, "subtype").unwrap_or("unknown");
+        if super::ornaments::muse_kind(subtype, false).is_some() {
+            continue;
+        }
         let articulation = match subtype {
             "articStaccatoAbove" | "articStaccatoBelow" | "staccato" => {
                 staccato = true;

@@ -303,6 +303,7 @@ pub fn musicxml(score: &Score) -> String {
     let style_index = crate::entry_style::Index::new(score);
     let grace = crate::grace::MusicXmlIndex::new(score);
     let lines = crate::lines::MusicXmlIndex::new(score);
+    let ornaments = crate::ornaments::MusicXmlIndex::new(score);
     let notation = xml_annotations(score, &grace, &lines);
     let measure_ticks = score.measure_ticks();
     for (pi, part) in score.parts.iter().enumerate() {
@@ -416,6 +417,16 @@ pub fn musicxml(score: &Score) -> String {
                             previous_dynamic[usize::from(layer % 4)] = Some(dynamic);
                         }
                         for (chord_index, pitch) in note.pitches.iter().enumerate() {
+                            let ornament = ornaments.notations_for_pitch(
+                                &anchor,
+                                Some(pitch.midi()),
+                                chord_index > 0,
+                            );
+                            let notation_marks = if chord_index == 0 {
+                                marks.0.to_owned() + &ornament
+                            } else {
+                                ornament
+                            };
                             write_xml_note(
                                 &mut out,
                                 note,
@@ -442,7 +453,7 @@ pub fn musicxml(score: &Score) -> String {
                                 } else {
                                     (false, false)
                                 },
-                                if chord_index == 0 { marks } else { ("", "") },
+                                (&notation_marks, if chord_index == 0 { marks.1 } else { "" }),
                                 style_index.get(&anchor),
                             );
                         }
@@ -477,44 +488,21 @@ fn xml_annotations(
     grace: &crate::grace::MusicXmlIndex,
     lines: &crate::lines::MusicXmlIndex,
 ) -> std::collections::BTreeMap<crate::document::Anchor, (String, String)> {
-    use crate::lyrics::position;
-    use crate::slurs::SlurDirection;
     let mut result: std::collections::BTreeMap<crate::document::Anchor, (String, String)> =
         Default::default();
-    for part in 0..score.parts.len() {
-        let mut slurs = score
-            .notation
-            .slurs
-            .iter()
-            .filter(|s| s.start.part == part)
-            .collect::<Vec<_>>();
-        slurs.sort_by_key(|s| (position(&s.start), position(&s.end)));
-        let mut active: Vec<((usize, u32), usize)> = Vec::new();
-        for slur in slurs {
-            active.retain(|(end, _)| *end > position(&slur.start));
-            let number = (1..=16)
-                .find(|n| !active.iter().any(|(_, used)| used == n))
-                .unwrap_or(1);
-            active.push((position(&slur.end), number));
-            let placement = match slur.direction {
-                SlurDirection::Auto => "",
-                SlurDirection::Above => " placement=\"above\"",
-                SlurDirection::Below => " placement=\"below\"",
-            };
-            let _ = write!(
-                result.entry(slur.start).or_default().0,
-                "<slur type=\"start\" number=\"{number}\"{placement} relative-x=\"{}\" relative-y=\"{}\" bezier-y=\"{}\"/>",
-                slur.start_offset[0],
-                -slur.start_offset[1],
-                slur.height
-            );
-            // Stop first when one phrase ends where another starts.
-            let end = &mut result.entry(slur.end).or_default().0;
-            let stop = format!(
-                "<slur type=\"stop\" number=\"{number}\" relative-x=\"{}\" relative-y=\"{}\"/>",
-                slur.end_offset[0], -slur.end_offset[1]
-            );
-            end.insert_str(0, &stop);
+    if let Ok(numbering) = crate::slurs::MusicXmlNumbering::new(score) {
+        for (index, slur) in score.notation.slurs.iter().enumerate() {
+            let number = numbering.number(index);
+            result
+                .entry(slur.start)
+                .or_default()
+                .0
+                .push_str(&crate::slurs::musicxml_start(slur, number));
+            result
+                .entry(slur.end)
+                .or_default()
+                .0
+                .insert_str(0, &crate::slurs::musicxml_stop(slur, number));
         }
     }
     for lyric in &score.notation.lyrics {

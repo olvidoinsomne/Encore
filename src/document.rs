@@ -60,6 +60,8 @@ impl Anchor {
 #[serde(default)]
 pub struct Notation {
     #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub ornaments: Vec<crate::ornaments::Ornament>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub grace: Vec<crate::grace::GraceGroup>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub chords: Vec<crate::chords::ChordSymbol>,
@@ -90,6 +92,7 @@ pub struct Notation {
 impl Notation {
     pub fn is_empty(&self) -> bool {
         self.grace.is_empty()
+            && self.ornaments.is_empty()
             && self.chords.is_empty()
             && self.lines.is_empty()
             && self.entries.is_empty()
@@ -121,9 +124,10 @@ pub fn note_at<'a>(score: &'a Score, anchor: &Anchor) -> Option<&'a Note> {
 pub fn validate(score: &Score) -> Result<(), String> {
     let n = &score.notation;
     let anchors = n
-        .grace
+        .ornaments
         .iter()
-        .map(|g| &g.anchor)
+        .map(|o| &o.anchor)
+        .chain(n.grace.iter().map(|g| &g.anchor))
         .chain(n.chords.iter().map(|c| &c.anchor))
         .chain(n.lines.iter().flat_map(|s| [&s.start, &s.end]))
         .chain(n.entries.iter().map(|e| &e.anchor))
@@ -139,6 +143,7 @@ pub fn validate(score: &Score) -> Result<(), String> {
         return Err("Notation must refer to one of four layers and two voices per layer.".into());
     }
     crate::grace::validate(score)?;
+    crate::ornaments::validate(score)?;
     crate::chords::validate(score)?;
     crate::lines::validate(score)?;
     crate::entry_style::validate(score)?;
@@ -158,6 +163,7 @@ pub fn validate(score: &Score) -> Result<(), String> {
 }
 
 pub fn remove_anchor(score: &mut Score, anchor: &Anchor) {
+    crate::ornaments::remove_anchor(score, anchor);
     crate::grace::remove_anchor(score, anchor);
     crate::lines::remove_anchor(score, anchor);
     crate::entry_style::remove_anchor(score, anchor);
@@ -172,6 +178,11 @@ pub fn move_anchor(score: &mut Score, from: Anchor, to: Anchor) -> Result<(), St
         return Ok(());
     }
     let old = score.notation.clone();
+    for ornament in &mut score.notation.ornaments {
+        if ornament.anchor == from {
+            ornament.anchor = to;
+        }
+    }
     for group in &mut score.notation.grace {
         if group.anchor == from {
             group.anchor = to;
@@ -230,6 +241,8 @@ pub fn move_anchor(score: &mut Score, from: Anchor, to: Anchor) -> Result<(), St
 
 /// Call before removing the source staff, so every remaining anchor stays valid.
 pub fn remove_staff(score: &mut Score, staff: usize) {
+    crate::ornaments::remove_part(score, staff);
+    crate::ornaments::reindex_parts(score, staff);
     crate::grace::remove_part(score, staff);
     crate::grace::reindex_parts(score, staff);
     crate::chords::remove_part(score, staff);
@@ -263,6 +276,12 @@ pub fn remove_staff(score: &mut Score, staff: usize) {
     crate::lyrics::reindex_parts(score, staff);
     crate::slurs::reindex_parts(score, staff);
     for part in &mut score.notation.parts {
+        part.voicing.retain(|rule| rule.staff != staff);
+        for rule in &mut part.voicing {
+            if rule.staff > staff {
+                rule.staff -= 1;
+            }
+        }
         part.staves.retain(|index| *index != staff);
         for index in &mut part.staves {
             if *index > staff {
@@ -275,6 +294,7 @@ pub fn remove_staff(score: &mut Score, staff: usize) {
 
 /// Discard annotations whose source measures have been explicitly removed.
 pub fn truncate_measures(score: &mut Score) -> Result<(), String> {
+    crate::ornaments::prune(score);
     crate::grace::prune(score);
     crate::chords::prune(score);
     crate::lines::prune(score);
@@ -484,7 +504,11 @@ mod voice_tests {
         );
         assert!(score.notation.entries.is_empty());
         let mut mixed = crate::slurs::Slur::new(anchor(0, 0), anchor(1, 480));
-        assert!(crate::slurs::add(&mut score, mixed.clone()).is_err());
+        crate::slurs::add(&mut score, mixed.clone()).unwrap();
+        assert!(!crate::slurs::continues(&score, &anchor(0, 0)));
+        let mut cross_staff = mixed.clone();
+        cross_staff.end.part = 1;
+        assert!(crate::slurs::add(&mut score, cross_staff).is_err());
         mixed.start.voice = 1;
         crate::slurs::add(&mut score, mixed).unwrap();
         score.validate().unwrap();

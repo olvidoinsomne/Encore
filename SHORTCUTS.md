@@ -250,3 +250,12 @@ navigation and zoom do not change the score or create undo entries.
 bounds are numbered performed bars, including repeat/navigation visits; the
 selected-region shortcut includes its first through last visit. These session
 options affect listening, while exports retain the complete performed score.
+
+
+The Slurs tool supports same-staff cross-voice/layer phrases, solid/dashed/dotted
+strokes and numeric asymmetric control points. Select a visible slur handle to
+open its controls. Reset curve retains style; direct drag editing of per-system
+controls remains pending. Voiced linked parts use source-score editing for
+music changes; their view/navigation, formatting and extraction controls remain
+available. Ornament assignment uses Notation → Ornaments and arpeggios; Finale
+articulation trigger keys and programmable metatools remain pending.

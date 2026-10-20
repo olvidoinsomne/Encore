@@ -20,6 +20,7 @@ mod lines;
 mod midi;
 mod musescore;
 mod musicxml;
+mod ornaments;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct VoiceTarget {
@@ -295,6 +296,18 @@ pub(super) fn number<T: std::str::FromStr>(
                 .map_err(|_| format!("Invalid <{tag}> value: {s}"))
         })
         .transpose()
+}
+/// MusicXML alter is a decimal number of semitones; this model supports
+/// integral values through double sharps/flats, including decimal spellings.
+pub(super) fn pitch_alter(node: Node<'_, '_>) -> Result<i8, String> {
+    let alter = number::<f64>(node, "alter")?.unwrap_or(0.);
+    if !alter.is_finite() || alter.fract() != 0. || !(-2.0..=2.0).contains(&alter) {
+        return Err(
+            "Microtonal pitches and accidentals beyond double sharps/flats are not supported yet."
+                .into(),
+        );
+    }
+    Ok(alter as i8)
 }
 pub(super) fn text(node: Node<'_, '_>) -> String {
     node.descendants()

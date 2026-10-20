@@ -19,10 +19,12 @@ mod layout;
 mod lines;
 mod navigation;
 mod notation;
+mod ornaments;
 mod parts;
 mod playback;
 mod regions;
 mod style;
+mod voicing;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum Theme {
@@ -163,6 +165,7 @@ pub struct EncoreApp {
     chord_editor: chords::Editor,
     grace_editor: grace::Editor,
     lines_editor: lines::Editor,
+    ornaments_editor: ornaments::Editor,
     master: f32,
     theme: Theme,
     needs_native_save: bool,
@@ -274,6 +277,7 @@ impl EncoreApp {
             chord_editor: Default::default(),
             grace_editor: Default::default(),
             lines_editor: Default::default(),
+            ornaments_editor: Default::default(),
             master: 0.8,
             theme: Theme::Dark,
             needs_native_save: false,
@@ -415,6 +419,7 @@ impl EncoreApp {
         self.chord_editor = Default::default();
         self.grace_editor = Default::default();
         self.lines_editor = Default::default();
+        self.ornaments_editor = Default::default();
         self.cursor_measure = 0;
         self.cursor_tick = 0;
         self.undo.clear();
@@ -807,6 +812,9 @@ impl EncoreApp {
     }
 
     fn delete_selected(&mut self) {
+        if !self.allow_source_edit() {
+            return;
+        }
         let Some(sel) = self.selected else {
             return;
         };
@@ -878,6 +886,9 @@ impl EncoreApp {
     }
 
     fn enter_note(&mut self, part: usize, measure: usize, start: u32, pitch: Pitch, chord: bool) {
+        if !self.allow_source_edit() {
+            return;
+        }
         let original = self.score.clone();
         let location = (
             self.selected,
@@ -1111,6 +1122,7 @@ impl EncoreApp {
             self.chord_editor.open = false;
             self.grace_editor.open = false;
             self.lines_editor.open = false;
+            self.ornaments_editor.open = false;
             self.region_selection = None;
             self.notation_editor = Default::default();
             if self.midi_import.take().is_some() {
@@ -1145,6 +1157,7 @@ impl EncoreApp {
             || self.chord_editor.open
             || self.grace_editor.open
             || self.lines_editor.open
+            || self.ornaments_editor.open
         {
             return;
         }
@@ -1200,6 +1213,7 @@ impl EncoreApp {
                 || self.chord_editor.open
                 || self.grace_editor.open
                 || self.lines_editor.open
+                || self.ornaments_editor.open
             {
                 break;
             }
@@ -1649,6 +1663,10 @@ impl EncoreApp {
                                 self.open_lines();
                                 ui.close();
                             }
+                            if ui.button("Ornaments and arpeggios…").clicked() {
+                                self.open_ornaments();
+                                ui.close();
+                            }
                             if ui.button("Grace notes…").clicked() {
                                 self.open_grace();
                                 ui.close();
@@ -1870,11 +1888,12 @@ impl EncoreApp {
                         self.notation_editor.tool = notation::Tool::Select;
                     }
                     let write = ui
-                        .selectable_value(&mut self.write_mode, true, "Write")
+                        .add_enabled(!self.view_is_voiced(),egui::Button::new("Write").selected(self.write_mode))
                         .on_hover_text(
                             "Click a staff to insert; Shift-click an event to add a chord tone",
                         );
                     if write.clicked() {
+                        self.write_mode=true;
                         self.exit_chord_entry();
                         self.notation_editor.tool = notation::Tool::Select;
                         write.surrender_focus();
@@ -2123,6 +2142,10 @@ impl EncoreApp {
     }
 
     fn inspector(&mut self, ctx: &egui::Context) {
+        if self.view_is_voiced() {
+            self.voiced_inspector(ctx);
+            return;
+        }
         let colors = Palette::for_context(ctx);
         let written_interval = self.entry_transposition();
         let previous_anchor = self
@@ -2511,6 +2534,10 @@ impl EncoreApp {
                     for hit in &mut page.chord_hits {
                         hit.anchor.part = projection.source_staves[hit.anchor.part];
                     }
+                    for hit in &mut page.slur_hits {
+                        hit.start.part = projection.source_staves[hit.start.part];
+                        hit.end.part = projection.source_staves[hit.end.part];
+                    }
                 }
             }
             self.cached_score = Some(self.score.clone());
@@ -2528,6 +2555,7 @@ impl EncoreApp {
         let slur_tool = self.notation_editor.tool == notation::Tool::Slurs;
         let mut page_rects = Vec::new();
         let mut reveal = self.navigation.reveal.take();
+        let active_slur = self.active_slur_endpoints();
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(colors.workspace))
             .show(ctx, |ui| {
@@ -2607,6 +2635,26 @@ impl EncoreApp {
                                     }
                                 }
                                 paint_page(ui.painter(), page, rect.min, self.zoom);
+                                if slur_tool {
+                                    for hit in page
+                                        .slur_hits
+                                        .iter()
+                                        .filter(|h| Some((h.start, h.end)) == active_slur)
+                                    {
+                                        let center = rect.min + Vec2::new(hit.x, hit.y) * self.zoom;
+                                        ui.painter().rect_filled(
+                                            Rect::from_center_size(center, Vec2::splat(6.0)),
+                                            1.0,
+                                            colors.surface,
+                                        );
+                                        ui.painter().rect_stroke(
+                                            Rect::from_center_size(center, Vec2::splat(6.0)),
+                                            1.0,
+                                            Stroke::new(1.0_f32, colors.text),
+                                            egui::StrokeKind::Inside,
+                                        );
+                                    }
+                                }
                             }
                             if let Some(p) = self
                                 .playback
@@ -2716,6 +2764,22 @@ impl EncoreApp {
         }
         if let Some((page_index, pos, chord)) = click {
             let page = &self.cached_pages[page_index];
+            if slur_tool
+                && let Some(hit) = page
+                    .slur_hits
+                    .iter()
+                    .filter(|h| Some((h.start, h.end)) == active_slur)
+                    .min_by(|a, b| {
+                        Vec2::new(a.x - pos.x, a.y - pos.y)
+                            .length_sq()
+                            .total_cmp(&Vec2::new(b.x - pos.x, b.y - pos.y).length_sq())
+                    })
+                    .filter(|h| Vec2::new(h.x - pos.x, h.y - pos.y).length_sq() < 81.0)
+                    .cloned()
+            {
+                self.select_slur_handle(&hit);
+                return;
+            }
             if !self.write_mode
                 && let Some(hit) = page.chord_hits.iter().rev().find(|hit| {
                     pos.x >= hit.x
@@ -2725,6 +2789,14 @@ impl EncoreApp {
                 })
             {
                 let anchor = hit.anchor;
+                if self.view_is_voiced() {
+                    self.active_part = anchor.part;
+                    self.cursor_measure = anchor.measure;
+                    self.cursor_tick = anchor.tick;
+                    self.status =
+                        "Edit the source score to change this voiced part's chord symbols.".into();
+                    return;
+                }
                 let slot = hit.slot;
                 self.chord_editor.active = true;
                 self.chord_editor.slot = slot;
@@ -2792,10 +2864,17 @@ impl EncoreApp {
                         self.score.parts[sel.part].measures[sel.measure].notes[sel.note].layer;
                     self.active_voice =
                         self.score.parts[sel.part].measures[sel.measure].notes[sel.note].voice;
+                    let pitch_index = projection
+                        .as_ref()
+                        .and_then(|p| {
+                            p.project_selection(sel)
+                                .and_then(|display| p.source_pitch(display, 0))
+                        })
+                        .map_or(0, |(_, index)| index);
                     if let Some(pitch) = self.score.parts[sel.part].measures[sel.measure].notes
                         [sel.note]
                         .pitches
-                        .first()
+                        .get(pitch_index)
                         .copied()
                     {
                         self.entry_pitch = pitch;
@@ -3311,11 +3390,13 @@ impl EncoreApp {
             });
         }
         self.reconcile_part_staff();
+        self.close_voiced_editors();
         self.keyboard(ctx);
         self.top(ctx);
         self.transport(ctx);
         self.instruments(ctx);
         self.reconcile_part_staff();
+        self.close_voiced_editors();
         self.inspector(ctx);
         self.score_canvas(ctx);
         self.dialogs(ctx);
@@ -3329,8 +3410,10 @@ impl EncoreApp {
         self.entry_style_window(ctx);
         self.grace_dialog(ctx);
         self.lines_window(ctx);
+        self.ornaments_window(ctx);
         self.chord_dialog(ctx);
         self.instrument_lab(ctx);
+        self.protect_voiced_music(&before);
         if self.score != before && !self.skip_history {
             if self.rendering_audio
                 || self

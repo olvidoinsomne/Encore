@@ -12,6 +12,7 @@ mod expressions;
 mod grace;
 mod lines;
 mod lyrics;
+mod ornaments;
 mod repeats;
 mod slurs;
 #[cfg(test)]
@@ -148,6 +149,7 @@ fn temporal_spacing(
     parts: &[usize],
     measure: usize,
     offsets: &VoiceOffsets,
+    ornaments: &ornaments::Index<'_>,
 ) -> Arc<[(f32, f32)]> {
     let ticks = score.measure_ticks().max(1);
     let mut times = BTreeSet::from([0, ticks]);
@@ -165,6 +167,7 @@ fn temporal_spacing(
     }
     let mut lyric_widths = BTreeMap::<u32, f32>::new();
     let grace_widths = grace::widths(score, parts, measure);
+    let ornament_widths = ornaments.widths(parts, measure);
     let chord_widths = chords::widths(score, parts, measure);
     let mut collision_widths = BTreeMap::<u32, f32>::new();
     for &part in parts {
@@ -178,6 +181,7 @@ fn temporal_spacing(
         }
     }
     times.extend(chord_widths.keys().copied());
+    times.extend(ornament_widths.keys().copied());
     for lyric in score
         .notation
         .lyrics
@@ -211,9 +215,12 @@ fn temporal_spacing(
             cumulative += collision_widths.get(&previous).copied().unwrap_or(0.0);
             let grace_space = grace_widths.get(&previous).map_or(0.0, |w| w.1)
                 + grace_widths.get(&time).map_or(0.0, |w| w.0);
+            let ornament_space = ornament_widths.get(&previous).map_or(0.0, |w| w.1)
+                + ornament_widths.get(&time).map_or(0.0, |w| w.0);
             if grace_space > 0.0 {
                 cumulative += grace_space;
             }
+            cumulative += ornament_space;
         }
         anchors.push((time as f32, cumulative));
         previous = time;
@@ -247,6 +254,22 @@ pub struct ChordHit {
     pub height: f32,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SlurHandle {
+    Start,
+    End,
+    Control1,
+    Control2,
+}
+#[derive(Clone, Debug)]
+pub struct SlurHit {
+    pub start: crate::document::Anchor,
+    pub end: crate::document::Anchor,
+    pub handle: SlurHandle,
+    pub x: f32,
+    pub y: f32,
+}
+
 #[derive(Clone, Debug)]
 pub struct Page {
     pub width: f32,
@@ -256,6 +279,7 @@ pub struct Page {
     pub hits: Vec<NoteHit>,
     pub grace_hits: Vec<GraceHit>,
     pub chord_hits: Vec<ChordHit>,
+    pub slur_hits: Vec<SlurHit>,
 }
 
 impl Page {
@@ -268,6 +292,7 @@ impl Page {
             hits: vec![],
             grace_hits: vec![],
             chord_hits: vec![],
+            slur_hits: vec![],
         }
     }
     fn line(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, width: f32, color: [u8; 3]) {
@@ -395,6 +420,7 @@ struct RenderContext<'a> {
     styles: EntryStyles<'a>,
     pitches: crate::lines::PitchIndex,
     offsets: VoiceOffsets,
+    ornaments: ornaments::Index<'a>,
 }
 fn paired_layers(notes: &[Note]) -> u8 {
     let mut layers = [0u8; 4];
@@ -441,8 +467,10 @@ fn collision_offsets(
     parts: &[usize],
     pitches: &crate::lines::PitchIndex,
     styles: &EntryStyles<'_>,
+    marks: &ornaments::Index<'_>,
 ) -> VoiceOffsets {
     let mut result = BTreeMap::new();
+    let mark_widths = marks.anchor_widths();
     let mut ornaments = BTreeMap::<crate::document::Anchor, (f32, f32)>::new();
     for group in &score.notation.grace {
         let span = ornaments.entry(group.anchor).or_default();
@@ -498,13 +526,22 @@ fn collision_offsets(
                         0.0
                     };
                     let ornament = ornaments.get(&a).copied().unwrap_or_default();
-                    let has_ornament = ornament.0 > 0.0 || ornament.1 > 0.0;
-                    let left = 6.0 * scale
+                    let mark = mark_widths.get(&a).copied().unwrap_or_default();
+                    let has_ornament =
+                        ornament.0 > 0.0 || ornament.1 > 0.0 || mark.0 > 0.0 || mark.1 > 0.0;
+                    let left = (6.0 * scale
                         + if chord_seconds { 10.0 * scale } else { 0.0 }
                         + accidental
-                        + ornament.0;
+                        + ornament.0
+                        + if ornament.0 > 0.0 {
+                            marks.roll_prefix(&a)
+                        } else {
+                            0.0
+                        })
+                    .max(mark.0);
                     let right =
-                        7.0 * scale + if chord_seconds { 10.0 * scale } else { 0.0 } + ornament.1;
+                        (7.0 * scale + if chord_seconds { 10.0 * scale } else { 0.0 } + ornament.1)
+                            .max(mark.1);
                     let mut offset = 0.0f32;
                     for (other, x, prior_right, prior_ornament) in &prior {
                         if has_ornament
@@ -579,15 +616,17 @@ pub fn engrave(score: &Score, options: &EngravingOptions) -> Vec<Page> {
         .iter()
         .map(|style| (style.anchor, style))
         .collect();
-    let offsets = collision_offsets(score, &parts, &pitches, &styles);
+    let ornaments = ornaments::Index::new(score);
+    let offsets = collision_offsets(score, &parts, &pitches, &styles, &ornaments);
     let measure_spacing = (0..count)
-        .map(|measure| temporal_spacing(score, &parts, measure, &offsets))
+        .map(|measure| temporal_spacing(score, &parts, measure, &offsets, &ornaments))
         .collect::<Vec<_>>();
     let context = RenderContext {
         pitches,
         offsets,
         spacing: measure_spacing,
         styles,
+        ornaments,
     };
     let key = score.key_fifths.clamp(-7, 7);
     let label_x = layout.margins.left / scale;
@@ -619,7 +658,13 @@ pub fn engrave(score: &Score, options: &EngravingOptions) -> Vec<Page> {
                 let need = (dense as f32 * 15.0)
                     .max(lyrics::horizontal_requirement(score, &parts, m))
                     .max(chords::widths(score, &parts, m).values().sum())
-                    + grace::horizontal_requirement(score, &parts, m);
+                    + grace::horizontal_requirement(score, &parts, m)
+                    + context
+                        .ornaments
+                        .widths(&parts, m)
+                        .values()
+                        .map(|w| w.0 + w.1)
+                        .sum::<f32>();
                 let mut collisions = BTreeMap::<u32, f32>::new();
                 for &part in &parts {
                     if let Some(map) = context.offsets.get(&(part, m)) {
@@ -790,7 +835,12 @@ pub fn engrave(score: &Score, options: &EngravingOptions) -> Vec<Page> {
                     let m = measure + offset;
                     let content_x = x
                         + if offset == 0 { header } else { 13.0 }
-                        + grace::prefix(score, &parts, m);
+                        + grace::prefix(score, &parts, m)
+                        + context
+                            .ornaments
+                            .widths(&parts, m)
+                            .get(&0)
+                            .map_or(0.0, |w| w.0);
                     let content_width = (width - (content_x - x) - 12.0).max(20.0);
                     let region = StaffRegion {
                         part: part_index,
@@ -852,9 +902,10 @@ pub fn engrave(score: &Score, options: &EngravingOptions) -> Vec<Page> {
         measure += bars;
     }
     for page in &mut pages {
-        grace::draw(page, score);
+        grace::draw(page, score, &context.ornaments);
         chords::draw(page, score);
         lines::draw(page, score);
+        context.ornaments.draw(page, score);
         slurs::draw(page, score);
         lyrics::draw(page, score);
         repeats::draw(page, score);
@@ -958,6 +1009,10 @@ fn scale_page(page: &mut Page, scale: f32) {
         hit.y *= scale;
         hit.width *= scale;
         hit.height *= scale;
+    }
+    for hit in &mut page.slur_hits {
+        hit.x *= scale;
+        hit.y *= scale;
     }
     page.width *= scale;
     page.height *= scale;
@@ -1183,9 +1238,12 @@ fn system_layout(
         }
         let slur_space = slurs::clearance(score, p, measure, bars);
         let grace_space = grace::clearance(score, p, measure, bars);
+        let ornament_space = context.ornaments.clearance(score, p, measure, bars);
         above = above.max(chords::clearance(score, p, measure, bars));
         above = above.max(grace_space.0);
         below = below.max(grace_space.1);
+        above = above.max(ornament_space.0);
+        below = below.max(ornament_space.1);
         above += slur_space.0;
         below += slur_space.1 + lyrics::extra_below(score, p, measure, bars);
         if score.notation.slurs.iter().any(|s| {
@@ -1201,7 +1259,12 @@ fn system_layout(
                     let width = widths[offset];
                     let content_x = x
                         + if offset == 0 { header } else { 13.0 }
-                        + grace::prefix(score, parts, m);
+                        + grace::prefix(score, parts, m)
+                        + context
+                            .ornaments
+                            .widths(parts, m)
+                            .get(&0)
+                            .map_or(0.0, |w| w.0);
                     let region = StaffRegion {
                         part: p,
                         measure: m,

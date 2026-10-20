@@ -1238,6 +1238,34 @@ fn headless_full_editor_renders_notation_and_font_textures() {
     if std::env::var_os("ENCORE_HEADLESS_LINES").is_some() {
         app.open_lines();
     }
+    if std::env::var_os("ENCORE_HEADLESS_ORNAMENTS").is_some() {
+        app.selected = app
+            .score
+            .parts
+            .iter()
+            .enumerate()
+            .find_map(|(part, staff)| {
+                staff
+                    .measures
+                    .iter()
+                    .enumerate()
+                    .find_map(|(measure, bar)| {
+                        bar.notes
+                            .iter()
+                            .position(|n| !n.pitches.is_empty())
+                            .map(|note| Selection {
+                                part,
+                                measure,
+                                note,
+                            })
+                    })
+            });
+        app.open_ornaments();
+    }
+    if std::env::var_os("ENCORE_HEADLESS_SLURS").is_some() {
+        app.open_slurs();
+    }
+    app.show_parts = std::env::var_os("ENCORE_HEADLESS_PARTS").is_some();
     app.playback_editor.open = std::env::var_os("ENCORE_HEADLESS_PLAYBACK").is_some();
     let (width, height) = std::env::var("ENCORE_HEADLESS_SIZE")
         .ok()
@@ -1296,6 +1324,9 @@ fn headless_full_editor_renders_notation_and_font_textures() {
             || app.grace_editor.open
             || app.chord_editor.open
             || app.lines_editor.open
+            || app.ornaments_editor.open
+            || app.notation_editor.open
+            || app.show_parts
             || app.playback_editor.open
             || paper_pixels > width * height / 25,
         "Expected a visible white score page or an open editing dialog"
@@ -2384,5 +2415,229 @@ fn speedy_voice_shortcut_enters_secondary_with_real_undo_redo_frames() {
     assert_eq!(
         app.score.notation.entries[0].stem,
         encore::entry_style::StemDirection::Up
+    );
+}
+
+fn voiced_controller_fixture() -> Score {
+    use encore::parts::{ChordFilter, StaffVoicing};
+    let mut score = Score::blank();
+    let mut excluded = event(0, Duration::Quarter, &[60]);
+    excluded.layer = 0;
+    let mut first = event(0, Duration::Quarter, &[60, 76, 67]);
+    first.layer = 1;
+    let mut second = event(480, Duration::Quarter, &[62, 77, 69]);
+    second.layer = 1;
+    score.parts[1].measures[0].notes = vec![excluded, first, second];
+    score.parts[1].instrument = Instrument::Clarinet;
+    let mut definition = encore::parts::default_definitions(&score)
+        .last()
+        .unwrap()
+        .clone();
+    definition.staves = vec![1];
+    definition.voicing = vec![StaffVoicing {
+        lanes: 1 << 1,
+        chord: ChordFilter::Highest,
+        ..StaffVoicing::new(1)
+    }];
+    score.notation.parts = vec![definition];
+    score.validate().unwrap();
+    score
+}
+#[test]
+fn voiced_parts_block_hidden_source_mutations_and_preserve_allowed_controls() {
+    let score = voiced_controller_fixture();
+    let mut app = controller(score.clone());
+    app.activate_linked_part(0);
+    assert!(app.view_is_voiced());
+    app.selected_linked_part = 99;
+    assert!(app.selected_part_projection().unwrap().unwrap().is_voiced());
+    assert!(app.view_is_voiced());
+    assert!(!app.allow_source_edit());
+    app.selected_linked_part = 0;
+    app.selected = Some(Selection {
+        part: 1,
+        measure: 0,
+        note: 1,
+    });
+    app.delete_selected();
+    assert_eq!(app.score, score);
+    assert!(!app.edit_entry(|n| n.pitches.clear()));
+    assert_eq!(app.score, score);
+    app.enter_note(1, 0, 960, Pitch::from_midi(70), false);
+    assert_eq!(app.score, score);
+    let ctx = egui::Context::default();
+    app.copy_selection(&ctx, true);
+    assert_eq!(app.score, score);
+    app.score.parts[1].measures[0].notes[0].pitches.clear();
+    app.score.parts[1].volume = 0.42;
+    app.score.notation.parts[0].layout.staff_gap = 12.0;
+    app.protect_voiced_music(&score);
+    assert_eq!(
+        app.score.parts[1].measures[0].notes,
+        score.parts[1].measures[0].notes
+    );
+    assert_eq!(app.score.parts[1].volume, 0.42);
+    assert_eq!(app.score.notation.parts[0].layout.staff_gap, 12.0);
+    app.selected = Some(Selection {
+        part: 1,
+        measure: 0,
+        note: 1,
+    });
+    app.edit_voicing_source();
+    assert!(!app.part_view);
+    assert!(app.edit_entry(|n| n.velocity = 91));
+    assert_eq!(app.score.parts[1].measures[0].notes[1].velocity, 91);
+}
+#[test]
+fn voiced_part_clicks_select_retained_source_pitch_without_dirtying_music() {
+    let ctx = egui::Context::default();
+    configure_context(&ctx);
+    let score = voiced_controller_fixture();
+    let before = score.clone();
+    let mut app = controller(score);
+    app.activate_linked_part(0);
+    let plain = egui::Modifiers::NONE;
+    let mut paper = None;
+    for frame in 0..3 {
+        let output = ctx.run(raw_input(frame, vec![], plain), |ctx| app.ui(ctx));
+        paper = output.shapes.iter().find_map(|s| match &s.shape {
+            egui::Shape::Rect(r)
+                if r.fill == Color32::WHITE
+                    && r.rect.width() > 700.0
+                    && r.rect.height() > 900.0 =>
+            {
+                Some(r.rect)
+            }
+            _ => None,
+        });
+    }
+    let hit = app.cached_pages[0]
+        .hits
+        .iter()
+        .find(|h| {
+            h.selection
+                == Selection {
+                    part: 1,
+                    measure: 0,
+                    note: 1,
+                }
+        })
+        .unwrap();
+    let point = paper.unwrap().min + Vec2::new(hit.x, hit.y) * app.zoom;
+    for (frame, pressed) in [(3, true), (4, false)] {
+        let _ = ctx.run(
+            raw_input(
+                frame,
+                vec![
+                    egui::Event::PointerMoved(point),
+                    egui::Event::PointerButton {
+                        pos: point,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: plain,
+                    },
+                ],
+                plain,
+            ),
+            |ctx| app.ui(ctx),
+        );
+    }
+    assert_eq!(
+        app.selected,
+        Some(Selection {
+            part: 1,
+            measure: 0,
+            note: 1
+        })
+    );
+    assert_eq!(app.entry_pitch.midi(), 76);
+    assert_eq!(app.score, before);
+    assert!(!app.dirty());
+    assert!(app.undo.is_empty());
+}
+
+#[test]
+fn advanced_slur_controls_scroll_inside_small_windows_and_reset_keeps_style() {
+    let ctx = egui::Context::default();
+    configure_context(&ctx);
+    let mut score = Score::blank();
+    score.parts[0].measures[0].notes = vec![
+        event(0, Duration::Quarter, &[72]),
+        event(480, Duration::Quarter, &[76]),
+    ];
+    let start = encore::document::Anchor {
+        part: 0,
+        measure: 0,
+        tick: 0,
+        layer: 0,
+        voice: 0,
+    };
+    let mut slur = encore::slurs::Slur::new(start, encore::document::Anchor { tick: 480, ..start });
+    slur.style = encore::slurs::SlurStyle::Dotted;
+    slur.shape = Some(slur.shape_or_default());
+    score.notation.slurs.push(slur);
+    let mut app = controller(score.clone());
+    app.open_slurs();
+    let plain = egui::Modifiers::NONE;
+    let input = |frame, events| {
+        let mut input = raw_input(frame, events, plain);
+        input.screen_rect = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(980.0, 680.0)));
+        input
+    };
+    let mut point = None;
+    for frame in 0..5 {
+        let output = ctx.run(input(frame, vec![]), |ctx| app.ui(ctx));
+        point = visible_text_rect(&output, "Manual control points")
+            .map(|r| r.center())
+            .or(point);
+    }
+    let point = point.unwrap();
+    let mut reset = None;
+    let mut delete = None;
+    for frame in 5..25 {
+        let output = ctx.run(
+            input(
+                frame,
+                vec![
+                    egui::Event::PointerMoved(point),
+                    egui::Event::MouseWheel {
+                        unit: egui::MouseWheelUnit::Point,
+                        delta: Vec2::new(0.0, -120.0),
+                        modifiers: plain,
+                    },
+                ],
+            ),
+            |ctx| app.ui(ctx),
+        );
+        reset = visible_text_rect(&output, "Reset curve");
+        delete = visible_text_rect(&output, "Delete slur");
+    }
+    let reset = reset.expect("Reset must be reachable by scrolling");
+    let delete = delete.expect("Delete must be reachable by scrolling");
+    assert!(reset.min.y >= 0.0 && reset.max.y <= 680.0);
+    assert!(delete.min.y >= 0.0 && delete.max.y <= 680.0);
+    assert_eq!(app.score, score);
+    for (frame, pressed) in [(25, true), (26, false)] {
+        let point = reset.center();
+        let _ = ctx.run(
+            input(
+                frame,
+                vec![
+                    egui::Event::PointerMoved(point),
+                    egui::Event::PointerButton {
+                        pos: point,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: plain,
+                    },
+                ],
+            ),
+            |ctx| app.ui(ctx),
+        );
+    }
+    assert!(app.score.notation.slurs[0].shape.is_none());
+    assert_eq!(
+        app.score.notation.slurs[0].style,
+        encore::slurs::SlurStyle::Dotted
     );
 }

@@ -269,27 +269,9 @@ fn xml_escape(value: &str) -> String {
 /// Choose a connector level distinct from native phrase slurs at this onset.
 /// The hidden metadata still retains the connector if all 16 levels are busy.
 pub fn connector_number(score: &Score, anchor: &Anchor) -> Option<usize> {
-    let pos = |a: &Anchor| (a.measure, a.tick);
-    let mut slurs = score
-        .notation
-        .slurs
-        .iter()
-        .filter(|s| s.start.part == anchor.part)
-        .collect::<Vec<_>>();
-    slurs.sort_by_key(|s| (pos(&s.start), pos(&s.end)));
-    let mut active = Vec::<((usize, u32), usize)>::new();
-    let mut busy = BTreeSet::new();
-    for slur in slurs {
-        active.retain(|(end, _)| *end > pos(&slur.start));
-        let number = (1..=16)
-            .find(|n| !active.iter().any(|(_, used)| used == n))
-            .unwrap_or(1);
-        active.push((pos(&slur.end), number));
-        if pos(&slur.start) <= pos(anchor) && pos(anchor) <= pos(&slur.end) {
-            busy.insert(number);
-        }
-    }
-    (1..=16).rev().find(|number| !busy.contains(number))
+    crate::slurs::MusicXmlNumbering::new(score)
+        .ok()?
+        .connector(anchor)
 }
 pub fn musicxml_before(score: &Score, anchor: &Anchor) -> String {
     musicxml_group(score, anchor, GracePlacement::Before)
@@ -318,38 +300,11 @@ impl MusicXmlIndex {
             .map(|g| ((g.anchor, g.placement), g))
             .collect::<BTreeMap<_, _>>();
         let anchors = groups.keys().map(|(a, _)| *a).collect::<BTreeSet<_>>();
-        let pos = |a: Anchor| (a.measure, a.tick);
-        let mut numbers = BTreeMap::new();
-        for part in 0..score.parts.len() {
-            let mut slurs = score
-                .notation
-                .slurs
-                .iter()
-                .filter(|s| s.start.part == part)
-                .collect::<Vec<_>>();
-            slurs.sort_by_key(|s| (pos(s.start), pos(s.end)));
-            let mut active = Vec::<((usize, u32), usize)>::new();
-            let mut spans = Vec::new();
-            for s in slurs {
-                active.retain(|(end, _)| *end > pos(s.start));
-                let n = (1..=16)
-                    .find(|n| !active.iter().any(|(_, v)| v == n))
-                    .unwrap_or(1);
-                active.push((pos(s.end), n));
-                spans.push((pos(s.start), pos(s.end), n));
-            }
-            let mut cursor = 0;
-            active.clear();
-            for anchor in anchors.iter().filter(|a| a.part == part) {
-                while cursor < spans.len() && spans[cursor].0 <= pos(*anchor) {
-                    active.push((spans[cursor].1, spans[cursor].2));
-                    cursor += 1;
-                }
-                active.retain(|(end, _)| *end >= pos(*anchor));
-                let number = (1..=16).rev().find(|n| !active.iter().any(|(_, v)| v == n));
-                numbers.insert(*anchor, number);
-            }
-        }
+        let numbering = crate::slurs::MusicXmlNumbering::new(score).unwrap_or_default();
+        let numbers = anchors
+            .iter()
+            .map(|a| (*a, numbering.connector(a)))
+            .collect::<BTreeMap<_, _>>();
         for ((anchor, placement), group) in &groups {
             let number = numbers.get(anchor).copied().flatten();
             let xml = write_musicxml_group(group, number);

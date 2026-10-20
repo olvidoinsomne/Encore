@@ -1,5 +1,5 @@
 use super::*;
-use encore::parts::{self, LinkedPart, PageSize, Transposition};
+use encore::parts::{self, ChordFilter, LinkedPart, PageSize, StaffVoicing, Transposition};
 
 impl EncoreApp {
     pub(super) fn activate_linked_part(&mut self, index: usize) {
@@ -71,7 +71,7 @@ impl EncoreApp {
         let mut export = false;
         let mut remove = false;
         egui::Window::new("Manage linked parts")
-            .open(&mut open).default_width(660.0).default_height(560.0)
+            .open(&mut open).default_width(700.0).default_height(660.0).vscroll(true)
             .show(ctx, |ui| {
                 ui.label("Parts share all notes, lyrics, slurs and repeats with the score. Each part keeps its own page format and written transposition.");
                 ui.separator();
@@ -84,6 +84,7 @@ impl EncoreApp {
                             id: format!("custom-{ordinal}"),
                             name: format!("Part {}", definitions.len() + 1),
                             staves: vec![self.active_part.min(self.score.parts.len().saturating_sub(1))],
+                            voicing: Vec::new(),
                             transposition: Transposition::CONCERT,
                             layout: Default::default(),
                         });
@@ -114,8 +115,24 @@ impl EncoreApp {
                         if ui.add_enabled(!included || part.staves.len() > 1,
                             egui::Checkbox::new(&mut included, format!("{} · {}", index + 1, staff.name))).changed() {
                             if included { part.staves.push(index); part.staves.sort_unstable(); }
-                            else { part.staves.retain(|staff| *staff != index); }
+                            else { part.staves.retain(|staff| *staff != index); part.voicing.retain(|rule| rule.staff != index); }
                         }
+                    }
+                });
+                ui.separator();
+                ui.collapsing("Staff voicing · layers, voices and chord positions", |ui| {
+                    ui.small("Voiced parts are read-only views. Edit their notes in the source score.");
+                    for &staff in &part.staves {
+                        ui.push_id(("staff-voicing", staff), |ui| {
+                            let mut enabled = part.voicing.iter().any(|rule| rule.staff == staff);
+                            if ui.checkbox(&mut enabled, format!("Custom voicing: {}", self.score.parts[staff].name)).changed() {
+                                if enabled { part.voicing.push(StaffVoicing::new(staff)); }
+                                else { part.voicing.retain(|rule| rule.staff != staff); }
+                            }
+                            if let Some(rule) = part.voicing.iter_mut().find(|rule| rule.staff == staff) {
+                                staff_voicing_controls(ui, rule);
+                            }
+                        });
                     }
                 });
                 ui.separator();
@@ -146,10 +163,17 @@ impl EncoreApp {
                     ui.add(egui::DragValue::new(&mut part.layout.staff_gap).range(0.0..=80.0).speed(1.0));
                 });
                 ui.small("Dense passages may use fewer measures to preserve readable spacing.");
-                if let Err(error) = parts::project(&self.score, part) {
-                    ui.colored_label(Palette::for_theme(self.theme).muted, format!("Preview unavailable: {error}"));
+                match parts::project(&self.score, part) {
+                    Ok(projection) => {
+                        if projection.is_voiced() { ui.small("Voiced part: use Edit source score to change musical content."); }
+                        for warning in projection.warnings { ui.small(warning); }
+                    }
+                    Err(error) => { ui.colored_label(Palette::for_theme(self.theme).muted, format!("Preview unavailable: {error}")); }
                 }
                 ui.separator();
+                if self.part_view && part.is_voiced() && ui.button("Edit source score").clicked() {
+                    self.edit_voicing_source();
+                }
                 ui.horizontal(|ui| {
                     if ui.button("View selected part").clicked() {
                         self.part_view = true;
@@ -193,6 +217,134 @@ impl EncoreApp {
             self.export_all_linked_parts();
         }
     }
+}
+
+fn staff_voicing_controls(ui: &mut egui::Ui, rule: &mut StaffVoicing) {
+    ui.horizontal(|ui| {
+        ui.label("Layers");
+        if ui.small_button("All voices").clicked() {
+            rule.lanes = u8::MAX;
+        }
+        for layer in 0..4u8 {
+            if ui.small_button(format!("{} only", layer + 1)).clicked() {
+                rule.lanes = (1 << layer) | (1 << (layer + 4));
+                rule.multiple_layers = None;
+            }
+        }
+    });
+    egui::Grid::new("voicing-lanes").show(ui, |ui| {
+        for voice in 0..2u8 {
+            ui.label(format!("Voice {}", voice + 1));
+            for layer in 0..4u8 {
+                let bit = 1u8 << (layer + 4 * voice);
+                let mut selected = rule.lanes & bit != 0;
+                if ui
+                    .add_enabled(
+                        !selected || rule.lanes.count_ones() > 1,
+                        egui::Checkbox::new(&mut selected, format!("Layer {}", layer + 1)),
+                    )
+                    .changed()
+                {
+                    if selected {
+                        rule.lanes |= bit;
+                    } else {
+                        rule.lanes &= !bit;
+                    }
+                    if rule
+                        .multiple_layers
+                        .is_some_and(|layer| rule.lanes & ((1 << layer) | (1 << (layer + 4))) == 0)
+                    {
+                        rule.multiple_layers = None;
+                    }
+                }
+            }
+            ui.end_row();
+        }
+    });
+    egui::ComboBox::from_label("Chord notes")
+        .selected_text(rule.chord.name())
+        .show_ui(ui, |ui| {
+            ui.selectable_value(&mut rule.chord, ChordFilter::All, "All chord notes");
+            ui.selectable_value(&mut rule.chord, ChordFilter::Highest, "Highest note");
+            ui.selectable_value(&mut rule.chord, ChordFilter::Lowest, "Lowest note");
+            if ui
+                .selectable_label(
+                    matches!(rule.chord, ChordFilter::Ranked { .. }),
+                    "Selected chord positions",
+                )
+                .clicked()
+            {
+                rule.chord = ChordFilter::Ranked {
+                    from_top: true,
+                    ranks: vec![1],
+                };
+            }
+        });
+    if let ChordFilter::Ranked { from_top, ranks } = &mut rule.chord {
+        ui.horizontal(|ui| {
+            ui.selectable_value(from_top, true, "Count from highest");
+            ui.selectable_value(from_top, false, "Count from lowest");
+        });
+        ui.horizontal_wrapped(|ui| {
+            for rank in 1..=16u8 {
+                let mut selected = ranks.contains(&rank);
+                if ui
+                    .add_enabled(
+                        !selected || ranks.len() > 1,
+                        egui::Checkbox::new(&mut selected, rank.to_string()),
+                    )
+                    .changed()
+                {
+                    if selected {
+                        ranks.push(rank);
+                        ranks.sort_unstable();
+                    } else {
+                        ranks.retain(|old| *old != rank);
+                    }
+                }
+            }
+        });
+    }
+    ui.add_enabled(
+        rule.chord != ChordFilter::All,
+        egui::Checkbox::new(
+            &mut rule.include_single_notes,
+            "Include single-note passages",
+        ),
+    );
+    let mut conditional = rule.multiple_layers.is_some();
+    if ui
+        .checkbox(
+            &mut conditional,
+            "When a measure uses multiple layers, show one layer's whole chords",
+        )
+        .changed()
+    {
+        rule.multiple_layers = conditional.then(|| {
+            (0..4u8)
+                .find(|layer| rule.lanes & ((1 << layer) | (1 << (layer + 4))) != 0)
+                .unwrap_or(0)
+        });
+    }
+    if let Some(layer) = &mut rule.multiple_layers {
+        egui::ComboBox::from_label("Multiple-layer fallback")
+            .selected_text(format!("Layer {}", *layer + 1))
+            .show_ui(ui, |ui| {
+                for candidate in 0..4u8 {
+                    ui.add_enabled_ui(
+                        rule.lanes & ((1 << candidate) | (1 << (candidate + 4))) != 0,
+                        |ui| {
+                            ui.selectable_value(
+                                layer,
+                                candidate,
+                                format!("Layer {}", candidate + 1),
+                            );
+                        },
+                    );
+                }
+            });
+    }
+    ui.separator();
 }
 
 #[cfg(test)]
@@ -275,5 +427,37 @@ mod tests {
             Some(display)
         );
         assert_eq!(app.score.parts[1].measures[0].notes[0].velocity, 105);
+    }
+    #[test]
+    fn voiced_part_manager_keeps_source_and_exact_selection_without_dirtying() {
+        let mut score = Score::demo();
+        score.notation.parts = parts::default_definitions(&score);
+        let mut rule = StaffVoicing::new(0);
+        rule.chord = ChordFilter::Highest;
+        rule.lanes = 1;
+        score.notation.parts[0].voicing.push(rule);
+        let mut app = EncoreApp::from_score(score.clone(), None, "Ready".into());
+        app.activate_linked_part(0);
+        assert!(app.view_is_voiced());
+        app.show_parts = true;
+        let ctx = egui::Context::default();
+        configure_context(&ctx);
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            app.linked_parts_dialog(ctx)
+        });
+        let projection = app.selected_part_projection().unwrap().unwrap();
+        let displayed = Selection {
+            part: 0,
+            measure: 0,
+            note: 0,
+        };
+        let source = projection.source_selection(displayed).unwrap();
+        app.selected = Some(source);
+        app.edit_voicing_source();
+        assert!(!app.part_view);
+        assert_eq!(app.selected, Some(source));
+        assert_eq!(app.score, score);
+        assert!(!app.dirty());
+        assert!(app.undo.is_empty());
     }
 }

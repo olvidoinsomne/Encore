@@ -7,7 +7,7 @@ This is a functional compatibility checklist, not a claim that Encore has
 already reached parity. The modern Encore interface remains the intended UI.
 
 The starting point is Encore 0.5, commit `55f2cc0`; the tables also incorporate
-the Encore 0.6–0.10 implementation passes recorded below. Source evidence was inspected
+the Encore 0.6–0.11 implementation passes recorded below. Source evidence was inspected
 in `src/model.rs`, `src/app.rs`, `src/engraving.rs`, `src/export.rs`,
 `src/audio.rs`, `src/sampled.rs`, `src/synth.rs`, and the three format readers.
 Changes made after that commit must pass the acceptance checks below before a
@@ -46,9 +46,9 @@ Linux verification.
 | Stem, beam, flag and rest placement | Partial | Anchored stem direction/hiding, beam break/join/flat overrides, head shapes and cue sizing accompany automatic engraving. Manual lengths, arbitrary beam angles/hooks and rest offsets remain open. |
 | Cross-staff notation and beaming | Missing | No source/destination staff relationship for notes or beams. |
 | Dynamics and articulations | Partial | Velocity-derived dynamics, legacy staccato, accent, marcato, tenuto and staccatissimo now have editable marks, vector glyphs and playback. Custom marking definitions, fermata timing, ornaments and complete placement/performance rules remain open. |
-| Slurs and phrase curves | Partial | Anchored editable same-layer phrases, direction, height and endpoint offsets; vector continuations across systems/pages; native and MusicXML round trips, MuseScore import and bounded legato playback. Cross-staff/cross-voice slurs, dashed styles and arbitrary control-point shapes remain open. |
+| Slurs and phrase curves | Partial | Entry-anchored phrases now cross voices/layers on one staff, with solid/dashed/dotted styling, dash/gap lengths, editable endpoint offsets and asymmetric normalized controls; vector continuations and source handles span systems/pages. Native and Encore MusicXML round trips retain manual curves, standard line styles interchange, and MuseScore voice endpoints/styles import. Reset restores automatic shaping without changing style. Cross-staff/beat-attached curves, wavy lines, independent fragment controls and complete automatic collision profiles remain open. |
 | Hairpins, octave lines, pedal, trills, glissandi and custom lines | Partial | Editable native/vector/MusicXML spans now cover crescendo/diminuendo, ±1–3 octave display, damper/sostenuto, explicit-interval trills and consecutive-note chromatic glissandi; supported basic MuseScore spanners import. Held-note CC11 swells, pedal holds and discrete ornaments share audio/MIDI scheduling. Niente/custom line styles, partial/soft pedal, automatic trill neighbors, continuous slides and harp/diatonic glissandi remain open. |
-| Tremolos, measured repeats and ornaments | Partial | Explicit-interval trill spans perform on all three backends; a recognized string tremolo Technique selects GM tremolo strings. Measured tremolo notation/repeats, turns, mordents and full ornament rules remain open. |
+| Tremolos, measured repeats and ornaments | Partial | Explicit-interval trills, key-aware or explicit turns/inverted turns, lower/upper mordents and up/down chord rolls share native notation, vector marks, interchange and all three performed backends. Non-arpeggiate is supported. A recognized string tremolo Technique selects GM tremolo strings. Measured tremolo notation/repeats, fermata timing, custom long/accelerating ornaments and full ornament rules remain open. |
 | Repeat barlines, endings, D.C./D.S., coda and Fine | Partial | Inclusive repeat regions support nested noncrossing repeats, 2–16 passes, contiguous numbered endings, vector barlines/voltas and bounded performed audio/MIDI. D.C./D.S., al Fine/al Coda, unique segno/coda targets and optional repeat replay use the same traversal, MusicXML import/export and MuseScore import. Custom labels with multiple targets, per-pass/custom conditional jumps, within-measure navigation, manual bracket placement and direct MUSX repeat import remain open. |
 | Lyrics | Partial | Numbered verses/choruses/sections, atomic syllable typing/assignment, hyphens, melismas and elisions, adjustable baselines, lyric-aware spacing and vector continuations; native and MusicXML preservation and MuseScore import. Rich typography, above-staff underlay, verse-number alignment and Finale’s full Lyrics window/metatools remain open. |
 | Chord symbols and fretboards | Partial | Free-beat letter-name chords support standard triads, sevenths/extensions, altered/add/omit degrees, alternate basses, N.C., eight stack slots and per-symbol printing/playback. Original vector fretboards have bounded guitar suggestions, 4–12 custom strings, open/muted stops, fingering, barres and known/unknown tunings. Native/MusicXML harmony/frame interchange, linked transposition and regional editing retain the supported semantics. Finale suffix/fretboard libraries, MIDI analysis/learned chords, numeric/Roman naming and arbitrary suffix typography remain open. |
@@ -141,7 +141,7 @@ and [graphics](https://usermanuals.finalemusic.com/FinaleWin/Content/Finale/menu
 | System breaks, locks and measure widths | Partial | Explicit system/page boundaries, visible/selected-system locks and per-measure width weights are editable and persistent. Locked membership is honored; internal beat-chart adjustments, drag layout tools, proportional absolute widths and complete collision resolution remain open. |
 | Staff groups, brackets, braces and labels | Partial | Basic automatic staff presentation. Needs editable groups, bracket placement, barline spans and independent abbreviations. |
 | Hide empty staves, multimeasure rests and staff spacing | Partial | Linked parts store extra staff spacing. Empty-staff hiding, multimeasure-rest ranges and per-system staff management remain pending. |
-| Linked part definitions and voicing | Partial | Named stable definitions support individual/custom/multi-staff parts, piano grand-staff generation, source-linked editing and spelled written-pitch transpositions. Voiced extraction by layer/chord note and per-part clefs remain pending. |
+| Linked part definitions and voicing | Partial | Named stable definitions support individual/custom/multi-staff parts, piano grand-staff generation, source-linked editing and spelled written-pitch transpositions. Per-staff layer/voice masks, highest/lowest/ranked chord-tone selection, conditional multi-layer policies and self-contained extraction are implemented with exact source maps and documented metadata filtering. Per-part clefs and imported linked definitions remain pending. |
 | Independent part formatting | Partial | Each part stores paper, orientation, margins, staff scale/gap, system membership, measure width weights and publication text. Per-item unlink/relink, visibility/position overrides and layout-copy workflows remain open. |
 | Print and batch score/parts | Partial | Current part PDF/SVG and numbered batch linked-part PDFs use each part's written pitches and page format. Needs native print dialog, copies/ranges, print selection and detached editable extraction. |
 | Publication metadata | Partial | Title/composer, linked-part names, copyright, left/center/right headers/footers and page numbering with title/composer/page tokens. Title pages, styled multiline text blocks, graphics and complete rich formatting remain open. |
@@ -473,3 +473,56 @@ sampled WAV. Both printed studies and both actual egui themes were inspected.
 Neither sampled study clips; Carol's sampled regression remains byte-identical.
 Dense multi-voice collision optimization, platform keyboard qualification and
 all remaining partial/missing audit rows stay open.
+
+### Advanced slur checkpoint (0.11)
+
+Same-staff cross-voice/layer phrases, solid/dashed/dotted styles and asymmetric
+manual controls are implemented end to end. Number levels follow MusicXML
+document order, including stops serialized before starts in independent voices;
+grace connectors use the same allocation. Native geometry and source endpoint
+identity survive linked projections and bounded Encore MusicXML metadata.
+Cross-staff curves remain explicit gaps because native staves currently export
+as separate MusicXML parts. Beat-attached shapes, wavy strokes, per-system
+control overrides and Finale's complete automatic collision/profile engine are
+not claimed. The implementation follows the public [MusicXML slur reference](https://www.w3.org/2021/06/musicxml40/musicxml-reference/elements/slur/)
+and [number-level rules](https://www.w3.org/2021/06/musicxml40/musicxml-reference/data-types/number-level/),
+with [Finale's documented slur editing](https://usermanuals.finalemusic.com/FinaleWin/Content/Finale/Slurs.htm)
+as the clean-room workflow reference.
+
+
+### Encore 0.11 integration qualification
+
+Voiced linked parts retain explicit source event/tone maps after filtering and
+written transposition. The manager supports per-staff layer/voice masks and
+chord ranks, including conditional behavior in multi-layer measures. Filtered
+annotation losses are reported. Read-only part views provide Edit source score
+and standalone extraction; entry, cut/copy/paste and regional editing cannot
+silently alter hidden music. Layout, mixer controls and history remain usable.
+CLI extraction selects a stable part ID or one-based number, using written
+pitches for PDF/SVG and concert pitches for native/XML/MIDI/audio.
+
+Turns, inverted turns, lower/upper mordents, upward/downward rolls and
+non-arpeggiate signs have native models, editors, original vector symbols,
+MusicXML/MuseScore interchange and shared performed scheduling. Key-derived
+neighbors and explicit semitone overrides, bounded window/delay, grace/repeat
+interactions and tied continuations are covered. Principal sustain remains
+continuous after the ornament. Implicit global fermata time, measured tremolos,
+cross-staff rolls and complete Human Playback interpretation remain open.
+Performed same-key sostenuto reattacks fail visibly.
+
+The advanced slur checkpoint above adds same-staff cross-voice/layer geometry,
+styles and numeric control points. Small-window controls scroll within the
+viewport, with a real-frame reset/style regression. Cached ornament indices
+reserve head/accidental, grace and roll columns and vertical clearance. Event
+clipboard v6 and region v3 preserve ornaments and advanced slur metadata while
+continuing to accept older supported versions. Whole-number decimal MusicXML
+alterations now parse consistently; fractional/microtonal pitches still fail
+explicitly.
+
+Local Linux qualification: **354 library and 133 editor/CLI tests** pass; format,
+all-target Clippy with warnings denied and the optimized release build pass.
+Three new native studies export/reopen supported slur/ornament semantics, and
+three voiced parts extract/reopen with retained concert pitches. PDF/SVG, MIDI
+and sampled WAV exports and bounded editor dialogs were inspected. Sampled
+studies do not clip; Carol's sampled regression remains byte-identical. Full
+Finale parity and native macOS/Windows qualification remain open.

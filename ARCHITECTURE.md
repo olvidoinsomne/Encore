@@ -29,14 +29,20 @@ Coordinates grow downward. Staff diatonic references are treble bottom-line E4 =
 
 `src/document.rs` stores additive, empty-default `Notation` in the score.
 `Anchor` identifies a rhythmic entry by source staff, measure, onset tick and
-layer. Removing/reindexing staves or deleting notes updates or removes dependent
+layer and voice. Removing/reindexing staves or deleting notes updates or removes dependent
 annotations; validation rejects dangling anchors. `src/lyrics.rs` owns numbered
 verse/chorus/section syllables, syllabic state, optional extension endpoints and
 baseline offsets. `assign_text` tokenizes and applies an entire text assignment
 using one sorted melody traversal and a map of lyric keys, then validates before
-committing metadata. `src/slurs.rs` stores same-layer/voice phrase endpoints,
-direction, arch height and endpoint offsets. Validation uses sorted endpoint
-sets and a sweep of active phrases, with at most 16 overlaps per staff.
+committing metadata. `src/slurs.rs` stores same-staff phrase endpoints, which
+may cross layers or voices, plus direction, arch height, endpoint offsets,
+solid/dashed/dotted style and an optional asymmetric manual curve. Insets scale
+with each visible system fragment; signed heights allow inflections. A manual
+shape freezes automatic collision lifting until reset. Validation uses indexed
+pitched endpoints and allocates at most 16 overlapping MusicXML levels in
+serialized measure/lane/tick order, including stops that precede starts.
+Grace connectors share that allocator. Cross-voice curves preserve notation;
+legato gates apply only to phrases whose endpoints share a lane.
 
 The engraving child modules add outlined lyric text, hyphens, word extensions
 and original flattened vector phrase curves after staff regions are known.
@@ -46,8 +52,8 @@ before/after placement. Nested `GraceNote`s carry pitches and visual durations;
 they never enter the written rhythmic event stream. The grace collector resolves
 source staff/voice anchors after import and applies pickup shifts once. Standard
 MusicXML grace fields are combined with valid hidden metadata for exact native
-options; `MusicXmlIndex` caches export fragments and sweeps active phrase-slur
-levels once instead of scanning the score for every exported entry.
+options; `MusicXmlIndex` caches export fragments and uses the shared slur-level
+index instead of scanning the score for every exported entry.
 `src/engraving/grace.rs` reserves shared temporal gaps and first-onset prefixes,
 draws small vector heads/stems/beams/accidentals/slashes/connectors and records
 separate `GraceHit`s. `GraceSelection` identifies the principal, side and local
@@ -59,8 +65,15 @@ shared temporal spacing and system measure counts; lyric baselines and slur
 clearance inform vertical staff spacing. Foreign format `annotations` collectors
 retain source voice identities until each reader resolves them into native
 staff/layer anchors, including pickup shifts. MusicXML emits matched numbered
-slur starts/stops and explicit lyric-extension starts/stops. Unsupported rich
-text, cross-staff phrases or custom shape details produce import notes.
+slur starts/stops and explicit lyric-extension starts/stops. Slur marks are
+paired after collection in source document order, independently of their source
+voice, then resolved to native anchors. Standard line styles and endpoint offsets
+interchange directly; Encore's normalized asymmetric controls also travel in a
+bounded `encore-slur-v1:` other-notation record for exact round trips. External
+absolute horizontal controls, continuation-specific shapes and unsupported rich
+text produce import notes. Cross-staff phrases remain rejected until staves can
+be grouped into one MusicXML part. Each `SlurHit` retains both endpoint anchors
+and a handle identity, so linked views can remap selection to the source.
 
 ## Repeats and navigation
 
@@ -171,3 +184,17 @@ overrides use the complete source anchor. Engraving adds per-onset lane offsets
 without changing the shared temporal map. `x_at_anchor` addresses a displaced
 head; `x_at_tick` remains the aligned beat/playhead coordinate. Secondary outer
 gaps are not engraved as rests and MusicXML writes them as `forward` elements.
+
+
+`src/ornaments.rs` validates note-local turns, mordents and rolls, resolves
+key-aware neighboring pitches, and provides interchange/lifecycle helpers.
+`performance.rs` decorates fresh/tied principal windows before shared pedal and
+controller scheduling. `engraving/ornaments.rs` indexes marks/principals once
+per immutable snapshot; cached widths, prefix and clearance keep grace groups,
+accidentals and roll signs separate.
+
+Voiced projections use per-event and per-tone source maps; native rules filter
+lanes and chord ranks before written transposition and annotation validation.
+`app/voicing.rs` guards source music in these views while retaining part layout
+and mixer workflows. Native/XML/MIDI/audio extraction keeps concert pitches;
+printed PDF/SVG extraction uses the written projection.

@@ -45,9 +45,11 @@ fn voice_page(score: &Score) -> Page {
         .iter()
         .map(|s| (s.anchor, s))
         .collect();
-    let offsets = collision_offsets(score, &[0], &pitches, &styles);
+    let ornaments = ornaments::Index::new(score);
+    let offsets = collision_offsets(score, &[0], &pitches, &styles, &ornaments);
     let context = RenderContext {
-        spacing: vec![temporal_spacing(score, &[0], 0, &offsets)],
+        spacing: vec![temporal_spacing(score, &[0], 0, &offsets, &ornaments)],
+        ornaments,
         styles,
         pitches,
         offsets,

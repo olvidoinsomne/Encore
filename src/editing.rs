@@ -98,7 +98,7 @@ impl RegionClip {
         self.measures.first().map_or(0, Vec::len)
     }
     pub fn validate(&self) -> Result<(), String> {
-        if ![1, 2].contains(&self.version) {
+        if ![1, 2, 3].contains(&self.version) {
             return Err("This region clipboard requires a different Encore version.".into());
         }
         if self.measures.is_empty()
@@ -191,6 +191,7 @@ fn ensure_known_fields(object: &Map<String, Value>) -> Result<(), String> {
             "spanners",
             "chords",
             "grace",
+            "ornaments",
             "lines",
             "tempo",
             "repeats",
@@ -334,6 +335,7 @@ pub fn copy_region(score: &Score, region: &Region) -> Result<RegionClip, String>
         "spanners",
         "chords",
         "grace",
+        "ornaments",
         "lines",
     ] {
         let mut copied = Vec::new();
@@ -449,7 +451,15 @@ pub fn copy_region(score: &Score, region: &Region) -> Result<RegionClip, String>
         ));
     }
     let clip = RegionClip {
-        version: if region.staves.iter().any(|staff| {
+        version: if !score.notation.ornaments.is_empty()
+            || score
+                .notation
+                .slurs
+                .iter()
+                .any(|s| s.style != crate::slurs::SlurStyle::Solid || s.shape.is_some())
+        {
+            3
+        } else if region.staves.iter().any(|staff| {
             score.parts[*staff].measures[region.start..=region.end]
                 .iter()
                 .any(|measure| measure.notes.iter().any(|note| note.voice != 0))
@@ -570,6 +580,7 @@ fn clear_in_place(score: &mut Score, region: &Region) -> Result<(), String> {
         "spanners",
         "chords",
         "grace",
+        "ornaments",
         "lines",
     ] {
         let mut kept = Vec::new();
@@ -705,6 +716,7 @@ pub fn paste_region(
         "spanners",
         "chords",
         "grace",
+        "ornaments",
         "lines",
     ] {
         let mut merged = records(&notation, key).to_vec();
@@ -965,6 +977,7 @@ fn remap_measures(score: &mut Score, mapping: &[Option<usize>]) -> Result<(), St
         "spanners",
         "chords",
         "grace",
+        "ornaments",
         "lines",
     ] {
         let mut kept = Vec::new();
@@ -1844,6 +1857,90 @@ mod secondary_voice_tests {
                 .anchor
                 .voice,
             1
+        );
+        score.validate().unwrap();
+    }
+}
+
+#[cfg(test)]
+mod ornament_clip_tests {
+    use super::*;
+    use crate::{
+        model::{Duration, Note, Pitch},
+        ornaments::{Ornament, OrnamentKind},
+        slurs::{Slur, SlurStyle},
+    };
+    #[test]
+    fn region_v3_retains_ornaments_and_advanced_slur_styles_through_structural_edits() {
+        let mut score = Score::blank();
+        for start in [0, 480] {
+            score.parts[0].measures[0].notes.push(Note {
+                layer: 0,
+                voice: 0,
+                voice_launch: None,
+                start,
+                duration: Duration::Quarter,
+                dotted: false,
+                tuplet: None,
+                pitches: vec![Pitch::from_midi(64)],
+                velocity: 80,
+                staccato: false,
+                articulations: vec![],
+                tied: false,
+            });
+        }
+        let anchor = Anchor {
+            part: 0,
+            measure: 0,
+            tick: 0,
+            layer: 0,
+            voice: 0,
+        };
+        let mut mark = Ornament::new(anchor, OrnamentKind::Turn);
+        mark.upper = Some(1);
+        score.notation.ornaments.push(mark);
+        let mut slur = Slur::new(
+            anchor,
+            Anchor {
+                tick: 480,
+                ..anchor
+            },
+        );
+        slur.style = SlurStyle::Dashed;
+        slur.shape = Some(slur.shape_or_default());
+        score.notation.slurs.push(slur);
+        let region = Region {
+            staves: vec![0],
+            start: 0,
+            end: 0,
+        };
+        let clip = copy_region(&score, &region).unwrap();
+        assert_eq!(clip.version, 3);
+        let clip = RegionClip::decode(&clip.encode().unwrap()).unwrap();
+        paste_region(&mut score, &clip, &[0], 1, PasteMode::Replace).unwrap();
+        assert_eq!(
+            score
+                .notation
+                .ornaments
+                .iter()
+                .filter(|m| m.anchor.measure == 1)
+                .count(),
+            1
+        );
+        assert!(
+            score
+                .notation
+                .slurs
+                .iter()
+                .any(|s| s.start.measure == 1 && s.style == SlurStyle::Dashed && s.shape.is_some())
+        );
+        insert_measures(&mut score, 1, 1).unwrap();
+        assert!(
+            score
+                .notation
+                .ornaments
+                .iter()
+                .any(|m| m.anchor.measure == 2)
         );
         score.validate().unwrap();
     }

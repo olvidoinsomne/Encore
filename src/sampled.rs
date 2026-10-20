@@ -1517,3 +1517,65 @@ mod voice_two_tests {
         assert!(decorated_commands(&timeline, 0, 8).is_empty());
     }
 }
+
+#[cfg(test)]
+mod discrete_ornament_commands {
+    use super::*;
+    use crate::{
+        document::Anchor,
+        model::{Duration, Note, Pitch},
+        ornaments::{Ornament, OrnamentKind},
+    };
+    #[test]
+    fn mordent_sampler_note_offs_precede_next_on_and_last_main_sustains() {
+        let mut s = Score::blank();
+        s.tempo = 120;
+        s.parts.truncate(1);
+        s.parts[0].measures.truncate(1);
+        s.parts[0].measures[0].notes = vec![Note {
+            layer: 0,
+            voice: 1,
+            voice_launch: None,
+            start: 0,
+            duration: Duration::Quarter,
+            dotted: false,
+            tuplet: None,
+            pitches: vec![Pitch::from_midi(60)],
+            velocity: 80,
+            staccato: false,
+            articulations: vec![],
+            tied: false,
+        }];
+        let a = Anchor {
+            part: 0,
+            measure: 0,
+            tick: 0,
+            layer: 0,
+            voice: 1,
+        };
+        s.notation
+            .ornaments
+            .push(Ornament::new(a, OrnamentKind::Mordent));
+        let timeline = crate::performance::Timeline::new(&s).unwrap();
+        let commands = decorated_commands(&timeline, 0, 4);
+        let on: Vec<_> = commands
+            .iter()
+            .filter(|c| matches!(c.kind, Kind::On(_)))
+            .map(|c| (c.midi, c.frame))
+            .collect();
+        assert_eq!(on, vec![(60, 0), (59, 1838), (60, 3675)]);
+        let off: Vec<_> = commands
+            .iter()
+            .filter(|c| matches!(c.kind, Kind::Off))
+            .map(|c| (c.midi, c.frame))
+            .collect();
+        assert_eq!(off, vec![(60, 1838), (59, 3675), (60, 22050)]);
+        assert!(decorated_commands(&timeline, 0, 0).is_empty());
+        let frame: Vec<_> = commands
+            .iter()
+            .filter(|c| c.frame == 1838)
+            .map(|c| c.kind)
+            .collect();
+        assert_eq!(frame, vec![Kind::Off, Kind::On(80)]);
+    }
+}

@@ -101,7 +101,7 @@ pub(super) fn clearance(score: &Score, part: usize, measure: usize, bars: usize)
     }
     (above, below)
 }
-pub(super) fn draw(page: &mut Page, score: &Score) {
+pub(super) fn draw(page: &mut Page, score: &Score, ornaments: &super::ornaments::Index<'_>) {
     let pitch_index = crate::lines::PitchIndex::new(score);
     let groups = score
         .notation
@@ -127,7 +127,7 @@ pub(super) fn draw(page: &mut Page, score: &Score) {
         let up = group.anchor.voice == 0;
         let desired = width(group);
         let start = if group.placement == GracePlacement::Before {
-            main_x - desired - 6.0
+            main_x - ornaments.roll_prefix(&group.anchor) - desired - 6.0
         } else {
             main_x + 18.0
         };
@@ -363,6 +363,56 @@ mod tests {
         document::Anchor,
         grace::{GraceGroup, GraceNote},
     };
+    #[test]
+    fn before_graces_clear_a_rolled_chord_and_its_accidental_column() {
+        let mut score = Score::demo();
+        score.key_fifths = 0;
+        score.parts.truncate(1);
+        score.parts[0].measures.truncate(1);
+        score.parts[0].measures[0].notes.truncate(1);
+        score.parts[0].measures[0].notes[0].pitches = vec![
+            Pitch::from_midi(66),
+            Pitch::from_midi(67),
+            Pitch::from_midi(71),
+        ];
+        let anchor = Anchor {
+            part: 0,
+            measure: 0,
+            tick: 0,
+            layer: 0,
+            voice: 0,
+        };
+        score.notation.grace.push(GraceGroup::new(
+            anchor,
+            vec![
+                GraceNote::new(Pitch::from_midi(62), Duration::Sixteenth),
+                GraceNote::new(Pitch::from_midi(64), Duration::Sixteenth),
+            ],
+        ));
+        score
+            .notation
+            .ornaments
+            .push(crate::ornaments::Ornament::new(
+                anchor,
+                crate::ornaments::OrnamentKind::ArpeggioUp,
+            ));
+        let index = super::ornaments::Index::new(&score);
+        let prefix = index.roll_prefix(&anchor);
+        assert!(prefix > 24.0);
+        let pages = engrave(&score, &EngravingOptions::default());
+        let main = pages[0].hits[0].x;
+        assert!(
+            pages[0]
+                .grace_hits
+                .iter()
+                .all(|h| h.x < main - prefix - 6.0)
+        );
+        let mut plain = score.clone();
+        plain.notation.ornaments.clear();
+        let before = engrave(&plain, &EngravingOptions::default());
+        assert!((pages[0].grace_hits[0].x - before[0].grace_hits[0].x).abs() < 0.001);
+        assert!((main - before[0].hits[0].x - prefix).abs() < 0.001);
+    }
     #[test]
     fn grace_hits_are_separate_from_principal_hits_and_prefix_clears_header() {
         let mut score = Score::blank();

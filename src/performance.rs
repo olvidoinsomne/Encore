@@ -68,6 +68,11 @@ pub fn needed(score: &Score) -> bool {
         .flat_map(|measure| &measure.notes)
         .any(|note| note.voice != 0)
         || score.notation.chords.iter().any(|chord| chord.play)
+        || score
+            .notation
+            .ornaments
+            .iter()
+            .any(|o| o.playback && o.kind != crate::ornaments::OrnamentKind::NonArpeggiate)
         || !score.notation.grace.is_empty()
         || score
             .notation
@@ -278,6 +283,121 @@ fn to_anchor(score: &Score, part: usize, layer: u8, source_tick: u64) -> Anchor 
         tick: (source_tick % width) as u32,
     }
 }
+#[derive(Clone)]
+struct OrnamentPlan<'a> {
+    mark: &'a crate::ornaments::Ornament,
+    start: f64,
+    end: f64,
+    principal_start: f64,
+    pitches: Vec<u8>,
+    upper: u8,
+    lower: u8,
+    velocity: u8,
+    instrument: Instrument,
+}
+fn clipped(note: &PerformedNote, start: f64, end: f64) -> PerformedNote {
+    let mut result = note.clone();
+    result.start = start;
+    result.end = end;
+    result.sounding_end = end;
+    result.sampler_end = end;
+    result
+}
+fn append_ornament_segment(output: &mut Vec<PerformedNote>, segment: PerformedNote, floor: usize) {
+    if output.len() > floor
+        && let Some(previous) = output.last_mut()
+        && previous.midi == segment.midi
+        && previous.velocity == segment.velocity
+        && previous.instrument == segment.instrument
+        && (previous.end - segment.start).abs() < 1e-8
+    {
+        previous.end = segment.end;
+        previous.sounding_end = segment.end;
+        previous.sampler_end = segment.end;
+    } else {
+        output.push(segment);
+    }
+}
+fn decorate_ornaments(
+    notes: Vec<PerformedNote>,
+    plans: &BTreeMap<(usize, u8), Vec<OrnamentPlan<'_>>>,
+) -> Result<Vec<PerformedNote>, String> {
+    use crate::ornaments::OrnamentKind as K;
+    let mut output = Vec::with_capacity(notes.len());
+    for note in notes {
+        let output_start = output.len();
+        let Some(lane) = plans
+            .get(&(note.anchor.part, note.layer))
+            .filter(|_| !note.grace)
+        else {
+            output.push(note);
+            continue;
+        };
+        let mut cursor = note.start;
+        let mut state = note.clone();
+        let first = lane.partition_point(|p| p.end <= note.start);
+        for plan in lane[first..].iter().take_while(|p| p.start < note.end) {
+            if !plan.pitches.contains(&note.midi) {
+                continue;
+            }
+            if plan.mark.kind.chord() {
+                // A pitch already held by a tie is not attacked again by a roll.
+                if (note.start - plan.principal_start).abs() > 1e-8 {
+                    continue;
+                }
+                let mut pitches = plan.pitches.clone();
+                pitches.sort_unstable();
+                if plan.mark.kind == K::ArpeggioDown {
+                    pitches.reverse();
+                }
+                let rank = pitches.iter().position(|p| *p == note.midi).unwrap_or(0);
+                cursor = plan.start
+                    + (plan.end - plan.start) * rank as f64 / pitches.len().max(1) as f64;
+                cursor = cursor.min(note.end - 0.01).max(note.start);
+                continue;
+            }
+            let a = plan.start.max(cursor);
+            let b = plan.end.min(note.end);
+            if b <= a {
+                continue;
+            }
+            if a > cursor {
+                append_ornament_segment(&mut output, clipped(&state, cursor, a), output_start);
+            }
+            let sequence: Vec<u8> = match plan.mark.kind {
+                K::Turn => vec![plan.upper, note.midi, plan.lower, note.midi],
+                K::InvertedTurn => vec![plan.lower, note.midi, plan.upper, note.midi],
+                K::Mordent => vec![note.midi, plan.lower, note.midi],
+                K::UpperMordent => vec![note.midi, plan.upper, note.midi],
+                _ => Vec::new(),
+            };
+            if output.len() + sequence.len() + 1 > MAX_NOTES {
+                return Err("Ornament expansion exceeds two million notes.".into());
+            }
+            state.velocity = plan.velocity;
+            state.instrument = plan.instrument;
+            state.anchor = plan.mark.anchor;
+            for (index, midi) in sequence.iter().enumerate() {
+                let mut segment = clipped(
+                    &state,
+                    a + (b - a) * index as f64 / sequence.len() as f64,
+                    a + (b - a) * (index + 1) as f64 / sequence.len() as f64,
+                );
+                segment.midi = *midi;
+                segment.anchor = plan.mark.anchor;
+                append_ornament_segment(&mut output, segment, output_start);
+            }
+            cursor = b;
+        }
+        if cursor < note.end {
+            append_ornament_segment(&mut output, clipped(&state, cursor, note.end), output_start);
+        }
+        if output.len() > MAX_NOTES {
+            return Err("Ornament expansion exceeds two million notes.".into());
+        }
+    }
+    Ok(output)
+}
 impl Timeline {
     pub fn new(score: &Score) -> Result<Self, String> {
         score.validate()?;
@@ -292,6 +412,15 @@ impl Timeline {
             .iter()
             .map(|g| ((g.anchor, g.placement), g))
             .collect();
+        let ornament_marks: BTreeMap<_, _> = score
+            .notation
+            .ornaments
+            .iter()
+            .filter(|o| o.playback && o.kind != crate::ornaments::OrnamentKind::NonArpeggiate)
+            .map(|o| (o.anchor, o))
+            .collect();
+        let mut ornament_plans = BTreeMap::<(usize, u8), Vec<OrnamentPlan<'_>>>::new();
+        let mut plan_count = 0_usize;
         let mut notes = Vec::new();
         let mut controls = Vec::new();
         let mut techniques = BTreeMap::<(usize, u8), Vec<(u64, Technique)>>::new();
@@ -315,6 +444,45 @@ impl Timeline {
         for (part, p) in score.parts.iter().enumerate() {
             for layer in 0..8 {
                 let timeline = events(score, part, layer, &order, &groups)?;
+                for event in timeline.iter().filter(|e| !e.grace) {
+                    if let Some(&mark) = ornament_marks.get(&event.anchor) {
+                        if plan_count >= MAX_NOTES {
+                            return Err(
+                                "Performed ornaments exceed two million principal windows.".into(),
+                            );
+                        }
+                        let (upper, lower) =
+                            crate::ornaments::auxiliary_pitches_for_note(score, mark, &event.note)?;
+                        let start = event.start
+                            + (event.end - event.start) * f64::from(mark.delay_percent) / 100.;
+                        let end = (start + f64::from(mark.window_ticks)).min(event.end);
+                        ornament_plans
+                            .entry((part, layer))
+                            .or_default()
+                            .push(OrnamentPlan {
+                                mark,
+                                start,
+                                end,
+                                principal_start: event.start,
+                                pitches: event.note.pitches.iter().map(|p| p.midi()).collect(),
+                                upper: upper.midi(),
+                                lower: lower.midi(),
+                                velocity: expressions.velocity(event.anchor, &event.note),
+                                instrument: techniques.get(&(part, layer % 4)).map_or(
+                                    p.instrument,
+                                    |lane| {
+                                        let i = lane.partition_point(|(at, _)| {
+                                            *at <= source(score, event.anchor)
+                                        });
+                                        i.checked_sub(1).map_or(p.instrument, |i| {
+                                            preset(p.instrument, lane[i].1)
+                                        })
+                                    },
+                                ),
+                            });
+                        plan_count += 1;
+                    }
+                }
                 let mut consumed = HashSet::new();
                 for (i, e) in timeline.iter().enumerate() {
                     if e.note.velocity == 0 {
@@ -523,9 +691,43 @@ impl Timeline {
                 return Err("Ornament expansion exceeds two million notes.".into());
             }
         }
+        notes = decorate_ornaments(notes, &ornament_plans)?;
+        let mut performed_attacks = BTreeMap::<(usize, u8, u8), Vec<f64>>::new();
+        if score.notation.lines.iter().any(|line| {
+            matches!(
+                line.kind,
+                LineKind::Pedal {
+                    kind: PedalKind::Sostenuto
+                }
+            )
+        }) {
+            for note in &notes {
+                performed_attacks
+                    .entry((note.anchor.part, note.layer, note.midi))
+                    .or_default()
+                    .push(note.start);
+            }
+            for attacks in performed_attacks.values_mut() {
+                attacks.sort_by(f64::total_cmp);
+            }
+        }
         for line in &score.notation.lines {
             if let LineKind::Pedal { kind } = line.kind {
                 for (a, b) in intervals(score, &order, line.start, line.end) {
+                    if kind == PedalKind::Sostenuto {
+                        for note in notes.iter().filter(|n| {
+                            n.anchor.part == line.start.part && n.start <= a && n.end > a
+                        }) {
+                            if let Some(attacks) =
+                                performed_attacks.get(&(note.anchor.part, note.layer, note.midi))
+                            {
+                                let next = attacks.partition_point(|at| *at <= a);
+                                if attacks.get(next).is_some_and(|at| *at < b) {
+                                    return Err("Sostenuto cannot reattack a captured performed pitch in the same voice before release; use damper pedal or another voice.".into());
+                                }
+                            }
+                        }
+                    }
                     if controls.len() + 16 > MAX_CONTROLS {
                         return Err("Pedal controller expansion exceeds one million events.".into());
                     }
@@ -1338,5 +1540,236 @@ mod voice_two_tests {
                 .sounding_end,
             960.
         );
+    }
+}
+
+#[cfg(test)]
+mod discrete_ornament_tests {
+    use super::*;
+    use crate::{
+        grace::{GraceGroup, GraceNote, GraceTiming},
+        model::{Duration, Pitch},
+        ornaments::{Ornament, OrnamentKind as K},
+    };
+    fn fixture() -> (Score, Anchor) {
+        let mut s = Score::blank();
+        s.parts.truncate(1);
+        s.parts[0].measures.truncate(1);
+        s.parts[0].measures[0].notes = vec![Note {
+            layer: 0,
+            voice: 0,
+            voice_launch: None,
+            start: 0,
+            duration: Duration::Quarter,
+            dotted: false,
+            tuplet: None,
+            pitches: vec![Pitch::from_midi(60)],
+            velocity: 80,
+            staccato: false,
+            articulations: vec![],
+            tied: false,
+        }];
+        (
+            s,
+            Anchor {
+                part: 0,
+                measure: 0,
+                tick: 0,
+                layer: 0,
+                voice: 0,
+            },
+        )
+    }
+    #[test]
+    fn turn_window_preserves_plain_prefix_tail_and_both_voices() {
+        let (mut s, a) = fixture();
+        let mut n = s.parts[0].measures[0].notes[0].clone();
+        n.voice = 1;
+        n.pitches = vec![Pitch::from_midi(48)];
+        s.parts[0].measures[0].notes.push(n);
+        let mut m = Ornament::new(a, K::Turn);
+        m.delay_percent = 25.;
+        s.notation.ornaments.push(m);
+        let t = Timeline::new(&s).unwrap();
+        let lane: Vec<_> = t
+            .notes
+            .iter()
+            .filter(|n| n.layer == 0)
+            .map(|n| (n.midi, n.start, n.end))
+            .collect();
+        assert_eq!(
+            lane,
+            vec![
+                (60, 0., 120.),
+                (62, 120., 150.),
+                (60, 150., 180.),
+                (59, 180., 210.),
+                (60, 210., 480.)
+            ]
+        );
+        assert_eq!(
+            t.notes
+                .iter()
+                .find(|n| n.layer == 4)
+                .map(|n| (n.midi, n.start, n.end)),
+            Some((48, 0., 480.))
+        );
+    }
+    #[test]
+    fn tied_continuation_ornament_decorates_the_held_principal() {
+        let (mut s, a) = fixture();
+        s.parts[0].measures[0].notes[0].tied = true;
+        let mut next = s.parts[0].measures[0].notes[0].clone();
+        next.start = 480;
+        next.tied = false;
+        s.parts[0].measures[0].notes.push(next);
+        s.notation
+            .ornaments
+            .push(Ornament::new(Anchor { tick: 480, ..a }, K::Mordent));
+        let t = Timeline::new(&s).unwrap();
+        assert_eq!(
+            t.notes
+                .iter()
+                .map(|n| (n.midi, n.start, n.end))
+                .collect::<Vec<_>>(),
+            vec![(60, 0., 520.), (59, 520., 560.), (60, 560., 960.)]
+        );
+    }
+    #[test]
+    fn rolls_sort_chord_pitches_and_leave_tied_members_held() {
+        let (mut s, a) = fixture();
+        s.parts[0].measures[0].notes[0].pitches = vec![
+            Pitch::from_midi(67),
+            Pitch::from_midi(60),
+            Pitch::from_midi(64),
+        ];
+        s.notation.ornaments.push(Ornament::new(a, K::ArpeggioDown));
+        let t = Timeline::new(&s).unwrap();
+        assert_eq!(
+            t.notes
+                .iter()
+                .map(|n| (n.midi, n.start, n.end))
+                .collect::<Vec<_>>(),
+            vec![(67, 0., 480.), (64, 40., 480.), (60, 80., 480.)]
+        );
+        let mut continuation = s.parts[0].measures[0].notes[0].clone();
+        continuation.start = 480;
+        continuation.tied = false;
+        s.parts[0].measures[0].notes[0].tied = true;
+        s.parts[0].measures[0].notes.push(continuation);
+        s.notation.ornaments[0].anchor.tick = 480;
+        let t = Timeline::new(&s).unwrap();
+        assert!(t.notes.iter().all(|n| n.start == 0. && n.end == 960.));
+    }
+    #[test]
+    fn grace_and_repeat_decoration_share_midi_and_procedural_plan() {
+        let (mut s, a) = fixture();
+        let mut grace = GraceGroup::new(
+            a,
+            vec![GraceNote::new(Pitch::from_midi(72), Duration::Sixteenth)],
+        );
+        grace.percent = 25.;
+        grace.timing = GraceTiming::StealMain;
+        s.notation.grace.push(grace);
+        s.notation.ornaments.push(Ornament::new(a, K::UpperMordent));
+        s.notation.repeats.push(crate::repeats::RepeatRegion {
+            start: 0,
+            end: 0,
+            times: 2,
+            endings: vec![],
+        });
+        let t = Timeline::new(&s).unwrap();
+        assert_eq!(t.notes[0].midi, 72);
+        assert_eq!(t.notes[1].start, 120.);
+        assert!(t.notes.iter().any(|n| n.midi == 62 && n.start == 160.));
+        assert!(t.notes.iter().any(|n| n.midi == 62 && n.start == 2080.));
+        let midi = crate::export::midi(&s);
+        assert!(midi.windows(3).any(|b| b == [0x90, 62, 80]));
+        let audio = crate::synth::render_dry(&s);
+        assert!(!audio.is_empty());
+        assert!(audio.iter().all(|n| n.is_finite()));
+    }
+    #[test]
+    fn disabled_marks_and_non_arpeggiate_preserve_legacy_path() {
+        let (mut s, a) = fixture();
+        let mut mark = Ornament::new(a, K::Turn);
+        mark.playback = false;
+        s.notation.ornaments.push(mark);
+        assert!(!needed(&s));
+        let baseline = crate::synth::render_dry(&s);
+        s.notation.ornaments.clear();
+        assert_eq!(baseline, crate::synth::render_dry(&s));
+    }
+    #[test]
+    fn ornament_generated_sostenuto_reattacks_are_rejected_before_backend_divergence() {
+        let (mut s, a) = fixture();
+        s.notation.ornaments.push(Ornament::new(a, K::Mordent));
+        s.notation.lines.push(crate::lines::PerformanceLine::new(
+            a,
+            Anchor { tick: 960, ..a },
+            LineKind::Pedal {
+                kind: PedalKind::Sostenuto,
+            },
+        ));
+        s.validate().unwrap();
+        assert!(
+            Timeline::new(&s)
+                .unwrap_err()
+                .contains("captured performed pitch")
+        );
+        s.notation.ornaments[0].kind = K::Turn;
+        assert!(Timeline::new(&s).is_ok());
+    }
+    #[test]
+    fn a_roll_does_not_hide_a_later_ornament_on_its_tied_pitch() {
+        let (mut s, a) = fixture();
+        let first = &mut s.parts[0].measures[0].notes[0];
+        first.pitches = vec![
+            Pitch::from_midi(60),
+            Pitch::from_midi(64),
+            Pitch::from_midi(67),
+        ];
+        first.tied = true;
+        let mut continuation = first.clone();
+        continuation.start = 480;
+        continuation.pitches = vec![Pitch::from_midi(60)];
+        continuation.tied = false;
+        s.parts[0].measures[0].notes.push(continuation);
+        s.notation.ornaments.push(Ornament::new(a, K::ArpeggioDown));
+        s.notation
+            .ornaments
+            .push(Ornament::new(Anchor { tick: 480, ..a }, K::Mordent));
+        let t = Timeline::new(&s).unwrap();
+        assert!(
+            t.notes
+                .iter()
+                .any(|n| n.midi == 59 && n.start == 520. && n.end == 560.)
+        );
+        assert!(t.notes.iter().any(|n| n.midi == 60 && n.start == 80.));
+    }
+    #[test]
+    fn an_ornament_on_a_tied_continuation_uses_current_dynamics_and_technique() {
+        let (mut s, a) = fixture();
+        s.parts[0].instrument = Instrument::Violin;
+        s.parts[0].measures[0].notes[0].tied = true;
+        let mut n = s.parts[0].measures[0].notes[0].clone();
+        n.start = 480;
+        n.tied = false;
+        n.velocity = 110;
+        s.parts[0].measures[0].notes.push(n);
+        let at = Anchor { tick: 480, ..a };
+        s.notation.ornaments.push(Ornament::new(at, K::Turn));
+        let mut technique = crate::expressions::Expression::text(at, "pizz.");
+        technique.kind = ExpressionKind::Technique;
+        s.notation.expressions.push(technique);
+        let t = Timeline::new(&s).unwrap();
+        assert_eq!(t.notes[0].instrument, Instrument::Violin);
+        assert!(
+            t.notes
+                .iter()
+                .filter(|n| n.start >= 480.)
+                .all(|n| n.velocity == 110 && n.instrument.gm_program() == 45)
+        );
+        assert_eq!(t.notes.last().unwrap().end, 960.);
     }
 }

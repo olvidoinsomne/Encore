@@ -187,6 +187,9 @@ impl EncoreApp {
     }
 
     pub(super) fn edit_entry(&mut self, edit: impl FnOnce(&mut Note)) -> bool {
+        if !self.allow_source_edit() {
+            return false;
+        }
         let Some(s) = self.selected else { return false };
         let old_anchor = encore::document::Anchor::from_selection(&self.score, s);
         let bar_ticks = self.score.measure_ticks();

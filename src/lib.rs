@@ -14,6 +14,7 @@ pub mod layout;
 pub mod lines;
 pub mod lyrics;
 pub mod model;
+pub mod ornaments;
 pub mod parts;
 pub mod performance;
 pub mod repeats;
