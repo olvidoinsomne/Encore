@@ -5,7 +5,7 @@
 //! tuned membrane modes. The extended GM catalog uses family approximations in
 //! this explicitly selected procedural engine. No sound bank or asset is used.
 
-use crate::model::{Instrument, Note, PPQ, Score};
+use crate::model::{Instrument, PPQ, Score};
 use rodio::{OutputStream, OutputStreamBuilder, Sink, buffer::SamplesBuffer};
 use std::{
     collections::HashSet,
@@ -20,16 +20,17 @@ pub const MAX_RENDER_SECONDS: f32 = 600.0;
 const TAIL_SECONDS: f32 = 1.8;
 const TABLE_SIZE: usize = 4096;
 
-/// Written score length, excluding the reverberation/release tail.
+/// Performed score length, including repeats and excluding the release tail.
 pub fn duration_seconds(score: &Score) -> f32 {
-    score.measure_count() as f32 * score.measure_ticks() as f32 / PPQ as f32 * 60.0
+    if !score.notation.tempo.is_empty() {
+        return crate::expressions::TempoMap::new(score)
+            .map_or(f32::INFINITY, |map| map.duration_seconds() as f32);
+    }
+    let Ok(order) = crate::repeats::playback_order(score) else {
+        return f32::INFINITY;
+    };
+    order.len() as f32 * score.measure_ticks() as f32 / PPQ as f32 * 60.0
         / score.tempo.max(1) as f32
-}
-
-#[derive(Clone, Copy)]
-struct Event<'a> {
-    tick: u64,
-    note: &'a Note,
 }
 
 /// Render the entire score to interleaved stereo samples at 44.1 kHz.
@@ -41,29 +42,33 @@ pub fn render(score: &Score) -> Vec<f32> {
 
 /// Dry procedural rendering before the shared room and output limiter.
 pub(crate) fn render_dry(score: &Score) -> Vec<f32> {
+    if crate::performance::active_percussion(score) {
+        return Vec::new();
+    }
+    if crate::performance::needed(score) {
+        return render_decorated(score);
+    }
     let seconds = duration_seconds(score);
     if !seconds.is_finite() || seconds > MAX_RENDER_SECONDS {
         return Vec::new();
     }
     let mut output = vec![0.0; ((seconds + TAIL_SECONDS) * SAMPLE_RATE as f32).ceil() as usize * 2];
     let seconds_per_tick = 60.0 / (score.tempo.max(1) as f32 * PPQ as f32);
-    let ticks_per_measure = score.measure_ticks() as u64;
+    let Ok(order) = crate::repeats::playback_order(score) else {
+        return Vec::new();
+    };
+    let tempo_map = (!score.notation.tempo.is_empty())
+        .then(|| crate::expressions::TempoMap::new(score).ok())
+        .flatten();
+    let expression_map = crate::expressions::ExpressionMap::new(score);
+    let style_index = crate::entry_style::Index::new(score);
     let any_solo = score.parts.iter().any(|p| p.solo && !p.muted);
 
     for (part_index, part) in score.parts.iter().enumerate() {
         if part.muted || (any_solo && !part.solo) || part.volume <= 0.0 {
             continue;
         }
-        let mut events = Vec::new();
-        for (measure_index, measure) in part.measures.iter().enumerate() {
-            for note in &measure.notes {
-                events.push(Event {
-                    tick: measure_index as u64 * ticks_per_measure + note.start as u64,
-                    note,
-                });
-            }
-        }
-        events.sort_by_key(|e| e.tick);
+        let events = crate::repeats::events(part, score.measure_ticks(), &order);
         let mut consumed = HashSet::new();
         let pan = finite_clamp(part.pan, -1.0, 1.0, 0.0);
         let volume = finite_clamp(part.volume, 0.0, 2.0, 0.8);
@@ -80,14 +85,31 @@ pub(crate) fn render_dry(score: &Score) -> Vec<f32> {
                 let mut last_note = event.note;
                 let mut current_index = index;
                 // Ties join each matching pitch independently, including across barlines.
-                while last_note.tied {
+                while style_index.ties_forward(
+                    &crate::document::Anchor {
+                        voice: last_note.voice,
+                        part: part_index,
+                        measure: events[current_index].measure,
+                        tick: last_note.start,
+                        layer: last_note.layer,
+                    },
+                    last_note,
+                    midi,
+                ) {
                     let next = events
                         .iter()
                         .enumerate()
                         .skip(current_index + 1)
                         .take_while(|(_, e)| e.tick <= end)
                         .find(|(_, e)| {
-                            e.tick == end && e.note.pitches.iter().any(|p| p.midi() == midi)
+                            e.tick == end
+                                && e.note.lane() == event.note.lane()
+                                && crate::repeats::written_adjacent(
+                                    &events[current_index],
+                                    e,
+                                    score.measure_ticks(),
+                                )
+                                && e.note.pitches.iter().any(|p| p.midi() == midi)
                         });
                     let Some((next_index, next_event)) = next else {
                         break;
@@ -99,21 +121,51 @@ pub(crate) fn render_dry(score: &Score) -> Vec<f32> {
                     last_note = next_event.note;
                     current_index = next_index;
                 }
-                let last_shortening = if last_note.staccato {
-                    last_note.ticks() as f32 * 0.52
-                } else {
-                    0.0
-                };
-                let held_ticks = ((end - event.tick) as f32 - last_shortening).max(1.0);
+                let last_shortening =
+                    last_note.ticks() as f32 * last_note.playback_shortening() as f32;
+                let following = events
+                    .iter()
+                    .skip(current_index + 1)
+                    .find(|next| next.note.lane() == event.note.lane() && next.tick >= end);
+                let overlap = crate::repeats::legato_extension(
+                    score,
+                    part_index,
+                    &events[current_index],
+                    following,
+                );
+                let held_ticks =
+                    ((end - event.tick) as f32 - last_shortening + overlap as f32).max(1.0);
                 let voice = synth_voice_seeded(
                     part.instrument,
                     midi,
-                    event.note.velocity,
-                    held_ticks * seconds_per_tick,
-                    event.tick ^ (part_index as u64 + 1).wrapping_mul(0x517C_C1B7_2722_0A95),
+                    expression_map.velocity(
+                        crate::document::Anchor {
+                            voice: event.note.voice,
+                            part: part_index,
+                            measure: event.measure,
+                            tick: event.note.start,
+                            layer: event.note.layer,
+                        },
+                        event.note,
+                    ),
+                    tempo_map
+                        .as_ref()
+                        .map_or(held_ticks * seconds_per_tick, |map| {
+                            (map.seconds_at_tick(event.tick as f64 + f64::from(held_ticks))
+                                - map.seconds_at_tick(event.tick as f64))
+                                as f32
+                        }),
+                    event.tick
+                        ^ (part_index as u64 + 1).wrapping_mul(0x517C_C1B7_2722_0A95)
+                        ^ u64::from(event.note.layer).wrapping_mul(0x9e37_79b9_7f4a_7c15),
                 );
-                let offset =
-                    (event.tick as f32 * seconds_per_tick * SAMPLE_RATE as f32).round() as usize;
+                let offset = tempo_map.as_ref().map_or_else(
+                    || (event.tick as f32 * seconds_per_tick * SAMPLE_RATE as f32).round() as usize,
+                    |map| {
+                        (map.seconds_at_tick(event.tick as f64) * f64::from(SAMPLE_RATE)).round()
+                            as usize
+                    },
+                );
                 for (frame, sample) in voice.iter().enumerate() {
                     let target = (offset + frame) * 2;
                     if target + 1 >= output.len() {
@@ -123,6 +175,96 @@ pub(crate) fn render_dry(score: &Score) -> Vec<f32> {
                     output[target + 1] += sample * right;
                 }
             }
+        }
+    }
+    output
+}
+
+fn render_decorated(score: &Score) -> Vec<f32> {
+    let seconds = duration_seconds(score);
+    if !seconds.is_finite() || seconds > MAX_RENDER_SECONDS {
+        return Vec::new();
+    }
+    let Ok(timeline) = crate::performance::Timeline::new(score) else {
+        return Vec::new();
+    };
+    render_decorated_with(score, &timeline)
+}
+pub(crate) fn render_decorated_with(
+    score: &Score,
+    timeline: &crate::performance::Timeline,
+) -> Vec<f32> {
+    let seconds = duration_seconds(score);
+    if !seconds.is_finite() || seconds > MAX_RENDER_SECONDS {
+        return Vec::new();
+    }
+    let mut output = vec![0.0; ((seconds + TAIL_SECONDS) * SAMPLE_RATE as f32).ceil() as usize * 2];
+    let mut envelopes = std::collections::BTreeMap::<(usize, u8), Vec<(usize, f32)>>::new();
+    for c in &timeline.controls {
+        if c.controller == 11 {
+            envelopes.entry((c.part, c.layer)).or_default().push((
+                (timeline.seconds(c.tick) * f64::from(SAMPLE_RATE)).round() as usize,
+                f32::from(c.value) / 127.0,
+            ));
+        }
+    }
+    let solo = score.parts.iter().any(|p| p.solo && !p.muted);
+    for note in &timeline.notes {
+        let part = &score.parts[note.anchor.part];
+        if part.muted || (solo && !part.solo) || part.volume <= 0.0 || note.velocity == 0 {
+            continue;
+        }
+        let start = timeline.seconds(note.start);
+        let duration = (timeline.seconds(note.sounding_end) - start).max(0.0001) as f32;
+        let mut voice = synth_voice_seeded(
+            note.instrument,
+            note.midi,
+            note.velocity,
+            duration,
+            note.start as u64
+                ^ (note.anchor.part as u64 + 1).wrapping_mul(0x517C_C1B7_2722_0A95)
+                ^ u64::from(note.layer).wrapping_mul(0x9e37_79b9_7f4a_7c15),
+        );
+        // These remain explicit DSP approximations; sampled playback selects the
+        // actual GM recordings. Make each recognized technique audible here too.
+        let mut low = 0.0_f32;
+        for (i, sample) in voice.iter_mut().enumerate() {
+            let t = i as f32 / SAMPLE_RATE as f32;
+            match note.instrument.gm_program() {
+                44 => *sample *= 0.65 + 0.35 * (TAU * 8.0 * t).sin(),
+                32 => *sample *= (-4.5 * t).exp(),
+                59 => {
+                    low += 0.06 * (*sample - low);
+                    *sample = (*sample - low) * 1.15;
+                }
+                _ => {}
+            }
+        }
+        let offset = (start * f64::from(SAMPLE_RATE)).round() as usize;
+        let angle = (finite_clamp(part.pan, -1.0, 1.0, 0.0) + 1.0) * FRAC_PI_2 * 0.5;
+        let volume = finite_clamp(part.volume, 0.0, 2.0, 0.8);
+        let left = angle.cos() * volume;
+        let right = angle.sin() * volume;
+        let controls = envelopes.get(&(note.anchor.part, note.layer));
+        let mut index =
+            controls.map_or(0, |values| values.partition_point(|(at, _)| *at <= offset));
+        let mut gain = controls
+            .and_then(|values| index.checked_sub(1).map(|i| values[i].1))
+            .unwrap_or(1.0);
+        for (frame, sample) in voice.iter().enumerate() {
+            let at = offset + frame;
+            if let Some(values) = controls {
+                while index < values.len() && values[index].0 <= at {
+                    gain = values[index].1;
+                    index += 1;
+                }
+            }
+            let target = at * 2;
+            if target + 1 >= output.len() {
+                break;
+            }
+            output[target] += sample * left * gain;
+            output[target + 1] += sample * right * gain;
         }
     }
     output
@@ -943,6 +1085,20 @@ impl Playback {
     pub fn position_seconds(&self) -> f32 {
         self.sink.get_pos().as_secs_f32()
     }
+    /// Seek within the buffered render, retaining the current paused state.
+    pub fn seek_seconds(&self, seconds: f32) -> Result<(), String> {
+        if !seconds.is_finite() || seconds < 0.0 {
+            return Err("Seek position must be a finite nonnegative number.".into());
+        }
+        if self.sink.empty() {
+            return Err("Render a score before seeking.".into());
+        }
+        let position = std::time::Duration::try_from_secs_f32(seconds)
+            .map_err(|_| "Seek position exceeds the supported duration.".to_string())?;
+        self.sink
+            .try_seek(position)
+            .map_err(|e| format!("Could not seek playback: {e}"))
+    }
     pub fn set_volume(&mut self, volume: f32) {
         self.volume = finite_clamp(volume, 0.0, 2.0, 0.8);
         self.sink.set_volume(self.volume);
@@ -952,7 +1108,7 @@ impl Playback {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Duration, Pitch};
+    use crate::model::{Duration, Note, Pitch};
 
     fn one_note() -> Score {
         let mut score = Score::blank();
@@ -960,9 +1116,14 @@ mod tests {
         score.parts.truncate(1);
         score.parts[0].measures.truncate(1);
         score.parts[0].measures[0].notes = vec![Note {
+            voice: 0,
+            voice_launch: None,
+            articulations: Vec::new(),
             start: 0,
             duration: Duration::Quarter,
             dotted: false,
+            tuplet: None,
+            layer: 0,
             pitches: vec![Pitch::from_midi(60)],
             velocity: 100,
             staccato: false,
@@ -983,6 +1144,35 @@ mod tests {
             assert!(samples.iter().any(|s| s.abs() > 0.01), "{instrument:?}");
             assert_eq!(samples[samples.len() - 1], 0.0);
         }
+    }
+
+    #[test]
+    fn articulations_change_procedural_attack_and_sustained_release() {
+        use crate::model::Articulation;
+        let mut score = one_note();
+        score.parts[0].instrument = Instrument::Flute;
+        score.parts[0].measures[0].notes[0].velocity = 80;
+        let ordinary = render_dry(&score);
+        score.parts[0].measures[0].notes[0].articulations = vec![Articulation::Accent];
+        let accented = render_dry(&score);
+        assert_ne!(ordinary, accented);
+        score.parts[0].measures[0].notes[0].articulations = vec![Articulation::Staccatissimo];
+        let detached = render_dry(&score);
+        let energy = |samples: &[f32]| {
+            let start = (0.36 * SAMPLE_RATE as f32) as usize * 2;
+            let end = (0.44 * SAMPLE_RATE as f32) as usize * 2;
+            samples[start..end]
+                .iter()
+                .map(|sample| f64::from(*sample).powi(2))
+                .sum::<f64>()
+        };
+        assert!(energy(&detached) < energy(&ordinary) * 0.05);
+        assert!(
+            accented
+                .iter()
+                .chain(&detached)
+                .all(|sample| sample.is_finite())
+        );
     }
 
     #[test]
@@ -1248,5 +1438,90 @@ mod tests {
             let tail = &samples[samples.len() - SAMPLE_RATE as usize / 50..];
             assert!(rms(tail) < rms(&samples) * 0.02, "{instrument:?}");
         }
+    }
+    #[test]
+    fn three_tied_triplet_eighths_render_like_one_quarter_note() {
+        let mut triplets = one_note();
+        triplets.parts[0].instrument = Instrument::Flute;
+        let mut value = triplets.parts[0].measures[0].notes[0].clone();
+        value.duration = Duration::Eighth;
+        value.tuplet = Some(crate::model::Tuplet::TRIPLET);
+        triplets.parts[0].measures[0].notes = (0..3)
+            .map(|index| {
+                let mut next = value.clone();
+                next.start = index * 160;
+                next.tied = index < 2;
+                next
+            })
+            .collect();
+        let mut quarter = triplets.clone();
+        quarter.parts[0].measures[0].notes.truncate(1);
+        let first = &mut quarter.parts[0].measures[0].notes[0];
+        first.duration = Duration::Quarter;
+        first.tuplet = None;
+        first.tied = false;
+        assert_eq!(render(&triplets), render(&quarter));
+    }
+    #[test]
+    fn performed_repeats_match_an_expanded_procedural_score_exactly() {
+        let mut score = one_note();
+        score.parts[0].measures.resize(2, Default::default());
+        let mut next = score.parts[0].measures[0].notes[0].clone();
+        next.pitches = vec![Pitch::from_midi(64)];
+        score.parts[0].measures[1].notes.push(next);
+        score
+            .notation
+            .repeats
+            .push(crate::repeats::RepeatRegion::simple(0, 1));
+        let mut expanded = score.clone();
+        expanded.notation.repeats.clear();
+        expanded.parts[0]
+            .measures
+            .extend(score.parts[0].measures.clone());
+        assert_eq!(duration_seconds(&score), duration_seconds(&expanded));
+        assert_eq!(render(&score), render(&expanded));
+    }
+}
+
+#[cfg(test)]
+mod voice_two_tests {
+    use super::*;
+    use crate::model::{Duration, Note, Pitch};
+    #[test]
+    fn ending_secondary_same_pitch_does_not_cut_off_primary_audio() {
+        let mut score = Score::blank();
+        score.tempo = 120;
+        score.parts.truncate(1);
+        score.parts[0].measures.truncate(1);
+        score.parts[0].instrument = Instrument::Piano;
+        let first = Note {
+            layer: 0,
+            voice: 0,
+            voice_launch: None,
+            start: 0,
+            duration: Duration::Whole,
+            dotted: false,
+            tuplet: None,
+            pitches: vec![Pitch::from_midi(60)],
+            velocity: 80,
+            staccato: false,
+            tied: false,
+            articulations: vec![],
+        };
+        score.parts[0].measures[0].notes = vec![first.clone()];
+        let primary = render_dry(&score);
+        let mut secondary = first;
+        secondary.voice = 1;
+        secondary.voice_launch = Some(0);
+        secondary.duration = Duration::Half;
+        score.parts[0].measures[0].notes.push(secondary);
+        let both = render_dry(&score);
+        assert_eq!(primary.len(), both.len());
+        let before = (0.9 * SAMPLE_RATE as f32) as usize * 2;
+        assert_ne!(primary[..before], both[..before]);
+        let after = (1.5 * SAMPLE_RATE as f32) as usize * 2;
+        let end = (1.9 * SAMPLE_RATE as f32) as usize * 2;
+        assert_eq!(primary[after..end], both[after..end]);
+        assert!(both[after..end].iter().any(|v| v.abs() > 0.0001));
     }
 }

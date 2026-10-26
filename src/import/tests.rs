@@ -61,32 +61,46 @@ fn independent_musicxml_preserves_staff_voice_chord_and_playback_data() {
             score.measure_count(),
             score.parts.len()
         ),
-        (96, 2, 2, 3)
+        (96, 2, 2, 2)
     );
     let rh = &score.parts[0];
+    let rh_notes = rh.measures[0]
+        .notes
+        .iter()
+        .filter(|note| note.layer == 0)
+        .collect::<Vec<_>>();
     assert_eq!(rh.instrument, Instrument::Piano);
     assert_eq!(rh.volume, 0.75);
     assert_eq!(rh.pan, -0.2);
     assert_eq!(
-        rh.measures[0].notes[0]
+        rh_notes[0]
             .pitches
             .iter()
             .map(|p| p.midi())
             .collect::<Vec<_>>(),
         vec![60, 64]
     );
-    assert_eq!(rh.measures[0].notes[0].velocity, 90);
-    assert!(rh.measures[0].notes[0].staccato);
-    assert_eq!(rh.measures[0].notes[1].start, 480);
-    assert_eq!(rh.measures[0].notes[1].ticks(), 720);
-    assert_eq!(rh.measures[0].notes[1].pitches[0].alter, 1);
-    assert_eq!(rh.measures[0].notes[1].velocity, 48);
-    assert!(rh.measures[0].notes[2].pitches.is_empty());
-    assert!(rh.measures[0].notes[3].tied);
+    assert_eq!(rh_notes[0].velocity, 90);
+    assert!(rh_notes[0].staccato);
+    assert_eq!(rh_notes[1].start, 480);
+    assert_eq!(rh_notes[1].ticks(), 720);
+    assert_eq!(rh_notes[1].pitches[0].alter, 1);
+    assert_eq!(rh_notes[1].velocity, 48);
+    assert!(rh_notes[2].pitches.is_empty());
+    assert!(rh_notes[3].tied);
     assert!(!rh.measures[1].notes[0].tied);
-    assert_eq!(score.parts[1].measures[0].notes[0].pitches[0].midi(), 55);
-    assert_eq!(score.parts[2].clef, Clef::Bass);
-    assert_eq!(score.parts[2].measures[0].notes[0].pitches[0].midi(), 40);
+    assert_eq!(
+        rh.measures[0]
+            .notes
+            .iter()
+            .find(|note| note.layer == 1)
+            .unwrap()
+            .pitches[0]
+            .midi(),
+        55
+    );
+    assert_eq!(score.parts[1].clef, Clef::Bass);
+    assert_eq!(score.parts[1].measures[0].notes[0].pitches[0].midi(), 40);
     assert!(
         imported
             .warnings
@@ -108,27 +122,41 @@ fn independent_musescore_preserves_voices_spelling_ties_and_mixer() {
             score.measure_count(),
             score.parts.len()
         ),
-        (90, -1, 2, 3)
+        (90, -1, 2, 2)
     );
     let rh = &score.parts[0];
+    let rh_notes = rh.measures[0]
+        .notes
+        .iter()
+        .filter(|note| note.layer == 0)
+        .collect::<Vec<_>>();
     assert_eq!(
-        rh.measures[0].notes[0].pitches[1],
+        rh_notes[0].pitches[1],
         Pitch {
             step: Step::E,
             octave: 4,
             alter: -1
         }
     );
-    assert!(rh.measures[0].notes[0].tied);
-    assert!(rh.measures[0].notes[0].staccato);
-    assert!(!rh.measures[0].notes[1].tied);
-    assert_eq!(rh.measures[0].notes[1].ticks(), 1440);
-    assert_eq!(rh.measures[0].notes[0].velocity, 48);
+    assert!(rh_notes[0].tied);
+    assert!(rh_notes[0].staccato);
+    assert!(!rh_notes[1].tied);
+    assert_eq!(rh_notes[1].ticks(), 1440);
+    assert_eq!(rh_notes[0].velocity, 48);
     assert!((rh.volume - 100.0 / 127.0).abs() < 0.00001);
     assert!((rh.pan + 16.0 / 63.0).abs() < 0.00001);
-    assert_eq!(score.parts[1].measures[0].notes[0].pitches[0].midi(), 48);
-    assert_eq!(score.parts[2].clef, Clef::Bass);
-    assert!(score.parts[2].measures[0].notes[0].pitches.is_empty());
+    assert_eq!(
+        rh.measures[0]
+            .notes
+            .iter()
+            .find(|note| note.layer == 1)
+            .unwrap()
+            .pitches[0]
+            .midi(),
+        48
+    );
+    assert_eq!(score.parts[1].clef, Clef::Bass);
+    assert!(score.parts[1].measures[0].notes[0].pitches.is_empty());
 }
 
 #[test]
@@ -278,25 +306,25 @@ fn unsupported_rhythms_never_round_or_drop_notes_silently() {
     let tuplet = simple_xml(
         "<note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><time-modification><actual-notes>3</actual-notes><normal-notes>2</normal-notes></time-modification></note>",
     );
-    assert!(musicxml(&tuplet).unwrap_err().contains("tuplets"));
-    let unquantized = simple_xml("<note><rest/><duration>0.5</duration></note>");
+    assert!(
+        musicxml(&tuplet)
+            .unwrap_err()
+            .contains("explicit note type")
+    );
+    let unquantized = simple_xml("<note><rest/><duration>0.51</duration></note>");
     assert!(
         musicxml(&unquantized)
             .unwrap_err()
-            .contains("cannot be represented exactly")
+            .contains("not exactly representable")
     );
     let mut notes = Vec::new();
     assert!(push_event(&mut notes, 0, 160, vec![], 64, false, false).is_err());
     assert!(notes.is_empty());
     let muse = MUSESCORE.replace(
         "<durationType>quarter</durationType>",
-        "<durationType>32nd</durationType>",
+        "<durationType>256th</durationType>",
     );
-    assert!(
-        musescore(&muse)
-            .unwrap_err()
-            .contains("shorter than a sixteenth")
-    );
+    assert!(musescore(&muse).unwrap_err().contains("through 128th"));
 }
 
 #[test]
@@ -399,27 +427,46 @@ fn hostile_numbers_return_errors_instead_of_overflowing() {
 
 #[test]
 fn excess_voices_are_rejected_before_allocating_measure_grids() {
-    let voices = (1..=65).map(|voice| format!("<note><rest/><duration>4</duration><voice>{voice}</voice></note><backup><duration>4</duration></backup>")).collect::<String>();
+    let voices = (1..=8).map(|voice| format!("<note><rest/><duration>4</duration><voice>{voice}</voice></note><backup><duration>4</duration></backup>")).collect::<String>();
+    let accepted = musicxml(&simple_xml(&voices)).unwrap().score;
+    assert_eq!(
+        accepted.parts[0].measures[0]
+            .notes
+            .iter()
+            .map(|note| note.lane())
+            .collect::<Vec<_>>(),
+        vec![0, 4, 1, 5, 2, 6, 3, 7]
+    );
+    let voices = voices + "<note><rest/><duration>4</duration><voice>9</voice></note>";
     let error = musicxml(&simple_xml(&voices)).unwrap_err();
-    assert!(error.contains("64-staff limit"));
+    assert!(error.contains("eight independent voices"));
     let xml = format!(
         "<museScore version='4.30'><Score><Staff id='1'><Measure>{}</Measure></Staff></Score></museScore>",
         "<voice><Rest><durationType>whole</durationType></Rest></voice>".repeat(65)
     );
-    assert!(musescore(&xml).unwrap_err().contains("64-staff limit"));
+    assert!(
+        musescore(&xml)
+            .unwrap_err()
+            .contains("four independent voices")
+    );
 }
 
 #[test]
-fn partially_tied_chords_fail_without_converting_to_wrong_ties() {
+fn partially_tied_musicxml_chords_preserve_exact_pitch_ties() {
     let music = MUSICXML.replace(
         "<note dynamics=\"100\"><chord/>",
         "<note dynamics=\"100\"><tie type='start'/><chord/>",
     );
-    assert!(
-        musicxml(&music)
-            .unwrap_err()
-            .contains("partially tied chords")
-    );
+    let score = musicxml(&music).unwrap().score;
+    let anchor = crate::document::Anchor {
+        voice: 0,
+        part: 0,
+        measure: 0,
+        tick: 0,
+        layer: 0,
+    };
+    assert!(!crate::entry_style::ties_forward(&score, &anchor, 60));
+    assert!(crate::entry_style::ties_forward(&score, &anchor, 64));
     let muse = MUSESCORE.replacen("<pitch>60</pitch><tpc>14</tpc><Spanner type=\"Tie\"><next><location><fractions>1/4</fractions></location></next></Spanner>", "<pitch>60</pitch><tpc>14</tpc>", 1);
     assert!(
         musescore(&muse)
@@ -458,16 +505,24 @@ fn optional_upstream_musescore_fixture_preserves_every_sounding_pitch() {
 }
 
 #[test]
-fn transparent_warnings_cover_layout_expression_and_repeat_losses() {
+fn transparent_warnings_cover_expression_losses_while_repeats_are_retained() {
     let xml = MUSICXML.replace("<measure number=\"2\">", "<measure number=\"2\"><direction><sound tempo='120'/></direction><attributes><key><fifths>-2</fifths></key></attributes><barline><repeat direction='backward'/></barline>");
     let imported = musicxml(&xml).unwrap();
     assert_eq!(imported.score.tempo, 96);
     assert_eq!(imported.score.key_fifths, 2);
     assert!(
         imported
+            .score
+            .notation
+            .tempo
+            .iter()
+            .any(|change| change.at.measure == 1 && change.bpm == 120)
+    );
+    assert!(
+        !imported
             .warnings
             .iter()
-            .any(|w| w.contains("Tempo changes"))
+            .any(|warning| warning.contains("Tempo changes"))
     );
     assert!(
         imported
@@ -475,7 +530,9 @@ fn transparent_warnings_cover_layout_expression_and_repeat_losses() {
             .iter()
             .any(|w| w.contains("Key signature changes"))
     );
-    assert!(imported.warnings.iter().any(|w| w.contains("play once")));
+    assert_eq!(imported.score.notation.repeats.len(), 1);
+    assert_eq!(imported.score.playback_order().unwrap(), vec![0, 1, 0, 1]);
+    assert!(!imported.warnings.iter().any(|w| w.contains("play once")));
 }
 
 #[test]
@@ -560,4 +617,185 @@ fn exact_duration_decomposition_preserves_chord_ties() {
     assert!(!notes.last().unwrap().tied);
     assert!(!notes[0].staccato);
     assert!(notes.last().unwrap().staccato);
+}
+
+#[test]
+fn musicxml_tuplets_and_short_values_preserve_notation_and_round_trip() {
+    use crate::model::{Duration, Tuplet};
+    let notes = (0..3).map(|index| format!("<note><pitch><step>{}</step><octave>4</octave></pitch><duration>160</duration><type>eighth</type><time-modification><actual-notes>3</actual-notes><normal-notes>2</normal-notes></time-modification></note>", ["C", "D", "E"][index])).collect::<String>();
+    let xml = simple_xml(&notes).replace("<divisions>4</divisions>", "<divisions>480</divisions>");
+    let imported = musicxml(&xml).unwrap().score;
+    let notes = &imported.parts[0].measures[0].notes;
+    assert_eq!(notes.len(), 3);
+    for (index, note) in notes.iter().enumerate() {
+        assert_eq!((note.start, note.ticks()), (index as u32 * 160, 160));
+        assert_eq!(note.duration, Duration::Eighth);
+        assert_eq!(note.tuplet, Some(Tuplet::TRIPLET));
+    }
+    let exported = crate::export::musicxml(&imported);
+    assert_eq!(exported.matches("<tuplet type=\"start\"").count(), 1);
+    assert_eq!(exported.matches("<tuplet type=\"stop\"").count(), 1);
+    let restored = musicxml(&exported).unwrap().score;
+    assert_eq!(&restored.parts[0].measures[0].notes[..3], notes);
+
+    let short_xml = simple_xml("<note><pitch><step>F</step><octave>4</octave></pitch><duration>15</duration><type>128th</type></note>").replace("<divisions>4</divisions>", "<divisions>480</divisions>");
+    let short = musicxml(&short_xml).unwrap().score;
+    assert_eq!(
+        short.parts[0].measures[0].notes[0].duration,
+        Duration::OneTwentyEighth
+    );
+    assert_eq!(short.parts[0].measures[0].notes[0].ticks(), 15);
+}
+
+fn simple_muse(voice: &str, version: &str) -> String {
+    format!(
+        "<museScore version='{version}'><Score><Division>480</Division><Part><Staff id='1'><StaffType group='pitched'/></Staff><Instrument><Channel><program value='0'/></Channel></Instrument></Part><Staff id='1'><Measure><voice><TimeSig><sigN>4</sigN><sigD>4</sigD></TimeSig>{voice}</voice></Measure></Staff></Score></museScore>"
+    )
+}
+
+#[test]
+fn musescore_tuplets_support_modern_markers_and_legacy_identifiers() {
+    use crate::model::{Duration, Tuplet};
+    for legacy in [false, true] {
+        let header = if legacy {
+            "<Tuplet id='7'>"
+        } else {
+            "<Tuplet>"
+        };
+        let marker = if legacy { "<Tuplet>7</Tuplet>" } else { "" };
+        let ending = if legacy { "" } else { "<endTuplet/>" };
+        let chord = format!(
+            "<Chord>{marker}<durationType>eighth</durationType><Note><pitch>60</pitch></Note></Chord>"
+        );
+        let voice = format!(
+            "{header}<normalNotes>2</normalNotes><actualNotes>3</actualNotes><baseNote>eighth</baseNote></Tuplet>{}{ending}<Rest><durationType>128th</durationType></Rest>",
+            chord.repeat(3)
+        );
+        let imported = musescore(&simple_muse(&voice, if legacy { "2.06" } else { "4.30" }))
+            .unwrap()
+            .score;
+        let notes = &imported.parts[0].measures[0].notes;
+        assert_eq!(notes.len(), 4);
+        for (index, note) in notes[..3].iter().enumerate() {
+            assert_eq!((note.start, note.ticks()), (index as u32 * 160, 160));
+            assert_eq!(note.tuplet, Some(Tuplet::TRIPLET));
+            assert_eq!(note.duration, Duration::Eighth);
+        }
+        assert_eq!(notes[3].duration, Duration::OneTwentyEighth);
+        assert_eq!(notes[3].ticks(), 15);
+    }
+}
+
+#[test]
+fn malformed_tuplet_metadata_is_rejected_instead_of_guessed() {
+    let inconsistent = simple_xml("<note><rest/><duration>120</duration><type>eighth</type><time-modification><actual-notes>3</actual-notes><normal-notes>2</normal-notes></time-modification></note>").replace("<divisions>4</divisions>", "<divisions>480</divisions>");
+    assert!(musicxml(&inconsistent).unwrap_err().contains("disagree"));
+    let missing = simple_muse(
+        "<Chord><Tuplet>9</Tuplet><durationType>eighth</durationType><Note><pitch>60</pitch></Note></Chord>",
+        "4.30",
+    );
+    assert!(musescore(&missing).unwrap_err().contains("missing tuplet"));
+    let nested = simple_muse(
+        "<Tuplet><actualNotes>3</actualNotes><normalNotes>2</normalNotes></Tuplet><Tuplet><actualNotes>3</actualNotes><normalNotes>2</normalNotes></Tuplet>",
+        "4.30",
+    );
+    assert!(musescore(&nested).unwrap_err().contains("nested"));
+}
+
+#[test]
+fn musicxml_round_trip_keeps_four_layers_and_independent_tuplet_timing() {
+    use crate::model::{Duration, Note, Tuplet};
+    let mut score = Score::blank();
+    score.parts.truncate(1);
+    score.parts[0].measures.truncate(1);
+    score.parts[0].measures[0].notes = (0..4)
+        .map(|layer| Note {
+            voice: 0,
+            voice_launch: None,
+            articulations: Vec::new(),
+            layer,
+            start: 0,
+            duration: Duration::Whole,
+            dotted: false,
+            tuplet: None,
+            pitches: vec![Pitch::from_midi(60 + layer)],
+            velocity: 80,
+            staccato: false,
+            tied: false,
+        })
+        .collect();
+    score.parts[0].measures[0].notes[0].duration = Duration::Eighth;
+    score.parts[0].measures[0].notes[0].tuplet = Some(Tuplet::TRIPLET);
+    for index in 1..3 {
+        let mut note = score.parts[0].measures[0].notes[0].clone();
+        note.start = index * 160;
+        score.parts[0].measures[0].notes.push(note);
+    }
+    score.normalize();
+    let xml = crate::export::musicxml(&score);
+    assert_eq!(xml.matches("<backup>").count(), 3);
+    for layer in 1..=4 {
+        assert!(xml.contains(&format!("<voice>{layer}</voice>")));
+    }
+    let restored = musicxml(&xml).unwrap().score;
+    assert_eq!(restored.parts.len(), 1);
+    let pitched = restored.parts[0].measures[0]
+        .notes
+        .iter()
+        .filter(|note| !note.pitches.is_empty())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        pitched,
+        score.parts[0].measures[0].notes.iter().collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn musescore_preserves_four_voices_on_one_staff() {
+    let voices = (0..4)
+        .map(|layer| {
+            format!(
+                "<Chord><durationType>whole</durationType><Note><pitch>{}</pitch></Note></Chord>",
+                60 + layer
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("</voice><voice>");
+    let score = musescore(&simple_muse(&voices, "4.30")).unwrap().score;
+    assert_eq!(score.parts.len(), 1);
+    let notes = &score.parts[0].measures[0].notes;
+    assert_eq!(notes.len(), 4);
+    for (layer, note) in notes.iter().enumerate() {
+        assert_eq!(note.layer, layer as u8);
+        assert_eq!(note.pitches[0].midi(), 60 + layer as u8);
+        assert_eq!((note.start, note.ticks()), (0, 1920));
+    }
+}
+
+#[test]
+fn musicxml_retains_declared_empty_grand_staff() {
+    let xml = simple_xml(
+        "<attributes><staves>2</staves><clef number='2'><sign>F</sign><line>4</line></clef></attributes><note><pitch><step>C</step><octave>4</octave></pitch><duration>4</duration></note>",
+    );
+    let score = musicxml(&xml).unwrap().score;
+    assert_eq!(score.parts.len(), 2);
+    assert_eq!(score.parts[1].clef, Clef::Bass);
+    assert!(score.parts[1].measures[0].notes.is_empty());
+    let invalid = xml.replace("<staves>2</staves>", "<staves>65</staves>");
+    assert!(musicxml(&invalid).unwrap_err().contains("64-staff"));
+}
+
+#[test]
+fn dotted_128th_triplet_uses_combined_exact_arithmetic_on_import() {
+    let muse = simple_muse(
+        "<Tuplet><normalNotes>2</normalNotes><actualNotes>3</actualNotes><baseNote>128th</baseNote></Tuplet><Chord><durationType>128th</durationType><dots>1</dots><Note><pitch>60</pitch></Note></Chord><endTuplet/>",
+        "4.30",
+    );
+    let score = musescore(&muse).unwrap().score;
+    assert_eq!(score.parts[0].measures[0].notes[0].ticks(), 15);
+    let restored = musicxml(&crate::export::musicxml(&score)).unwrap().score;
+    assert_eq!(
+        restored.parts[0].measures[0].notes[0],
+        score.parts[0].measures[0].notes[0]
+    );
 }

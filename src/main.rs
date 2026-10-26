@@ -1,6 +1,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+mod midi_options;
+mod shortcuts;
 
 use encore::{audio::AudioEngine, engraving, export, model::Score, synth};
 use std::{
@@ -140,14 +142,18 @@ fn cli(parsed: &Arguments) -> Result<(), String> {
         "--help" | "-h" if args.len() == 1 => {
             println!(concat!(
                 "Encore — original Rust music notation and synthesis\n\n",
-                "encore [SCORE]                        Open Encore/MusicXML/MuseScore/Finale MUSX\n",
+                "encore [SCORE]                        Open Encore/MusicXML/MuseScore/Finale/MIDI\n",
                 "encore --demo OUTPUT_DIR             Export First Light in all formats\n",
                 "encore --demo-carol OUTPUT_DIR       Export Carol of the Bells — Epic\n",
                 "encore --demo-all OUTPUT_DIR         Export both demos\n",
                 "encore --compare-carol OUTPUT_DIR    Export procedural/sampled WAV comparisons\n",
                 "encore --export INPUT OUTPUT         Export .pdf/.svg/.musicxml/.mid/.wav\n",
+                "encore --parts INPUT OUTPUT_DIR      Export all linked parts as PDF\n",
+                "encore --extract-part INPUT PART OUTPUT  Extract linked part by ID or 1-based number\n",
                 "encore --import INPUT OUTPUT.encore   Import a score into an Encore project\n",
-                "encore --validate INPUT              Validate a native score\n",
+                "encore --import-midi INPUT OUTPUT.encore --quantize 16th\n",
+                "                                    Import performance MIDI on a chosen grid\n",
+                "encore --validate INPUT              Validate an importable score\n",
                 "encore --audio-check                 Test the audio output device\n",
                 "encore --instruments OUTPUT_DIR      Render an audition WAV per instrument\n\n",
                 "CLI audio options (place anywhere in a command):\n",
@@ -208,6 +214,29 @@ fn cli(parsed: &Arguments) -> Result<(), String> {
                 export_to(&score, path)
             }
         }
+        "--extract-part" if args.len() == 4 => {
+            let score = load_score(Path::new(&args[1]))?;
+            let output = Path::new(&args[3]);
+            let written = output
+                .extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|e| e.eq_ignore_ascii_case("pdf") || e.eq_ignore_ascii_case("svg"));
+            let part = extract_part_score(&score, &args[2], written)?;
+            let engine = if is_wav(output) {
+                selected_engine(&parsed.backend)?
+            } else {
+                AudioEngine::Procedural
+            };
+            export_to_with_engine(&part, output, &engine)?;
+            println!("Extracted {} → {}", part.title, output.display());
+            Ok(())
+        }
+        "--parts" if args.len() == 3 => {
+            let score = load_score(Path::new(&args[1]))?;
+            let paths = encore::parts::export_pdf_parts(&score, Path::new(&args[2]))?;
+            println!("Exported {} linked parts to {}", paths.len(), args[2]);
+            Ok(())
+        }
         "--import" if args.len() == 3 => {
             let output = Path::new(&args[2]);
             if !output
@@ -227,6 +256,28 @@ fn cli(parsed: &Arguments) -> Result<(), String> {
                 output.display(),
                 score.parts.len(),
                 score.measure_count()
+            );
+            Ok(())
+        }
+        "--import-midi" if args.len() == 5 && args[3] == "--quantize" => {
+            let grid = midi_options::parse_grid(&args[4])?;
+            let output = Path::new(&args[2]);
+            if !output
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("encore"))
+            {
+                return Err("Import output must use the .encore extension.".into());
+            }
+            let imported = encore::import::load_midi_quantized(Path::new(&args[1]), grid)?;
+            for warning in &imported.warnings {
+                eprintln!("Import note: {warning}");
+            }
+            imported.score.save(output)?;
+            println!(
+                "Imported {} → {} with explicit {} quantization",
+                args[1],
+                output.display(),
+                args[4]
             );
             Ok(())
         }
@@ -279,6 +330,22 @@ fn cli(parsed: &Arguments) -> Result<(), String> {
         }
         _ => Err("Invalid arguments. Use --help for usage.".into()),
     }
+}
+
+fn extract_part_score(score: &Score, identifier: &str, written: bool) -> Result<Score, String> {
+    let definitions = encore::parts::definitions(score);
+    let definition = definitions
+        .iter()
+        .find(|p| p.id == identifier)
+        .or_else(|| {
+            identifier
+                .parse::<usize>()
+                .ok()
+                .and_then(|index| index.checked_sub(1))
+                .and_then(|index| definitions.get(index))
+        })
+        .ok_or("Choose an existing linked-part ID or a 1-based part number.")?;
+    encore::parts::extract(score, definition, written)
 }
 
 fn compare_carol(dir: &Path, sampled: &AudioEngine) -> Result<(), String> {
@@ -358,6 +425,15 @@ pub(crate) fn export_to_with_engine(
     path: &Path,
     engine: &AudioEngine,
 ) -> Result<(), String> {
+    export_to_with_layout(score, path, engine, None)
+}
+
+pub(crate) fn export_to_with_layout(
+    score: &Score,
+    path: &Path,
+    engine: &AudioEngine,
+    layout: Option<encore::parts::PartLayout>,
+) -> Result<(), String> {
     score.validate()?;
     let ext = path
         .extension()
@@ -367,10 +443,16 @@ pub(crate) fn export_to_with_engine(
     let data = match ext.as_str() {
         "encore" | "json" => return score.save(path),
         "musicxml" | "xml" => export::musicxml(score).into_bytes(),
-        "mid" | "midi" => export::midi(score),
+        "mid" | "midi" => export::midi(score)?,
         "wav" => synth::wav(&engine.render(score)?),
         "pdf" | "svg" => {
-            let pages = engraving::engrave(score, &Default::default());
+            let pages = engraving::engrave(
+                score,
+                &encore::engraving::EngravingOptions {
+                    layout,
+                    ..Default::default()
+                },
+            );
             if ext == "pdf" {
                 engraving::pdf(&pages)
             } else {
@@ -475,5 +557,61 @@ mod cli_tests {
                 .command,
             strings(&["score.encore"])
         );
+    }
+}
+
+#[cfg(test)]
+mod extraction_tests {
+    use super::*;
+    use encore::{
+        model::*,
+        parts::{ChordFilter, StaffVoicing},
+    };
+    #[test]
+    fn cli_part_selection_exports_filtered_concert_or_written_music_without_changing_source() {
+        let mut score = Score::blank();
+        score.parts[0].instrument = Instrument::Clarinet;
+        score.parts[0].measures[0].notes.push(Note {
+            layer: 0,
+            voice: 0,
+            voice_launch: None,
+            start: 0,
+            duration: Duration::Quarter,
+            dotted: false,
+            tuplet: None,
+            pitches: vec![
+                Pitch::from_midi(64),
+                Pitch::from_midi(60),
+                Pitch::from_midi(67),
+            ],
+            velocity: 80,
+            staccato: false,
+            articulations: vec![],
+            tied: false,
+        });
+        let mut definition = encore::parts::default_definitions(&score)[0].clone();
+        definition.voicing = vec![StaffVoicing {
+            chord: ChordFilter::Highest,
+            ..StaffVoicing::new(0)
+        }];
+        let id = definition.id.clone();
+        score.notation.parts = vec![definition];
+        let before = score.clone();
+        let concert = extract_part_score(&score, &id, false).unwrap();
+        let written = extract_part_score(&score, "1", true).unwrap();
+        assert_eq!(
+            concert.parts[0].measures[0].notes[0]
+                .pitches
+                .iter()
+                .map(|p| p.midi())
+                .collect::<Vec<_>>(),
+            vec![67]
+        );
+        assert_eq!(written.parts[0].measures[0].notes[0].pitches[0].midi(), 69);
+        assert!(extract_part_score(&score, "0", false).is_err());
+        assert!(extract_part_score(&score, "missing", false).is_err());
+        assert_eq!(score, before);
+        concert.validate().unwrap();
+        written.validate().unwrap();
     }
 }

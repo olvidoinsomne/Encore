@@ -1,7 +1,12 @@
+use super::annotations::{Annotations, SourceAnchor};
 use super::{
-    ImportResult, Warnings, child, finish_parts, initial_score, number, push_event, text, value,
+    ImportResult, Warnings, child, finish_parts, initial_score, number, push_event,
+    push_rhythmic_event, text, value,
 };
-use crate::model::{Clef, Instrument, MAX_MEASURES, MAX_PARTS, Measure, PPQ, Part, Pitch, Step};
+use crate::model::{
+    Articulation, Clef, Duration, Instrument, MAX_MEASURES, MAX_PARTS, Measure, Note, PPQ, Part,
+    Pitch, Step, Tuplet,
+};
 use roxmltree::{Document, Node};
 use std::collections::BTreeMap;
 
@@ -11,6 +16,7 @@ struct PartInfo {
     instrument: Instrument,
     volume: f32,
     pan: f32,
+    drums: super::percussion::Instruments,
 }
 
 #[derive(Clone)]
@@ -20,7 +26,10 @@ struct Event {
     pitches: Vec<Pitch>,
     velocity: u8,
     staccato: bool,
+    articulations: Vec<Articulation>,
     tied: bool,
+    rhythm: Option<(Duration, bool, Option<Tuplet>)>,
+    voice_launch: Option<u32>,
 }
 
 pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
@@ -39,7 +48,7 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
         .unwrap_or_default();
     let mut score = initial_score(title, composer);
     let mut warnings = Warnings::default();
-    warnings.add("Encore re-engraves imported music; original page layout, fonts, beams, and custom engraving are not retained.");
+    warnings.add("Encore re-engraves imported music; original page layout, fonts, and unsupported engraving are not retained.");
     let mut infos = BTreeMap::new();
     if let Some(list) = child(root, "part-list") {
         for definition in list.children().filter(|n| n.has_tag_name("score-part")) {
@@ -52,9 +61,7 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
                 .attribute("id")
                 .ok_or("MusicXML score-part has no id.")?;
             let midi = child(definition, "midi-instrument");
-            if midi.is_some_and(|n| child(n, "midi-unpitched").is_some()) {
-                return Err("Unpitched percussion maps are not supported yet. Pitched percussion such as timpani can be imported.".into());
-            }
+            let drums = super::percussion::Instruments::xml(definition)?;
             let program = midi
                 .map(|n| number::<u16>(n, "midi-program"))
                 .transpose()?
@@ -75,14 +82,27 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
                     .copied()
                     .find(|instrument| instrument.name().eq_ignore_ascii_case(instrument_name));
                 let instrument = inferred.unwrap_or(Instrument::Piano);
-                warnings.add(format!("Part {id} has no MIDI program; {} was {}. Confirm its instrument in the mixer.", instrument.name(), if inferred.is_some() { "inferred from its name" } else { "selected as a fallback" }));
+                if !drums.unpitched
+                    && !root
+                        .children()
+                        .filter(|node| {
+                            node.has_tag_name("part") && node.attribute("id") == Some(id)
+                        })
+                        .any(|part| {
+                            part.descendants()
+                                .any(|node| node.has_tag_name("unpitched"))
+                        })
+                {
+                    warnings.add(format!("Part {id} has no MIDI program; {} was {}. Confirm its instrument in the mixer.", instrument.name(), if inferred.is_some() { "inferred from its name" } else { "selected as a fallback" }));
+                }
                 instrument
             };
-            if definition
-                .children()
-                .filter(|n| n.has_tag_name("midi-instrument"))
-                .count()
-                > 1
+            if !drums.unpitched
+                && definition
+                    .children()
+                    .filter(|n| n.has_tag_name("midi-instrument"))
+                    .count()
+                    > 1
             {
                 warnings.add("Parts with multiple instrument definitions use their first MIDI instrument for playback.");
             }
@@ -116,6 +136,7 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
                         instrument,
                         volume,
                         pan,
+                        drums,
                     },
                 )
                 .is_some()
@@ -125,10 +146,18 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
         }
     }
     let mut parts = Vec::new();
+    let mut annotation_sets = Vec::new();
+    let mut expression_sets = Vec::new();
+    let mut chord_sets = Vec::new();
+    let mut grace_sets = Vec::new();
+    let mut line_sets = Vec::new();
+    let mut ornament_sets = Vec::new();
+    let mut tremolo_sets = Vec::new();
     let mut initial_meter = None;
     let mut initial_key = None;
     let mut initial_tempo = None;
     let mut seen_parts = Vec::new();
+    let mut group_staves = BTreeMap::new();
     for source in root.children().filter(|n| n.has_tag_name("part")) {
         if parts.len() >= MAX_PARTS {
             return Err(format!("Import exceeds Encore's {MAX_PARTS}-staff limit."));
@@ -138,6 +167,7 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
             return Err("MusicXML has duplicate score parts.".into());
         }
         seen_parts.push(id);
+        let group_first_staff = parts.len();
         let info = infos.get(id).cloned().unwrap_or_else(|| {
             warnings.add("A part without MIDI instrumentation was imported as piano.");
             PartInfo {
@@ -145,6 +175,7 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
                 instrument: Instrument::Piano,
                 volume: 0.8,
                 pan: 0.0,
+                drums: Default::default(),
             }
         });
         let measures: Vec<_> = source
@@ -156,11 +187,49 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
                 "MusicXML part {id} must contain 1–{MAX_MEASURES} measures."
             ));
         }
-        // Staff/voice pairs are independent editable staves in Encore.
+        let mut annotations = Annotations::default();
+        let mut expressions = super::expressions::Expressions::default();
+        let mut chords = super::chords::Chords::default();
+        let mut grace = super::grace::GraceCollector::default();
+        let mut lines = super::lines::Lines::default();
+        let mut ornaments = super::ornaments::Ornaments::default();
+        let mut tremolos = super::tremolos::Tremolos::default();
+        let mut annotation_mapping = BTreeMap::new();
+        let repeat_map = crate::repeats::parse_musicxml(source, measures.len())?;
+        if !repeat_map.is_empty() {
+            if !score.notation.repeats.is_empty() && score.notation.repeats != repeat_map {
+                return Err("MusicXML parts disagree on repeat navigation.".into());
+            }
+            score.notation.repeats = repeat_map;
+        }
+        let navigation = crate::repeats::parse_musicxml_navigation(source, measures.len())?;
+        if !navigation.is_empty() {
+            if !score.notation.navigation.is_empty() && score.notation.navigation != navigation {
+                return Err("MusicXML parts disagree on navigation instructions.".into());
+            }
+            score.notation.navigation = navigation;
+        }
+        // Preserve source staves and map their independent voices into four layers.
         let mut lanes: BTreeMap<(u32, String), Vec<Measure>> = BTreeMap::new();
         let mut clefs = BTreeMap::new();
+        let mut percussion = super::percussion::Xml::new(info.drums.clone());
+        percussion.native(source)?;
+        let percussion_staves: std::collections::BTreeSet<u32> = source
+            .descendants()
+            .filter(|node| node.has_tag_name("note") && child(*node, "unpitched").is_some())
+            .map(|note| number::<u32>(note, "staff").map(|staff| staff.unwrap_or(1)))
+            .collect::<Result<_, _>>()?;
+        for &staff in &percussion_staves {
+            if !percussion.staves.contains_key(&staff) {
+                percussion.declare(staff, 5)?;
+            }
+        }
+
+        let mut declared_staves = 1_u32;
         let mut transpose = BTreeMap::new();
         let mut default_transpose = 0_i16;
+        let mut transpose_diatonic = BTreeMap::new();
+        let mut default_diatonic = None;
         let mut divisions = None;
         let mut velocities = BTreeMap::new();
         let mut part_meter = (4_u8, 4_u8);
@@ -172,6 +241,14 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
             for item in measure.children().filter(|n| n.is_element()) {
                 match item.tag_name().name() {
                     "attributes" => {
+                        if let Some(staves) = number::<u32>(item, "staves")? {
+                            if staves == 0 || staves as usize > MAX_PARTS - parts.len() {
+                                return Err(format!(
+                                    "MusicXML declaration exceeds Encore's {MAX_PARTS}-staff limit."
+                                ));
+                            }
+                            declared_staves = declared_staves.max(staves);
+                        }
                         if let Some(d) = number::<f64>(item, "divisions")? {
                             if !d.is_finite() || d <= 0.0 || d > 1_000_000.0 {
                                 return Err(format!("{context}: invalid MusicXML divisions."));
@@ -216,7 +293,27 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
                             if !(-127..=127).contains(&semitones) {
                                 return Err("MusicXML transposition exceeds MIDI range.".into());
                             }
+                            let diatonic = number::<i16>(transposition, "diatonic")?
+                                .map(|value| {
+                                    value
+                                        .checked_add(
+                                            number::<i16>(transposition, "octave-change")
+                                                .ok()
+                                                .flatten()
+                                                .unwrap_or(0)
+                                                .checked_mul(7)
+                                                .unwrap_or(i16::MAX),
+                                        )
+                                        .ok_or("Invalid diatonic transposition.")
+                                })
+                                .transpose()?;
                             if let Some(staff) = transposition.attribute("number") {
+                                transpose_diatonic.insert(
+                                    staff
+                                        .parse::<u32>()
+                                        .map_err(|_| "Invalid transpose staff number.")?,
+                                    diatonic,
+                                );
                                 transpose.insert(
                                     staff
                                         .parse::<u32>()
@@ -225,6 +322,7 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
                                 );
                             } else {
                                 default_transpose = semitones;
+                                default_diatonic = diatonic;
                             }
                             if semitones != 0 {
                                 warnings.add(
@@ -245,6 +343,16 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
                                 .unwrap_or("1")
                                 .parse::<u32>()
                                 .map_err(|_| "Invalid key staff number.")?;
+                            if percussion_staves.contains(&staff)
+                                || item.children().any(|clef| {
+                                    clef.has_tag_name("clef")
+                                        && value(clef, "sign") == Some("percussion")
+                                        && clef.attribute("number").unwrap_or("1")
+                                            == staff.to_string()
+                                })
+                            {
+                                continue;
+                            }
                             let shift = transpose.get(&staff).copied().unwrap_or(default_transpose);
                             let concert = concert_key(fifths, shift);
                             if let Some(first) = initial_key {
@@ -256,18 +364,53 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
                                 score.key_fifths = concert;
                             }
                         }
+                        for details in item.children().filter(|n| n.has_tag_name("staff-details")) {
+                            let staff = details
+                                .attribute("number")
+                                .unwrap_or("1")
+                                .parse::<u32>()
+                                .map_err(|_| "Invalid staff-details number.")?;
+                            if let Some(lines) = number::<u8>(details, "staff-lines")?
+                                && (percussion.staves.contains_key(&staff)
+                                    || item.children().any(|clef| {
+                                        clef.has_tag_name("clef")
+                                            && value(clef, "sign") == Some("percussion")
+                                            && clef.attribute("number").unwrap_or("1")
+                                                == staff.to_string()
+                                    }))
+                            {
+                                percussion.declare(staff, lines)?;
+                            }
+                        }
                         for clef in item.children().filter(|n| n.has_tag_name("clef")) {
                             let staff = clef
                                 .attribute("number")
                                 .unwrap_or("1")
                                 .parse::<u32>()
                                 .map_err(|_| "Invalid clef staff number.")?;
-                            let parsed = match (value(clef, "sign").unwrap_or("G"), value(clef, "line").unwrap_or("2")) {
+                            let parsed = match (
+                                value(clef, "sign").unwrap_or("G"),
+                                value(clef, "line").unwrap_or("2"),
+                            ) {
                                 ("G", "2") => Clef::Treble,
                                 ("F", "4") => Clef::Bass,
                                 ("C", "3") => Clef::Alto,
-                                ("percussion", _) | ("TAB", _) => return Err("Percussion and tablature staves are not supported by this importer yet.".into()),
-                                _ => { warnings.add("An unsupported clef was replaced by the instrument's default clef; sounding pitches are preserved."); info.instrument.default_clef() }
+                                ("percussion", _) => {
+                                    if !percussion.staves.contains_key(&staff) {
+                                        percussion.declare(staff, 5)?;
+                                    }
+                                    Clef::Treble
+                                }
+                                ("TAB", _) => {
+                                    return Err(
+                                        "Tablature staves are not supported by this importer yet."
+                                            .into(),
+                                    );
+                                }
+                                _ => {
+                                    warnings.add("An unsupported clef was replaced by the instrument's default clef; sounding pitches are preserved.");
+                                    info.instrument.default_clef()
+                                }
                             };
                             if measure_index != 0
                                 && clefs
@@ -297,18 +440,36 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
                         chord_start = None;
                     }
                     "direction" | "sound" => {
-                        if let Some(bpm) = tempo(item)? {
+                        let imported_tempo = tempo(item)?;
+                        if let Some(bpm) = imported_tempo {
                             if !bpm.is_finite() || !(20.0..=400.0).contains(&bpm) {
                                 return Err("Imported tempo must be 20–400 BPM.".into());
                             }
-                            let bpm = bpm.round() as u16;
-                            if initial_tempo.is_some_and(|first| first != bpm) {
-                                warnings.add("Tempo changes are not retained; playback uses the first tempo.");
-                            } else if initial_tempo.is_none() {
-                                initial_tempo = Some(bpm);
-                                score.tempo = bpm;
+                            if initial_tempo.is_none() {
+                                initial_tempo = Some(bpm.round() as u16);
+                                score.tempo = bpm.round() as u16;
                             }
                         }
+                        let offset = number::<f64>(item, "offset")?.unwrap_or(0.0);
+                        let scaled = offset * 480.0 / divisions.unwrap_or(480.0);
+                        if !scaled.is_finite() || (scaled - scaled.round()).abs() > 0.000001 {
+                            return Err("Expression offset is not on Encore's timing grid.".into());
+                        }
+                        let direction_tick = (f64::from(cursor) + scaled).round();
+                        if direction_tick < 0.0 || direction_tick > f64::from(u32::MAX) {
+                            return Err("Expression offset extends outside its measure.".into());
+                        }
+                        expressions.xml(
+                            item,
+                            SourceAnchor {
+                                staff: number::<u32>(item, "staff")?.unwrap_or(1),
+                                voice: value(item, "voice").unwrap_or("1").to_owned(),
+                                measure: measure_index,
+                                tick: direction_tick as u32,
+                            },
+                            imported_tempo.map(|bpm| bpm.round() as u16),
+                            &mut warnings,
+                        )?;
                         let staff = number::<u32>(item, "staff")?.unwrap_or(1);
                         if let Some(dynamic) =
                             item.descendants().find(|n| n.has_tag_name("dynamics"))
@@ -316,28 +477,55 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
                         {
                             velocities.insert(staff, dynamic_velocity(mark.tag_name().name()));
                         }
-                        if item.descendants().any(|n| {
-                            n.has_tag_name("wedge")
-                                || n.has_tag_name("pedal")
-                                || n.has_tag_name("octave-shift")
-                        }) {
-                            warnings.add("Hairpins, pedal marks, and octave lines are not retained; explicit note pitches and written dynamics are imported.");
-                        }
+                        lines.xml(
+                            item,
+                            SourceAnchor {
+                                staff,
+                                voice: value(item, "voice").unwrap_or("1").to_owned(),
+                                measure: measure_index,
+                                tick: direction_tick as u32,
+                            },
+                            &mut warnings,
+                        )?;
                     }
                     "note" => {
                         if child(item, "grace").is_some() {
-                            warnings.add("Grace notes are omitted; main-note timing is preserved.");
+                            let staff = number::<u32>(item, "staff")?.unwrap_or(1);
+                            if staff == 0 || staff > 64 {
+                                return Err("MusicXML grace staff number must be 1–64.".into());
+                            }
+                            let voice = value(item, "voice").unwrap_or("1").to_owned();
+                            if voice.len() > 64 {
+                                return Err("MusicXML grace voice identifier is too long.".into());
+                            }
+                            let shift = transpose.get(&staff).copied().unwrap_or(default_transpose);
+                            let pitch = if let Some(token) = percussion.note(
+                                item,
+                                staff,
+                                clefs.get(&staff).copied().unwrap_or(Clef::Treble),
+                                &mut warnings,
+                            )? {
+                                token
+                            } else {
+                                percussion.pitched(staff)?;
+                                read_pitch(
+                                    child(item, "pitch")
+                                        .ok_or("A grace note needs pitch or unpitched identity.")?,
+                                    shift,
+                                )?
+                            };
+                            grace.xml(
+                                item,
+                                SourceAnchor {
+                                    staff,
+                                    voice,
+                                    measure: measure_index,
+                                    tick: cursor,
+                                },
+                                pitch,
+                                &mut warnings,
+                            )?;
                             continue;
-                        }
-                        if child(item, "unpitched").is_some() {
-                            return Err(format!(
-                                "{context}: unpitched percussion is not supported yet."
-                            ));
-                        }
-                        if child(item, "time-modification").is_some() {
-                            return Err(format!(
-                                "{context}: tuplets are not supported yet. Export a simplified score without tuplets."
-                            ));
                         }
                         let ticks = xml_ticks(item, divisions, &context)?;
                         let chord = child(item, "chord").is_some();
@@ -362,7 +550,15 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
                             return Err("MusicXML voice identifier is too long.".into());
                         }
                         let shift = transpose.get(&staff).copied().unwrap_or(default_transpose);
-                        let pitches = if let Some(pitch) = child(item, "pitch") {
+                        let pitches = if let Some(token) = percussion.note(
+                            item,
+                            staff,
+                            clefs.get(&staff).copied().unwrap_or(Clef::Treble),
+                            &mut warnings,
+                        )? {
+                            vec![token]
+                        } else if let Some(pitch) = child(item, "pitch") {
+                            percussion.pitched(staff)?;
                             vec![read_pitch(pitch, shift)?]
                         } else if child(item, "rest").is_some() {
                             Vec::new()
@@ -380,17 +576,73 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
                         } else {
                             *velocities.get(&staff).unwrap_or(&80)
                         };
-                        let staccato = item
-                            .descendants()
-                            .any(|n| n.has_tag_name("staccato") || n.has_tag_name("staccatissimo"));
+                        let (staccato, articulations) = read_articulations(item, &mut warnings);
                         let tied = item
                             .children()
                             .any(|n| n.has_tag_name("tie") && n.attribute("type") == Some("start"))
                             || item.descendants().any(|n| {
                                 n.has_tag_name("tied") && n.attribute("type") == Some("start")
                             });
+                        let at = SourceAnchor {
+                            staff,
+                            voice: voice.clone(),
+                            measure: measure_index,
+                            tick: start,
+                        };
+                        let paired_tremolo = tremolos.xml(item, at.clone(), &mut warnings)?;
+                        let rhythm = if paired_tremolo {
+                            super::tremolos::paired_rhythm(item, ticks)
+                        } else {
+                            read_rhythm(item, ticks)
+                        }
+                        .map_err(|error| format!("{context}: {error}"))?;
+                        let excluded = if !chord && !pitches.is_empty() {
+                            grace.main(item, at.clone(), &mut warnings)?
+                        } else {
+                            Default::default()
+                        };
+                        annotations.xml_excluding_slurs(
+                            item,
+                            at.clone(),
+                            &mut warnings,
+                            &excluded,
+                        )?;
+                        if child(item, "unpitched").is_some()
+                            && let Some(&pitch) = pitches.first()
+                        {
+                            annotations.percussion_note(&at, pitch, tied);
+                        }
+                        ornaments.xml(item, at.clone(), &mut warnings)?;
+                        lines.xml_note(item, at, divisions.unwrap_or(480.0), &mut warnings)?;
                         let key = (staff, voice);
-                        if !events.contains_key(&key) && events.len() >= MAX_PARTS - parts.len() {
+                        let voice_launch = item
+                            .descendants()
+                            .filter(|element| element.has_tag_name("other-notation"))
+                            .filter_map(|element| element.text())
+                            .find_map(|text| text.strip_prefix("encore-voice-launch:"))
+                            .map(|value| {
+                                value
+                                    .parse::<u32>()
+                                    .map_err(|_| "Invalid Encore voice launch position.")
+                            })
+                            .transpose()?;
+                        if voice_launch.is_some_and(|launch| launch >= score.measure_ticks()) {
+                            return Err("Encore voice launch is outside its measure.".into());
+                        }
+                        if !events.contains_key(&key)
+                            && events
+                                .keys()
+                                .filter(|(source_staff, _)| *source_staff == staff)
+                                .count()
+                                >= 8
+                        {
+                            return Err(format!(
+                                "MusicXML staff {staff} has more than eight independent voices; Encore supports two voices in each of four layers."
+                            ));
+                        }
+                        if !events.contains_key(&key)
+                            && events.len() >= 8 * (MAX_PARTS - parts.len())
+                        {
                             return Err(format!(
                                 "Separating MusicXML voices exceeds Encore's {MAX_PARTS}-staff limit."
                             ));
@@ -398,22 +650,29 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
                         let lane = events.entry(key).or_default();
                         if chord && lane.last().is_some_and(|event| event.start == start) {
                             let prior = lane.last_mut().ok_or("Missing chord event.")?;
-                            if prior.ticks != ticks {
+                            if prior.ticks != ticks || prior.rhythm != rhythm {
                                 return Err(format!(
                                     "{context}: chords with unequal note lengths are not supported yet."
                                 ));
                             }
-                            if prior.tied != tied {
-                                return Err(format!(
-                                    "{context}: partially tied chords are not supported yet; separate those pitches into voices before importing."
-                                ));
+                            prior.tied |= tied;
+                            if voice_launch.is_some() && voice_launch != prior.voice_launch {
+                                return Err("Chord tones disagree on their Voice 2 launch.".into());
                             }
                             if prior.pitches.is_empty() || pitches.is_empty() {
                                 return Err("A rest cannot be a member of a chord.".into());
                             }
                             prior.pitches.extend(pitches);
-                            if prior.velocity != velocity || prior.staccato != staccato {
-                                warnings.add("Different dynamics or articulations within a chord use the chord's first note settings.");
+                            if prior.velocity != velocity {
+                                warnings.add("Different dynamics within a chord use the chord's first note velocity.");
+                            }
+                            // MusicXML commonly writes a chord's marking on only
+                            // one constituent note. Retain markings from any tone.
+                            prior.staccato |= staccato;
+                            for articulation in articulations {
+                                if !prior.articulations.contains(&articulation) {
+                                    prior.articulations.push(articulation);
+                                }
                             }
                         } else {
                             lane.push(Event {
@@ -422,29 +681,73 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
                                 pitches,
                                 velocity,
                                 staccato,
+                                articulations,
                                 tied,
+                                rhythm,
+                                voice_launch,
                             });
                         }
                         if item.descendants().any(|n| {
-                            n.has_tag_name("lyric")
-                                || n.has_tag_name("slur")
-                                || n.has_tag_name("ornaments")
-                                || n.has_tag_name("technical")
+                            n.has_tag_name("technical")
+                                || (n.has_tag_name("ornaments")
+                                    && n.children().filter(|child| child.is_element()).any(
+                                        |child| {
+                                            !matches!(
+                                                child.tag_name().name(),
+                                                "trill-mark"
+                                                    | "wavy-line"
+                                                    | "turn"
+                                                    | "inverted-turn"
+                                                    | "delayed-turn"
+                                                    | "delayed-inverted-turn"
+                                                    | "mordent"
+                                                    | "inverted-mordent"
+                                                    | "accidental-mark"
+                                                    | "tremolo"
+                                            )
+                                        },
+                                    ))
                         }) {
-                            warnings.add("Lyrics, slurs, ornaments, and playing instructions are not retained in the editable score.");
+                            warnings.add("Unsupported ornaments and playing instructions are not retained in the editable score.");
                         }
                     }
-                    "barline" => {
-                        if item
-                            .descendants()
-                            .any(|n| n.has_tag_name("repeat") || n.has_tag_name("ending"))
+                    "barline" => (),
+                    "harmony" => {
+                        let offset = number::<f64>(item, "offset")?.unwrap_or(0.0) * 480.0
+                            / divisions.unwrap_or(480.0);
+                        let position = f64::from(cursor) + offset;
+                        if !position.is_finite()
+                            || position < 0.0
+                            || position > f64::from(u32::MAX)
+                            || (position - position.round()).abs() > 0.000001
                         {
-                            warnings.add("Repeats and alternate endings are imported in written order and play once.");
+                            return Err(
+                                "Chord harmony offset is outside the measure timing grid.".into()
+                            );
                         }
+                        let staff = number::<u32>(item, "staff")?.unwrap_or(1);
+                        if staff == 0 || staff > 64 {
+                            return Err("MusicXML harmony staff number must be 1–64.".into());
+                        }
+                        let interval = super::chords::concert_interval(
+                            transpose.get(&staff).copied().unwrap_or(default_transpose),
+                            transpose_diatonic
+                                .get(&staff)
+                                .copied()
+                                .unwrap_or(default_diatonic),
+                        )?;
+                        chords.xml(
+                            item,
+                            staff,
+                            measure_index,
+                            position as u32,
+                            interval,
+                            &mut warnings,
+                        )?;
                     }
-                    "harmony" | "figured-bass" => warnings.add(
-                        "Chord symbols and figured bass are not retained in the editable score.",
-                    ),
+                    "figured-bass" => {
+                        warnings.add("Figured bass is not retained in the editable score.")
+                    }
                     "print" | "bookmark" | "link" => (),
                     _ => (),
                 }
@@ -468,13 +771,28 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
             } else {
                 0
             };
+            annotations.shift(measure_index, pickup_shift);
+            expressions.shift(measure_index, pickup_shift);
+            chords.shift(measure_index, pickup_shift);
+            grace.shift(measure_index, pickup_shift);
+            lines.shift(measure_index, pickup_shift);
+            ornaments.shift(measure_index, pickup_shift);
+            tremolos.shift(measure_index, pickup_shift);
             if extent > measure_ticks {
                 return Err(format!(
                     "{context}: music extends beyond the fixed time signature."
                 ));
             }
             for (key, events) in events {
-                if !lanes.contains_key(&key) && lanes.len() >= MAX_PARTS - parts.len() {
+                if !lanes.contains_key(&key)
+                    && lanes.keys().filter(|(staff, _)| *staff == key.0).count() >= 8
+                {
+                    return Err(format!(
+                        "MusicXML staff {} has more than eight independent voices; Encore supports two voices in each of four layers.",
+                        key.0
+                    ));
+                }
+                if !lanes.contains_key(&key) && lanes.len() >= 8 * (MAX_PARTS - parts.len()) {
                     return Err(format!(
                         "Separating MusicXML voices exceeds Encore's {MAX_PARTS}-staff limit."
                     ));
@@ -483,35 +801,131 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
                     .entry(key)
                     .or_insert_with(|| vec![Measure::default(); measures.len()]);
                 for event in events {
-                    push_event(
-                        &mut measures[measure_index].notes,
-                        event.start + pickup_shift,
-                        event.ticks,
-                        event.pitches,
-                        event.velocity,
-                        event.staccato,
-                        event.tied,
-                    )
+                    let notes = &mut measures[measure_index].notes;
+                    let first_piece = notes.len();
+                    let launch = event
+                        .voice_launch
+                        .map(|tick| tick.saturating_add(pickup_shift));
+                    if let Some((duration, dotted, tuplet)) = event.rhythm {
+                        push_rhythmic_event(
+                            notes,
+                            Note {
+                                voice: 0,
+                                voice_launch: None,
+                                start: event.start + pickup_shift,
+                                duration,
+                                dotted,
+                                tuplet,
+                                layer: 0,
+                                pitches: event.pitches,
+                                velocity: event.velocity,
+                                staccato: event.staccato,
+                                articulations: event.articulations,
+                                tied: event.tied,
+                            },
+                            event.ticks,
+                        )
+                    } else {
+                        let first_piece = notes.len();
+                        push_event(
+                            notes,
+                            event.start + pickup_shift,
+                            event.ticks,
+                            event.pitches,
+                            event.velocity,
+                            event.staccato,
+                            event.tied,
+                        )
+                        .map(|()| {
+                            decorate_split_event(
+                                &mut notes[first_piece..],
+                                event.articulations,
+                                &mut warnings,
+                            );
+                        })
+                    }
                     .map_err(|e| format!("{context}: {e}"))?;
+                    for note in &mut notes[first_piece..] {
+                        note.voice_launch = launch;
+                    }
                 }
             }
         }
-        if lanes.is_empty() {
-            lanes.insert((1, "1".into()), vec![Measure::default(); measures.len()]);
+        for staff in 1..=declared_staves {
+            if !lanes.keys().any(|(source_staff, _)| *source_staff == staff) {
+                lanes.insert(
+                    (staff, "1".into()),
+                    vec![Measure::default(); measures.len()],
+                );
+            }
         }
-        let split = lanes.len() > 1;
-        if split {
-            warnings
-                .add("Independent staves and voices were separated into editable Encore staves.");
+        let staff_order = lanes
+            .keys()
+            .map(|(staff, _)| *staff)
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let canonical = |label: &str| {
+            label
+                .parse::<u8>()
+                .ok()
+                .filter(|id| (1..=8).contains(id) && id.to_string() == label)
+                .map(|id| id - 1)
+        };
+        let mut reserved = BTreeMap::<u32, usize>::new();
+        for (staff, label) in lanes.keys() {
+            if let Some(lane) = canonical(label) {
+                *reserved.entry(*staff).or_default() |= 1 << lane;
+            }
         }
-        for ((staff, voice), measures) in lanes {
+        let mut staff_layers: BTreeMap<u32, (Vec<Measure>, usize)> = BTreeMap::new();
+        for ((staff, label), measures) in lanes {
+            let (combined, used) = staff_layers
+                .entry(staff)
+                .or_insert_with(|| (vec![Measure::default(); measures.len()], 0));
+            let lane = canonical(&label)
+                .filter(|lane| *used & (1 << lane) == 0)
+                .or_else(|| {
+                    (0..8).find(|lane| {
+                        *used & (1 << lane) == 0
+                            && reserved.get(&staff).copied().unwrap_or(0) & (1 << lane) == 0
+                    })
+                })
+                .ok_or("MusicXML staff exceeds eight distinct source voices.")?;
+            let layer = lane % 4;
+            let voice = lane / 4;
+            annotation_mapping.insert(
+                (staff, label),
+                super::VoiceTarget {
+                    part: parts.len() + staff_order.iter().position(|s| *s == staff).unwrap(),
+                    layer,
+                    voice,
+                },
+            );
+            *used |= 1 << lane;
+            for (destination, source) in combined.iter_mut().zip(measures) {
+                destination
+                    .notes
+                    .extend(source.notes.into_iter().map(|mut note| {
+                        note.layer = layer;
+                        note.voice = voice;
+                        note
+                    }));
+            }
+        }
+        let split = staff_layers.len() > 1;
+        for (staff, (measures, layer_count)) in staff_layers {
+            if layer_count.count_ones() > 1 {
+                warnings.add("Independent MusicXML voices are preserved in up to eight rhythmic lanes (two voices per layer) on their source staff.");
+            }
             parts.push(Part {
                 name: if split {
-                    format!("{} · staff {staff}, voice {voice}", info.name)
+                    format!("{} · staff {staff}", info.name)
                 } else {
                     info.name.clone()
                 },
                 instrument: info.instrument,
+                percussion: percussion.finish(staff),
                 clef: clefs
                     .get(&staff)
                     .copied()
@@ -523,15 +937,164 @@ pub(super) fn parse(document: &Document<'_>) -> Result<ImportResult, String> {
                 solo: false,
             });
         }
+        group_staves.insert(
+            id.to_owned(),
+            (group_first_staff..parts.len()).collect::<Vec<_>>(),
+        );
+        expression_sets.push((expressions, annotation_mapping.clone()));
+        chord_sets.push((chords, annotation_mapping.clone()));
+        grace_sets.push((grace, annotation_mapping.clone()));
+        line_sets.push((lines, annotation_mapping.clone()));
+        ornament_sets.push((ornaments, annotation_mapping.clone()));
+        tremolo_sets.push((tremolos, annotation_mapping.clone()));
+        annotation_sets.push((annotations, annotation_mapping));
     }
     if initial_tempo.is_none() {
         warnings.add("No explicit tempo was found; playback uses 120 quarter notes per minute. Set the tempo to match your intended performance.");
     }
+    score.parts = parts;
+    score.notation.layout.groups = super::groups::xml(root, &group_staves, &mut warnings)?;
+    for (annotations, mapping) in annotation_sets {
+        annotations.finish(&mut score, &mapping, &mut warnings)?;
+    }
+    for (expressions, mapping) in expression_sets {
+        expressions.resolve(&mut score, &mapping, &mut warnings)?;
+    }
+    for (chords, mapping) in chord_sets {
+        chords.finish(&mut score, &mapping, &mut warnings)?;
+    }
+    for (grace, mapping) in grace_sets {
+        grace.finish(&mut score, &mapping, &mut warnings)?;
+    }
+    for (lines, mapping) in line_sets {
+        lines.resolve(&mut score, &mapping, &mut warnings)?;
+    }
+    for (ornaments, mapping) in ornament_sets {
+        ornaments.finish(&mut score, &mapping, &mut warnings)?;
+    }
+    for (tremolos, mapping) in tremolo_sets {
+        tremolos.finish(&mut score, &mapping)?;
+    }
+    let parts = std::mem::take(&mut score.parts);
     finish_parts(score, parts, warnings)
 }
 
+// MusicXML 4.0: notations/articulations contains distinct staccato and
+// staccatissimo symbols; strong-accent is the vertical (marcato) accent.
+// https://www.w3.org/2021/06/musicxml40/musicxml-reference/elements/articulations/
+fn read_articulations(note: Node<'_, '_>, warnings: &mut Warnings) -> (bool, Vec<Articulation>) {
+    let mut staccato = false;
+    let mut articulations = Vec::new();
+    for container in note
+        .descendants()
+        .filter(|node| node.has_tag_name("articulations"))
+    {
+        for marking in container.children().filter(|node| node.is_element()) {
+            let articulation = match marking.tag_name().name() {
+                "staccato" => {
+                    staccato = true;
+                    continue;
+                }
+                "accent" => Articulation::Accent,
+                "strong-accent" => Articulation::Marcato,
+                "tenuto" => Articulation::Tenuto,
+                "staccatissimo" => Articulation::Staccatissimo,
+                unsupported => {
+                    warnings.add(format!("MusicXML articulation '{unsupported}' is not retained; supported markings on the same note are preserved."));
+                    continue;
+                }
+            };
+            if !articulations.contains(&articulation) {
+                articulations.push(articulation);
+            }
+        }
+    }
+    (staccato, articulations)
+}
+
+/// A multiply-dotted source value may require several tied Encore notes.
+/// Attack markings belong to the first piece; duration markings to the last.
+pub(super) fn decorate_split_event(
+    notes: &mut [Note],
+    articulations: Vec<Articulation>,
+    warnings: &mut Warnings,
+) {
+    let Some(last) = notes.len().checked_sub(1) else {
+        return;
+    };
+    if last > 0 && articulations.contains(&Articulation::Marcato) {
+        warnings.add("Marcato on a split tied duration retains its attack accent; the tie continuation takes precedence over its detached release.");
+    }
+    for articulation in articulations {
+        let index = match articulation {
+            Articulation::Accent | Articulation::Marcato => 0,
+            Articulation::Tenuto | Articulation::Staccatissimo => last,
+        };
+        if !notes[index].articulations.contains(&articulation) {
+            notes[index].articulations.push(articulation);
+        }
+    }
+}
+
+fn read_rhythm(
+    node: Node<'_, '_>,
+    ticks: u32,
+) -> Result<Option<(Duration, bool, Option<Tuplet>)>, String> {
+    if child(node, "rest").is_some_and(|rest| rest.attribute("measure") == Some("yes")) {
+        return Ok(None);
+    }
+    let modification = child(node, "time-modification");
+    let tuplet = modification
+        .map(|modification| {
+            let ratio = Tuplet {
+                actual: number::<u8>(modification, "actual-notes")?
+                    .ok_or("Tuplet is missing its actual-note count.")?,
+                normal: number::<u8>(modification, "normal-notes")?
+                    .ok_or("Tuplet is missing its normal-note count.")?,
+            };
+            ratio.validate()?;
+            Ok::<_, String>(ratio)
+        })
+        .transpose()?;
+    let duration = value(node, "type").and_then(Duration::from_musicxml_type);
+    let dots = node
+        .children()
+        .filter(|child| child.has_tag_name("dot"))
+        .count();
+    if let Some(duration) = duration.filter(|_| dots <= 1) {
+        let rhythm = (duration, dots == 1, tuplet);
+        let probe = Note {
+            voice: 0,
+            voice_launch: None,
+            start: 0,
+            duration,
+            dotted: dots == 1,
+            tuplet,
+            layer: 0,
+            pitches: Vec::new(),
+            velocity: 64,
+            staccato: false,
+            articulations: Vec::new(),
+            tied: false,
+        };
+        if probe.checked_ticks()? != ticks {
+            return Err(
+                "Written note value and tuplet ratio disagree with the MusicXML duration.".into(),
+            );
+        }
+        Ok(Some(rhythm))
+    } else if tuplet.is_some() {
+        Err(
+            "Tuplets require a supported explicit note type and at most one augmentation dot."
+                .into(),
+        )
+    } else {
+        Ok(None)
+    }
+}
+
 fn check_meter((numerator, denominator): (u8, u8)) -> Result<(), String> {
-    if !(1..=32).contains(&numerator) || ![1, 2, 4, 8, 16].contains(&denominator) {
+    if !(1..=32).contains(&numerator) || ![1, 2, 4, 8, 16, 32, 64, 128].contains(&denominator) {
         return Err(
             "Unsupported time signature: Encore supports 1–32 beats over 1, 2, 4, 8, or 16.".into(),
         );
@@ -570,14 +1133,8 @@ fn read_pitch(node: Node<'_, '_>, transpose: i16) -> Result<Pitch, String> {
         _ => return Err("MusicXML pitch step must be C–B.".into()),
     };
     let octave = number::<i8>(node, "octave")?.ok_or("MusicXML pitch is missing an octave.")?;
-    let alter = number::<f32>(node, "alter")?.unwrap_or(0.0);
-    if !alter.is_finite() || alter.fract() != 0.0 || !(-2.0..=2.0).contains(&alter) {
-        return Err(
-            "Microtonal pitches and accidentals beyond double sharps/flats are not supported yet."
-                .into(),
-        );
-    }
-    let midi = (i16::from(octave) + 1) * 12 + step.semitone() as i16 + alter as i16 + transpose;
+    let alter = super::pitch_alter(node)?;
+    let midi = (i16::from(octave) + 1) * 12 + step.semitone() as i16 + i16::from(alter) + transpose;
     if !(0..=127).contains(&midi) {
         return Err("Imported pitch lies outside MIDI range 0–127.".into());
     }
@@ -585,7 +1142,7 @@ fn read_pitch(node: Node<'_, '_>, transpose: i16) -> Result<Pitch, String> {
         Ok(Pitch {
             step,
             octave,
-            alter: alter as i8,
+            alter,
         })
     } else {
         Ok(Pitch::from_midi(midi as u8))
@@ -636,6 +1193,112 @@ fn tempo(node: Node<'_, '_>) -> Result<Option<f64>, String> {
     Ok(None)
 }
 
+#[cfg(test)]
+mod harmony_tests {
+    use super::*;
+    use crate::model::Score;
+    use crate::{
+        chords::{self, ChordSymbol},
+        document::Anchor,
+        grace::{GraceGroup, GraceNote},
+        lines::{LineKind, PerformanceLine},
+    };
+    fn read(body: &str) -> ImportResult {
+        let xml = format!(
+            "<score-partwise><part-list><score-part id='p'><part-name>Clarinet</part-name></score-part></part-list><part id='p'><measure><attributes><divisions>4</divisions><time><beats>4</beats><beat-type>4</beat-type></time><transpose><diatonic>-1</diatonic><chromatic>-2</chromatic></transpose></attributes>{body}</measure></part></score-partwise>"
+        );
+        parse(&Document::parse(&xml).unwrap()).unwrap()
+    }
+    #[test]
+    fn harmony_cursor_offsets_and_written_spelling_convert_to_concert() {
+        let imported = read(
+            "<forward><duration>2</duration></forward><harmony><root><root-step>D</root-step></root><kind text='7'>dominant</kind><bass><bass-step>F</bass-step><bass-alter>1</bass-alter></bass><offset>2</offset></harmony><note><pitch><step>D</step><octave>4</octave></pitch><duration>4</duration><type>quarter</type></note>",
+        );
+        let symbol = &imported.score.notation.chords[0];
+        assert_eq!(symbol.anchor.tick, 480);
+        assert_eq!(symbol.anchor.layer, 0);
+        assert_eq!(symbol.chord.label(), "C7/E");
+    }
+    #[test]
+    fn standard_xml_export_import_retains_chords_frames_grace_and_lines() {
+        let mut score = Score::demo();
+        let at = Anchor {
+            voice: 0,
+            part: 2,
+            measure: 0,
+            tick: 0,
+            layer: 0,
+        };
+        let mut chord = ChordSymbol::new(
+            Anchor { tick: 240, ..at },
+            chords::parse("C7(b9)/E").unwrap(),
+        );
+        chord.fretboard = Some(chords::Fretboard::guitar(vec![
+            None,
+            Some(3),
+            Some(2),
+            Some(3),
+            Some(2),
+            Some(0),
+        ]));
+        score.notation.chords.push(chord.clone());
+        score.notation.grace.push(GraceGroup::new(
+            at,
+            vec![GraceNote::new(Pitch::from_midi(64), Duration::Sixteenth)],
+        ));
+        score.notation.lines.push(PerformanceLine::new(
+            at,
+            Anchor { measure: 1, ..at },
+            LineKind::Ottava { semitones: 12 },
+        ));
+        score.validate().unwrap();
+        let xml = crate::export::musicxml(&score);
+        let imported = parse(
+            &Document::parse_with_options(
+                &xml,
+                roxmltree::ParsingOptions {
+                    allow_dtd: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(imported.score.notation.chords[0].chord, chord.chord);
+        assert_eq!(imported.score.notation.chords[0].anchor, chord.anchor);
+        assert_eq!(
+            imported.score.notation.chords[0]
+                .fretboard
+                .as_ref()
+                .unwrap()
+                .frets,
+            chord.fretboard.unwrap().frets
+        );
+        assert_eq!(
+            imported.score.notation.grace[0].notes[0].pitches[0].midi(),
+            64
+        );
+        assert_eq!(
+            imported.score.notation.lines[0].kind,
+            LineKind::Ottava { semitones: 12 }
+        );
+        assert_eq!(imported.score.notation.lines[0].start, at);
+    }
+    #[test]
+    fn malformed_harmony_is_reported_without_inventing_a_major_triad() {
+        let imported = read(
+            "<harmony><root><root-step>D</root-step></root></harmony><note><rest/><duration>16</duration><type>whole</type></note>",
+        );
+        assert!(imported.score.notation.chords.is_empty());
+        assert!(
+            imported
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("required kind"))
+        );
+    }
+}
+
 pub(super) fn dynamic_velocity(name: &str) -> u8 {
     match name {
         "pppp" | "ppp" => 28,
@@ -648,5 +1311,194 @@ pub(super) fn dynamic_velocity(name: &str) -> u8 {
         "fff" | "ffff" => 125,
         "sfz" | "sffz" | "fp" => 104,
         _ => 80,
+    }
+}
+
+#[cfg(test)]
+mod articulation_tests {
+    use super::*;
+
+    fn import(notes: &str) -> ImportResult {
+        let xml = format!(
+            "<score-partwise><part-list><score-part id='P1'><part-name>Piano</part-name></score-part></part-list><part id='P1'><measure number='1'><attributes><divisions>4</divisions><time><beats>4</beats><beat-type>4</beat-type></time></attributes>{notes}</measure></part></score-partwise>"
+        );
+        let document = Document::parse(&xml).unwrap();
+        parse(&document).unwrap()
+    }
+
+    #[test]
+    fn chord_markings_are_unioned_deduplicated_and_unknown_markings_warn() {
+        let imported = import(
+            "<note><pitch><step>C</step><octave>4</octave></pitch><duration>4</duration><type>quarter</type><notations><articulations><accent/><accent/><strong-accent/><staccato/><falloff/></articulations></notations></note>
+             <note><chord/><pitch><step>E</step><octave>4</octave></pitch><duration>4</duration><type>quarter</type><notations><articulations><tenuto/><accent/></articulations></notations></note>
+             <note><pitch><step>D</step><octave>4</octave></pitch><duration>4</duration><type>quarter</type><notations><articulations><staccatissimo/></articulations></notations></note>",
+        );
+        let notes = &imported.score.parts[0].measures[0].notes;
+        assert_eq!(notes[0].pitches.len(), 2);
+        assert!(notes[0].staccato);
+        assert_eq!(
+            notes[0].articulations,
+            vec![
+                Articulation::Accent,
+                Articulation::Marcato,
+                Articulation::Tenuto
+            ]
+        );
+        assert!(
+            !notes[1].staccato,
+            "staccatissimo must retain its own symbol"
+        );
+        assert_eq!(notes[1].articulations, vec![Articulation::Staccatissimo]);
+        assert!(
+            imported
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("'falloff'"))
+        );
+        assert!(
+            !imported
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("'accent'"))
+        );
+    }
+
+    #[test]
+    fn split_written_value_keeps_attack_and_release_markings_on_correct_pieces() {
+        let imported = import(
+            "<note><pitch><step>C</step><octave>4</octave></pitch><duration>7</duration><type>quarter</type><dot/><dot/><notations><articulations><accent/><tenuto/><staccatissimo/></articulations></notations></note>",
+        );
+        let notes = &imported.score.parts[0].measures[0].notes;
+        assert_eq!(notes.len(), 2);
+        assert_eq!(notes.iter().map(Note::ticks).sum::<u32>(), 840);
+        assert_eq!(notes[0].articulations, vec![Articulation::Accent]);
+        assert!(notes[0].tied);
+        assert_eq!(
+            notes[1].articulations,
+            vec![Articulation::Tenuto, Articulation::Staccatissimo]
+        );
+        assert!(!notes[1].tied);
+    }
+}
+
+#[cfg(test)]
+mod secondary_voice_tests {
+    use super::*;
+    use crate::{
+        document::Anchor,
+        entry_style::{self, AccidentalDisplay, AccidentalOverride, EntryStyle},
+        grace::{GraceGroup, GraceNote},
+        lines::{LineKind, PerformanceLine},
+        lyrics::{self, Lyric},
+        model::Score,
+        slurs::{self, Slur},
+    };
+    fn read(body: &str) -> Result<ImportResult, String> {
+        let xml = format!(
+            "<score-partwise><part-list><score-part id='p'><part-name>Piano</part-name></score-part></part-list><part id='p'><measure><attributes><divisions>480</divisions><time><beats>4</beats><beat-type>4</beat-type></time></attributes>{body}</measure></part></score-partwise>"
+        );
+        parse(&super::super::parse_xml(&xml)?)
+    }
+    #[test]
+    fn arbitrary_voice_names_are_deterministic_without_stealing_canonical_lanes() {
+        let imported=read("<note><rest/><duration>480</duration><voice>alto</voice></note><backup><duration>480</duration></backup><note><rest/><duration>480</duration><voice>5</voice></note><backup><duration>480</duration></backup><note><rest/><duration>480</duration><voice>1</voice></note>").unwrap();
+        assert_eq!(
+            imported.score.parts[0].measures[0]
+                .notes
+                .iter()
+                .map(|note| note.lane())
+                .collect::<Vec<_>>(),
+            vec![0, 4, 1]
+        );
+    }
+    #[test]
+    fn secondary_voice_xml_roundtrip_keeps_launches_and_voice_local_annotations() {
+        let mut source = Score::blank();
+        source.parts.truncate(1);
+        source.parts[0].measures.truncate(1);
+        let mut primary = Score::demo().parts[0].measures[0].notes[0].clone();
+        primary.duration = Duration::Whole;
+        primary.start = 0;
+        primary.layer = 0;
+        primary.voice = 0;
+        primary.voice_launch = None;
+        primary.pitches = vec![Pitch::from_midi(60)];
+        primary.tied = false;
+        primary.dotted = false;
+        let mut secondary = primary.clone();
+        secondary.duration = Duration::Quarter;
+        secondary.voice = 1;
+        secondary.voice_launch = Some(0);
+        secondary.pitches = vec![Pitch::from_midi(64)];
+        let mut next = secondary.clone();
+        next.start = 480;
+        next.pitches = vec![Pitch::from_midi(67)];
+        source.parts[0].measures[0].notes = vec![primary, secondary, next];
+        let at = Anchor {
+            part: 0,
+            measure: 0,
+            tick: 0,
+            layer: 0,
+            voice: 1,
+        };
+        lyrics::assign(&mut source, Lyric::new(at, "lower")).unwrap();
+        slurs::add(&mut source, Slur::new(at, Anchor { tick: 480, ..at })).unwrap();
+        source.notation.grace.push(GraceGroup::new(
+            at,
+            vec![GraceNote::new(Pitch::from_midi(69), Duration::Sixteenth)],
+        ));
+        let mut style = EntryStyle::new(at);
+        style.accidentals.push(AccidentalOverride {
+            pitch: 64,
+            display: AccidentalDisplay::Show,
+        });
+        entry_style::assign(&mut source, style).unwrap();
+        source.notation.lines.push(PerformanceLine::new(
+            at,
+            Anchor { tick: 480, ..at },
+            LineKind::Glissando,
+        ));
+        source.validate().unwrap();
+        let xml = crate::export::musicxml(&source);
+        assert!(xml.contains("<voice>5</voice>"));
+        assert!(xml.contains("encore-voice-launch:0"));
+        let imported = parse(&super::super::parse_xml(&xml).unwrap())
+            .unwrap()
+            .score;
+        let notes = &imported.parts[0].measures[0].notes;
+        assert_eq!(notes.iter().filter(|note| note.voice == 1).count(), 2);
+        assert!(
+            notes
+                .iter()
+                .filter(|note| note.voice == 1)
+                .all(|note| note.voice_launch == Some(0))
+        );
+        assert_eq!(imported.notation.lyrics[0].anchor, at);
+        assert_eq!(imported.notation.slurs[0].start, at);
+        assert_eq!(imported.notation.grace[0].anchor, at);
+        assert_eq!(imported.notation.entries[0].anchor, at);
+        assert_eq!(imported.notation.lines[0].start, at);
+    }
+    #[test]
+    fn paired_voice_slurs_can_reuse_a_number_without_cross_binding() {
+        let lane = |voice: u8, step: &str| {
+            format!(
+                "<note><pitch><step>{step}</step><octave>4</octave></pitch><duration>480</duration><voice>{voice}</voice><notations><slur number='1' type='start'/></notations></note><note><pitch><step>{step}</step><octave>4</octave></pitch><duration>480</duration><voice>{voice}</voice><notations><slur number='1' type='stop'/></notations></note>"
+            )
+        };
+        let imported =
+            read(&(lane(1, "C") + "<backup><duration>960</duration></backup>" + &lane(5, "E")))
+                .unwrap();
+        assert_eq!(imported.score.notation.slurs.len(), 2);
+        assert_eq!(
+            imported
+                .score
+                .notation
+                .slurs
+                .iter()
+                .map(|slur| slur.start.voice)
+                .collect::<Vec<_>>(),
+            vec![0, 1]
+        );
     }
 }

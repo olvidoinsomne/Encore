@@ -5,7 +5,7 @@
 //! explicitly, or startup identifies the procedural fallback in its message.
 
 use crate::{
-    model::{Instrument, Score},
+    model::{Instrument, Part, Score},
     sampled::SampleBank,
     synth,
 };
@@ -69,11 +69,44 @@ impl AudioEngine {
     pub fn render(&self, score: &Score) -> Result<Vec<f32>, String> {
         validate_score(score)?;
         match self {
+            Self::Procedural if crate::performance::active_percussion(score) => Err(
+                "Unpitched percussion playback requires a sampled SoundFont drum kit; select Sampled playback.".into(),
+            ),
+            Self::Procedural if crate::performance::needed(score) => {
+                let timeline = crate::performance::Timeline::new(score)?;
+                let mut audio = synth::render_decorated_with(score, &timeline);
+                synth::finish(&mut audio);
+                Ok(audio)
+            },
             Self::Procedural => Ok(synth::render(score)),
             Self::Sampled(bank) => bank.render(score),
         }
     }
 
+    pub fn drum_kits(&self) -> &[(u8, String)] {
+        match self {
+            Self::Procedural => &[],
+            Self::Sampled(bank) => bank.drum_kits(),
+        }
+    }
+    pub fn render_part_note(
+        &self,
+        part: &Part,
+        token: u8,
+        velocity: u8,
+        duration_secs: f32,
+    ) -> Result<Vec<f32>, String> {
+        validate_note(token, velocity, duration_secs)?;
+        if part.percussion.is_none() {
+            return self.render_note(part.instrument, token, velocity, duration_secs);
+        }
+        match self {
+            Self::Sampled(bank) => bank.render_part_note(part, token, velocity, duration_secs),
+            Self::Procedural => {
+                Err("Unpitched percussion audition requires a sampled SoundFont drum kit.".into())
+            }
+        }
+    }
     /// Render one sounding MIDI pitch. Velocity zero is valid silence; malformed
     /// MIDI values and non-finite or excessive note lengths are rejected.
     pub fn render_note(

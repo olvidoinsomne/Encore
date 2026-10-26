@@ -10,7 +10,7 @@
 //! application-level timing quantization. SF2 modulators are honored by OxiSynth.
 
 use crate::{
-    model::{Instrument, Note, PPQ, Part, Score},
+    model::{Instrument, PPQ, Part, Score},
     synth::{self, MAX_RENDER_SECONDS, SAMPLE_RATE},
 };
 use oxisynth::{MidiEvent, SoundFont, SoundFontId, Synth, SynthDescriptor};
@@ -38,6 +38,7 @@ pub struct SampleBank {
     path: PathBuf,
     name: String,
     presets: Vec<(u8, String)>,
+    kits: Vec<(u8, String)>,
     calibrated_general_user: bool,
 }
 
@@ -74,6 +75,7 @@ impl SampleBank {
             })?
             .map_err(|e| format!("Could not decode SF2 SoundFont: {e}"))?;
         let presets = required_presets(&bytes)?;
+        let kits = catalog_bank(&bytes, 128)?;
         let supplied_name = list(&bytes[12..], b"INFO")
             .and_then(|data| chunk(data, b"INAM"))
             .map(decode_name)
@@ -98,6 +100,11 @@ impl SampleBank {
                 .select_program(0, id, 0, instrument.gm_program())
                 .map_err(|e| format!("SoundFont cannot select {}: {e}", instrument.name()))?;
         }
+        for (kit, _) in &kits {
+            probe
+                .select_program(0, id, 128, *kit)
+                .map_err(|e| format!("SoundFont cannot select percussion kit {kit}: {e}"))?;
+        }
         let font = probe
             .remove_font(id, false)
             .ok_or("Could not retain decoded SoundFont.")?;
@@ -106,6 +113,7 @@ impl SampleBank {
             path: path.canonicalize().unwrap_or_else(|_| path.to_path_buf()),
             name,
             presets,
+            kits,
             calibrated_general_user,
         })
     }
@@ -123,6 +131,16 @@ impl SampleBank {
             .map(|(_, name)| name.as_str())
     }
 
+    /// Exact bank-128 percussion programs available in this loaded SF2.
+    pub fn drum_kits(&self) -> &[(u8, String)] {
+        &self.kits
+    }
+    pub fn kit_name(&self, kit: u8) -> Option<&str> {
+        self.kits
+            .iter()
+            .find(|(id, _)| *id == kit)
+            .map(|(_, name)| name.as_str())
+    }
     pub fn render(&self, score: &Score) -> Result<Vec<f32>, String> {
         score.validate()?;
         let duration = synth::duration_seconds(score);
@@ -132,22 +150,58 @@ impl SampleBank {
         let frames = ((duration + RELEASE_TAIL) * SAMPLE_RATE as f32).ceil() as usize;
         let mut output = vec![0.0; frames * 2];
         let any_solo = score.parts.iter().any(|part| part.solo && !part.muted);
-        for part in &score.parts {
+        let order = crate::repeats::playback_order(score)?;
+        let decorated = crate::performance::needed(score)
+            .then(|| crate::performance::Timeline::new(score))
+            .transpose()?;
+        let performance = decorated.is_none().then(|| Performance::new(score));
+        for (part_index, part) in score.parts.iter().enumerate() {
             if part.muted || part.volume <= 0.0 || (any_solo && !part.solo) {
                 continue;
             }
-            let events = timeline(part, score.measure_ticks(), score.tempo);
-            if events.is_empty() {
+            if let Some(staff) = &part.percussion {
+                let timeline = decorated
+                    .as_ref()
+                    .ok_or("Percussion requires the shared performance timeline.")?;
+                let events = drum_commands(timeline, part_index);
+                if !events.is_empty() {
+                    let mut engine = self.kit_engine(staff.kit)?;
+                    guarded_mix(
+                        &mut engine.engine,
+                        &events,
+                        &mut output,
+                        part.volume,
+                        part.pan,
+                    )?;
+                }
                 continue;
             }
-            let mut engine = self.engine(part.instrument)?;
-            guarded_mix(
-                &mut engine.engine,
-                &events,
-                &mut output,
-                part.volume * self.instrument_trim(part.instrument),
-                part.pan,
-            )?;
+            for layer in 0..if decorated.is_some() { 16 } else { 4 } {
+                let events = if let Some(timeline) = &decorated {
+                    decorated_commands(timeline, part_index, layer)
+                } else {
+                    timeline_performance(
+                        part,
+                        score.measure_ticks(),
+                        score.tempo,
+                        layer,
+                        &order,
+                        part_index,
+                        performance.as_ref(),
+                    )
+                };
+                if events.is_empty() {
+                    continue;
+                }
+                let mut engine = self.engine(part.instrument)?;
+                guarded_mix(
+                    &mut engine.engine,
+                    &events,
+                    &mut output,
+                    part.volume * self.instrument_trim(part.instrument),
+                    part.pan,
+                )?;
+            }
         }
         synth::finish(&mut output);
         Ok(output)
@@ -197,10 +251,62 @@ impl SampleBank {
         Ok(output)
     }
 
+    pub fn render_part_note(
+        &self,
+        part: &Part,
+        token: u8,
+        velocity: u8,
+        duration_secs: f32,
+    ) -> Result<Vec<f32>, String> {
+        if let Some(staff) = &part.percussion {
+            staff.validate()?;
+            let key = staff.output_key(token)?;
+            if velocity > 127
+                || !duration_secs.is_finite()
+                || !(0.01..=120.).contains(&duration_secs)
+            {
+                return Err("Audition needs velocity0–127 and0.01–120 finite seconds.".into());
+            }
+            let frames = ((duration_secs + RELEASE_TAIL) * SAMPLE_RATE as f32).ceil() as usize;
+            let mut output = vec![0.; frames * 2];
+            if velocity > 0 {
+                let mut engine = self.kit_engine(staff.kit)?;
+                let events = [
+                    Command {
+                        frame: 0,
+                        midi: key,
+                        kind: Kind::On(velocity),
+                    },
+                    Command {
+                        frame: (duration_secs * SAMPLE_RATE as f32).round() as usize,
+                        midi: key,
+                        kind: Kind::Off,
+                    },
+                ];
+                guarded_mix(&mut engine.engine, &events, &mut output, 1., 0.)?;
+            }
+            synth::finish(&mut output);
+            Ok(output)
+        } else {
+            self.render_note(part.instrument, token, velocity, duration_secs)
+        }
+    }
+    fn kit_engine(&self, kit: u8) -> Result<EngineLease<'_>, String> {
+        let name = self.kit_name(kit).ok_or_else(|| {
+            format!(
+                "SoundFont '{}' has no bank128 percussion kit {kit}; choose an available kit.",
+                self.name
+            )
+        })?;
+        self.engine_at(128, kit, name)
+    }
     fn engine(&self, instrument: Instrument) -> Result<EngineLease<'_>, String> {
         if self.preset_name(instrument).is_none() {
             return Err(format!("No sampled preset for {}.", instrument.name()));
         }
+        self.engine_at(0, instrument.gm_program(), instrument.name())
+    }
+    fn engine_at(&self, bank: u32, program: u8, name: &str) -> Result<EngineLease<'_>, String> {
         let mut engine = Synth::new(descriptor())
             .map_err(|e| format!("Could not initialize recorded instruments: {e}"))?;
         engine.set_gain(if self.calibrated_general_user {
@@ -222,8 +328,8 @@ impl SampleBank {
         let mut lease = EngineLease { engine, id, slot };
         lease
             .engine
-            .select_program(0, id, 0, instrument.gm_program())
-            .map_err(|e| format!("Could not select {}: {e}", instrument.name()))?;
+            .select_program(0, id, bank, program)
+            .map_err(|e| format!("Could not select {name}: {e}"))?;
         // Mixer volume is applied once, linearly, after synthesis. MIDI velocity
         // is passed untouched to the bank's recorded layers and SF2 modulators.
         for (ctrl, value) in [(7, 127), (11, 127), (10, 64)] {
@@ -350,6 +456,32 @@ fn list<'a>(bytes: &'a [u8], kind: &[u8; 4]) -> Option<&'a [u8]> {
     None
 }
 
+fn catalog_bank(bytes: &[u8], bank: u16) -> Result<Vec<(u8, String)>, String> {
+    let headers = list(&bytes[12..], b"pdta")
+        .and_then(|d| chunk(d, b"phdr"))
+        .ok_or("Malformed SoundFont: preset headers are missing.")?;
+    let (records, remainder) = headers.as_chunks::<38>();
+    if !remainder.is_empty() || records.len() < 2 {
+        return Err("Malformed SoundFont: incomplete preset header table.".into());
+    }
+    let mut output = Vec::new();
+    let mut seen = [false; 128];
+    for pair in records.windows(2) {
+        let rec = &pair[0];
+        let program = u16::from_le_bytes([rec[20], rec[21]]);
+        if u16::from_le_bytes([rec[22], rec[23]]) == bank
+            && program < 128
+            && u16::from_le_bytes([pair[1][24], pair[1][25]])
+                > u16::from_le_bytes([rec[24], rec[25]])
+            && !seen[program as usize]
+        {
+            seen[program as usize] = true;
+            output.push((program as u8, decode_name(&rec[..20])));
+        }
+    }
+    output.sort_by_key(|(program, _)| *program);
+    Ok(output)
+}
 fn required_presets(bytes: &[u8]) -> Result<Vec<(u8, String)>, String> {
     let headers = list(&bytes[12..], b"pdta")
         .and_then(|data| chunk(data, b"phdr"))
@@ -433,6 +565,8 @@ fn validate_riff(bytes: &[u8]) -> Result<(), String> {
 enum Kind {
     Off,
     On(u8),
+    Control(u8),
+    Program(u8),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -442,24 +576,68 @@ struct Command {
     kind: Kind,
 }
 
-#[derive(Clone, Copy)]
-struct Event<'a> {
-    tick: u64,
-    note: &'a Note,
+#[cfg(test)]
+fn timeline(part: &Part, measure_ticks: u32, tempo: u16, layer: u8) -> Vec<Command> {
+    let order: Vec<_> = (0..part.measures.len()).collect();
+    timeline_order(part, measure_ticks, tempo, layer, &order, None)
 }
 
-fn timeline(part: &Part, measure_ticks: u32, tempo: u16) -> Vec<Command> {
-    let mut notes = Vec::new();
-    for (measure_index, measure) in part.measures.iter().enumerate() {
-        for note in &measure.notes {
-            notes.push(Event {
-                tick: measure_index as u64 * measure_ticks as u64 + note.start as u64,
-                note,
-            });
+#[cfg(test)]
+fn timeline_order(
+    part: &Part,
+    measure_ticks: u32,
+    tempo: u16,
+    layer: u8,
+    order: &[usize],
+    score: Option<(&Score, usize)>,
+) -> Vec<Command> {
+    let performance = score.map(|(score, _)| Performance::new(score));
+    timeline_performance(
+        part,
+        measure_ticks,
+        tempo,
+        layer,
+        order,
+        score.map_or(0, |(_, part)| part),
+        performance.as_ref(),
+    )
+}
+
+struct Performance<'a> {
+    score: &'a Score,
+    styles: crate::entry_style::Index<'a>,
+    expressions: crate::expressions::ExpressionMap,
+    tempo: Option<crate::expressions::TempoMap>,
+}
+impl<'a> Performance<'a> {
+    fn new(score: &'a Score) -> Self {
+        Self {
+            score,
+            styles: crate::entry_style::Index::new(score),
+            expressions: crate::expressions::ExpressionMap::new(score),
+            tempo: (!score.notation.tempo.is_empty())
+                .then(|| crate::expressions::TempoMap::new(score).ok())
+                .flatten(),
         }
     }
-    notes.sort_by_key(|note| note.tick);
+}
+fn timeline_performance(
+    part: &Part,
+    measure_ticks: u32,
+    tempo: u16,
+    layer: u8,
+    order: &[usize],
+    part_index: usize,
+    performance: Option<&Performance<'_>>,
+) -> Vec<Command> {
+    let score = performance.map(|performance| (performance.score, part_index));
+    let notes: Vec<_> = crate::repeats::events(part, measure_ticks, order)
+        .into_iter()
+        .filter(|event| event.note.lane() == layer)
+        .collect();
     let frames_per_tick = 60.0_f64 * SAMPLE_RATE as f64 / (tempo.max(1) as f64 * PPQ as f64);
+    let tempo_map = performance.and_then(|performance| performance.tempo.as_ref());
+    let expression_map = performance.map(|performance| &performance.expressions);
     let mut consumed = HashSet::new();
     let mut commands = Vec::new();
     for (index, event) in notes.iter().enumerate() {
@@ -474,14 +652,32 @@ fn timeline(part: &Part, measure_ticks: u32, tempo: u16) -> Vec<Command> {
             let mut end = event.tick + event.note.ticks() as u64;
             let mut last = event.note;
             let mut current = index;
-            while last.tied {
+            while performance.map_or(last.tied, |performance| {
+                performance.styles.ties_forward(
+                    &crate::document::Anchor {
+                        voice: last.voice,
+                        part: part_index,
+                        measure: notes[current].measure,
+                        tick: last.start,
+                        layer: last.layer,
+                    },
+                    last,
+                    midi,
+                )
+            }) {
                 let next = notes
                     .iter()
                     .enumerate()
                     .skip(current + 1)
                     .take_while(|(_, note)| note.tick <= end)
                     .find(|(_, note)| {
-                        note.tick == end && note.note.pitches.iter().any(|p| p.midi() == midi)
+                        note.tick == end
+                            && crate::repeats::written_adjacent(
+                                &notes[current],
+                                note,
+                                measure_ticks,
+                            )
+                            && note.note.pitches.iter().any(|p| p.midi() == midi)
                     });
                 let Some((next_index, next_note)) = next else {
                     break;
@@ -493,18 +689,48 @@ fn timeline(part: &Part, measure_ticks: u32, tempo: u16) -> Vec<Command> {
                 last = next_note.note;
                 current = next_index;
             }
-            let shortening = if last.staccato {
-                last.ticks() as f64 * 0.52
-            } else {
-                0.0
-            };
-            let gate_end = end as f64 - shortening;
-            let start_frame = (event.tick as f64 * frames_per_tick).round() as usize;
-            let end_frame = ((gate_end * frames_per_tick).round() as usize).max(start_frame + 1);
+            let shortening = last.ticks() as f64 * last.playback_shortening();
+            let overlap = score.map_or(0, |(score, part)| {
+                crate::repeats::legato_extension(
+                    score,
+                    part,
+                    &notes[current],
+                    notes.get(current + 1),
+                )
+            });
+            let gate_end = end as f64 - shortening + f64::from(overlap);
+            let start_frame = tempo_map.as_ref().map_or_else(
+                || (event.tick as f64 * frames_per_tick).round() as usize,
+                |map| {
+                    (map.seconds_at_tick(event.tick as f64) * f64::from(SAMPLE_RATE)).round()
+                        as usize
+                },
+            );
+            let end_frame = tempo_map
+                .as_ref()
+                .map_or_else(
+                    || (gate_end * frames_per_tick).round() as usize,
+                    |map| (map.seconds_at_tick(gate_end) * f64::from(SAMPLE_RATE)).round() as usize,
+                )
+                .max(start_frame + 1);
             commands.push(Command {
                 frame: start_frame,
                 midi,
-                kind: Kind::On(event.note.velocity),
+                kind: Kind::On(score.map_or_else(
+                    || event.note.playback_velocity(),
+                    |(_score, part)| {
+                        expression_map.as_ref().unwrap().velocity(
+                            crate::document::Anchor {
+                                voice: event.note.voice,
+                                part,
+                                measure: event.measure,
+                                tick: event.note.start,
+                                layer: event.note.layer,
+                            },
+                            event.note,
+                        )
+                    },
+                )),
             });
             commands.push(Command {
                 frame: end_frame,
@@ -521,6 +747,84 @@ fn timeline(part: &Part, measure_ticks: u32, tempo: u16) -> Vec<Command> {
         )
     });
     commands
+}
+
+fn drum_commands(timeline: &crate::performance::Timeline, part: usize) -> Vec<Command> {
+    crate::performance::drum_events(timeline, part, |tick| {
+        (timeline.seconds(tick) * f64::from(SAMPLE_RATE)).round() as u64
+    })
+    .into_iter()
+    .map(|event| Command {
+        frame: event.tick as usize,
+        midi: event.key,
+        kind: event.velocity.map_or(Kind::Off, Kind::On),
+    })
+    .collect()
+}
+fn decorated_commands(
+    timeline: &crate::performance::Timeline,
+    part: usize,
+    layer: u8,
+) -> Vec<Command> {
+    if !timeline
+        .notes
+        .iter()
+        .any(|note| note.anchor.part == part && note.layer == layer)
+    {
+        return Vec::new();
+    }
+    let frame = |tick: f64| (timeline.seconds(tick) * f64::from(SAMPLE_RATE)).round() as usize;
+    let mut events = Vec::<(u8, Command)>::new();
+    let mut program = None;
+    for note in timeline
+        .notes
+        .iter()
+        .filter(|n| n.anchor.part == part && n.layer == layer)
+    {
+        if program != Some(note.instrument) {
+            events.push((
+                1,
+                Command {
+                    frame: frame(note.start),
+                    midi: 0,
+                    kind: Kind::Program(note.instrument.gm_program()),
+                },
+            ));
+            program = Some(note.instrument);
+        }
+        events.push((
+            3,
+            Command {
+                frame: frame(note.start),
+                midi: note.midi,
+                kind: Kind::On(note.velocity),
+            },
+        ));
+        events.push((
+            0,
+            Command {
+                frame: frame(note.sampler_end).max(frame(note.start) + 1),
+                midi: note.midi,
+                kind: Kind::Off,
+            },
+        ));
+    }
+    for c in timeline
+        .controls
+        .iter()
+        .filter(|c| c.part == part && c.layer == layer)
+    {
+        events.push((
+            c.priority,
+            Command {
+                frame: frame(c.tick),
+                midi: c.controller,
+                kind: Kind::Control(c.value),
+            },
+        ));
+    }
+    events.sort_by_key(|(priority, event)| (event.frame, *priority, event.midi));
+    events.into_iter().map(|(_, event)| event).collect()
 }
 
 fn mix_part(
@@ -551,6 +855,15 @@ fn mix_part(
                     channel: 0,
                     key: event.midi,
                     vel,
+                }),
+                Kind::Control(value) => engine.send_event(MidiEvent::ControlChange {
+                    channel: 0,
+                    ctrl: event.midi,
+                    value,
+                }),
+                Kind::Program(program_id) => engine.send_event(MidiEvent::ProgramChange {
+                    channel: 0,
+                    program_id,
                 }),
                 Kind::Off => engine.send_event(MidiEvent::NoteOff {
                     channel: 0,
@@ -594,7 +907,7 @@ fn guarded_mix(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Duration, Pitch};
+    use crate::model::{Duration, Note, Pitch};
 
     fn score() -> Score {
         let mut score = Score::blank();
@@ -606,9 +919,14 @@ mod tests {
 
     fn note(start: u32, pitches: &[u8]) -> Note {
         Note {
+            voice: 0,
+            voice_launch: None,
+            articulations: Vec::new(),
             start,
             duration: Duration::Quarter,
             dotted: false,
+            tuplet: None,
+            layer: 0,
             pitches: pitches.iter().map(|m| Pitch::from_midi(*m)).collect(),
             velocity: 100,
             staccato: false,
@@ -643,7 +961,7 @@ mod tests {
         let mut score = score();
         score.parts[0].measures[0].notes =
             vec![note(0, &[]), note(PPQ, &[60]), note(PPQ * 2, &[60])];
-        let events = timeline(&score.parts[0], score.measure_ticks(), score.tempo);
+        let events = timeline(&score.parts[0], score.measure_ticks(), score.tempo, 0);
         assert_eq!(
             events,
             vec![
@@ -678,7 +996,7 @@ mod tests {
         first.tied = true;
         score.parts[0].measures[0].notes = vec![first];
         score.parts[0].measures[1].notes = vec![note(0, &[60, 67])];
-        let events = timeline(&score.parts[0], score.measure_ticks(), score.tempo);
+        let events = timeline(&score.parts[0], score.measure_ticks(), score.tempo, 0);
         let ons: Vec<_> = events
             .iter()
             .filter(|e| matches!(e.kind, Kind::On(_)))
@@ -704,12 +1022,31 @@ mod tests {
         let mut event = note(120, &[67]);
         event.staccato = true;
         score.parts[0].measures[0].notes = vec![event];
-        let events = timeline(&score.parts[0], score.measure_ticks(), score.tempo);
+        let events = timeline(&score.parts[0], score.measure_ticks(), score.tempo, 0);
         let frames_per_tick = 60.0_f64 * SAMPLE_RATE as f64 / (137.0 * PPQ as f64);
         assert_eq!(events[0].frame, (120.0 * frames_per_tick).round() as usize);
         assert_eq!(
             events[1].frame,
             ((120.0 + 480.0 * 0.48) * frames_per_tick).round() as usize
+        );
+    }
+
+    #[test]
+    fn ordinary_articulations_control_sample_velocity_and_note_release() {
+        use crate::model::Articulation;
+        let mut score = score();
+        let mut event = note(0, &[60]);
+        event.velocity = 80;
+        event.articulations = vec![Articulation::Accent, Articulation::Staccatissimo];
+        score.parts[0].measures[0].notes = vec![event];
+        let events = timeline(&score.parts[0], score.measure_ticks(), score.tempo, 0);
+        assert_eq!(events[0].kind, Kind::On(92));
+        assert_eq!(events[1].kind, Kind::Off);
+        let frames_per_tick =
+            60.0_f64 * f64::from(SAMPLE_RATE) / (f64::from(score.tempo) * f64::from(PPQ));
+        assert_eq!(
+            events[1].frame,
+            (480.0 * 0.30 * frames_per_tick).round() as usize
         );
     }
 
@@ -911,6 +1248,34 @@ mod tests {
     }
 
     #[test]
+    fn recorded_articulations_change_attack_and_shorten_a_sustained_instrument() {
+        use crate::model::Articulation;
+        let Some(bank) = integration_bank() else {
+            return;
+        };
+        let mut score = score();
+        score.time_numerator = 1;
+        score.parts[0].measures.truncate(1);
+        score.parts[0].instrument = Instrument::Flute;
+        let mut event = note(0, &[72]);
+        event.velocity = 80;
+        score.parts[0].measures[0].notes = vec![event];
+        let ordinary = bank.render(&score).unwrap();
+        score.parts[0].measures[0].notes[0].articulations = vec![Articulation::Accent];
+        let accented = bank.render(&score).unwrap();
+        assert_ne!(ordinary, accented);
+        score.parts[0].measures[0].notes[0].articulations = vec![Articulation::Staccatissimo];
+        let detached = bank.render(&score).unwrap();
+        assert!(stereo_rms(&detached, 0.40, 0.48) < stereo_rms(&ordinary, 0.40, 0.48) * 0.6);
+        assert!(
+            accented
+                .iter()
+                .chain(&detached)
+                .all(|sample| sample.is_finite())
+        );
+    }
+
+    #[test]
     fn program_aliases_select_the_same_samples_and_calibration() {
         let Some(bank) = integration_bank() else {
             return;
@@ -943,5 +1308,581 @@ mod tests {
         assert!(result.is_err());
         let samples = bank.render_note(Instrument::Piano, 60, 100, 0.25).unwrap();
         assert!(samples.iter().any(|sample| sample.abs() > 0.005));
+    }
+    #[test]
+    fn sampled_triplet_commands_use_exact_frames_and_tie_duration() {
+        let mut score = score();
+        score.parts[0].measures[0].notes = (0..3)
+            .map(|index| {
+                let mut note = note(index * 160, &[60]);
+                note.duration = Duration::Eighth;
+                note.tuplet = Some(crate::model::Tuplet::TRIPLET);
+                note
+            })
+            .collect();
+        let events = timeline(&score.parts[0], score.measure_ticks(), 120, 0);
+        let onsets = events
+            .iter()
+            .filter(|event| matches!(event.kind, Kind::On(_)))
+            .map(|event| event.frame)
+            .collect::<Vec<_>>();
+        assert_eq!(onsets, vec![0, 7350, 14700]);
+        assert_eq!(events.last().unwrap().frame, 22050);
+        score.parts[0].measures[0].notes[0].tied = true;
+        score.parts[0].measures[0].notes[1].tied = true;
+        let tied = timeline(&score.parts[0], score.measure_ticks(), 120, 0);
+        assert_eq!(tied.len(), 2);
+        assert_eq!(tied[1].frame, 22050);
+    }
+
+    #[test]
+    fn layers_route_unisons_and_ties_to_independent_sampled_timelines() {
+        let mut score = score();
+        let mut first = note(0, &[60]);
+        first.tied = true;
+        let mut second = note(480, &[60]);
+        second.layer = 1;
+        score.parts[0].measures[0].notes = vec![first, second];
+        let upper = timeline(&score.parts[0], score.measure_ticks(), 120, 0);
+        let lower = timeline(&score.parts[0], score.measure_ticks(), 120, 1);
+        assert_eq!(upper.len(), 2);
+        assert_eq!(lower.len(), 2);
+        assert_eq!((upper[0].frame, upper[1].frame), (0, 22050));
+        assert_eq!((lower[0].frame, lower[1].frame), (22050, 44100));
+    }
+    #[test]
+    fn sampled_timeline_performs_repeats_and_breaks_ties_at_jumps() {
+        use crate::repeats::RepeatRegion;
+        let mut score = score();
+        let mut event = note(0, &[60]);
+        event.duration = Duration::Whole;
+        event.tied = true;
+        score.parts[0].measures[0].notes = vec![event];
+        score.notation.repeats.push(RepeatRegion::simple(0, 0));
+        let order = crate::repeats::playback_order(&score).unwrap();
+        assert_eq!(order, [0, 0, 1]);
+        let events = timeline_order(
+            &score.parts[0],
+            score.measure_ticks(),
+            120,
+            0,
+            &order,
+            Some((&score, 0)),
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event.kind, Kind::On(_)))
+                .map(|event| event.frame)
+                .collect::<Vec<_>>(),
+            [0, 88200]
+        );
+        assert!(events.contains(&Command {
+            frame: 88200,
+            midi: 60,
+            kind: Kind::Off
+        }));
+    }
+
+    #[test]
+    fn sampled_phrase_overlap_uses_source_slur_anchors_and_never_crosses_jumps() {
+        use crate::{document::Anchor, slurs::Slur};
+        let mut score = score();
+        score.parts[0].measures[0].notes = vec![note(0, &[60]), note(480, &[62])];
+        let start = Anchor {
+            voice: 0,
+            part: 0,
+            measure: 0,
+            tick: 0,
+            layer: 0,
+        };
+        score
+            .notation
+            .slurs
+            .push(Slur::new(start, Anchor { tick: 480, ..start }));
+        let events = timeline_order(
+            &score.parts[0],
+            score.measure_ticks(),
+            120,
+            0,
+            &[0, 0, 1],
+            Some((&score, 0)),
+        );
+        assert!(events.contains(&Command {
+            frame: 22739,
+            midi: 60,
+            kind: Kind::Off
+        }));
+        assert!(events.contains(&Command {
+            frame: 110939,
+            midi: 60,
+            kind: Kind::Off
+        }));
+    }
+    #[test]
+    fn expressive_timeline_uses_dynamic_ramp_attacks_and_tempo_step_frames() {
+        use crate::{
+            document::Anchor,
+            expressions::{Expression, Hairpin, TempoChange, TimePoint},
+        };
+        let mut score = score();
+        score.parts[0].measures[0].notes = (0..4).map(|index| note(index * 480, &[60])).collect();
+        score.parts[0].measures[1].notes = vec![note(0, &[62])];
+        let start = Anchor {
+            voice: 0,
+            part: 0,
+            measure: 0,
+            tick: 0,
+            layer: 0,
+        };
+        let end = Anchor {
+            measure: 1,
+            ..start
+        };
+        score
+            .notation
+            .expressions
+            .push(Expression::dynamic(start, "p", 40));
+        score.notation.spanners.push(Hairpin {
+            start_velocity: Some(40),
+            end_velocity: Some(120),
+            ..Hairpin::new(start, end)
+        });
+        score.notation.tempo.push(TempoChange::new(
+            TimePoint {
+                measure: 1,
+                tick: 0,
+            },
+            60,
+        ));
+        let events = timeline_order(
+            &score.parts[0],
+            score.measure_ticks(),
+            120,
+            0,
+            &[0, 1],
+            Some((&score, 0)),
+        );
+        let on: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event.kind {
+                Kind::On(velocity) => Some((event.frame, velocity)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            on,
+            [
+                (0, 40),
+                (22050, 60),
+                (44100, 80),
+                (66150, 100),
+                (88200, 120)
+            ]
+        );
+        assert!(events.contains(&Command {
+            frame: 132300,
+            midi: 62,
+            kind: Kind::Off
+        }));
+    }
+}
+
+#[cfg(test)]
+mod decorated_tests {
+    use super::*;
+    use crate::{
+        document::Anchor,
+        expressions::Hairpin,
+        grace::{GraceGroup, GraceNote},
+        lines::{LineKind, PedalKind, PerformanceLine},
+        model::{Duration, Note, Pitch},
+    };
+    #[test]
+    fn decorated_sampler_commands_match_grace_pedal_program_and_expression_events() {
+        let mut score = Score::blank();
+        score.tempo = 120;
+        score.parts.truncate(1);
+        score.parts[0].instrument = Instrument::Violin;
+        score.parts[0].measures.truncate(1);
+        score.parts[0].measures[0].notes = vec![Note {
+            voice: 0,
+            voice_launch: None,
+            start: 0,
+            duration: Duration::Whole,
+            dotted: false,
+            tuplet: None,
+            layer: 0,
+            pitches: vec![Pitch::from_midi(60)],
+            velocity: 80,
+            staccato: false,
+            tied: false,
+            articulations: vec![],
+        }];
+        let a = Anchor {
+            voice: 0,
+            part: 0,
+            measure: 0,
+            tick: 0,
+            layer: 0,
+        };
+        let b = Anchor { tick: 1920, ..a };
+        let mut group = GraceGroup::new(
+            a,
+            vec![GraceNote::new(Pitch::from_midi(72), Duration::Eighth)],
+        );
+        group.percent = 12.5;
+        score.notation.grace.push(group);
+        score.notation.lines.push(PerformanceLine::new(
+            a,
+            b,
+            LineKind::Pedal {
+                kind: PedalKind::Sostenuto,
+            },
+        ));
+        let mut hairpin = Hairpin::new(a, b);
+        hairpin.start_velocity = Some(40);
+        hairpin.end_velocity = Some(120);
+        score.notation.spanners.push(hairpin);
+        let mut technique = crate::expressions::Expression::text(a, "pizz.");
+        technique.kind = crate::expressions::ExpressionKind::Technique;
+        score.notation.expressions.push(technique);
+        score.validate().unwrap();
+        let timeline = crate::performance::Timeline::new(&score).unwrap();
+        let events = decorated_commands(&timeline, 0, 0);
+        assert!(
+            events
+                .iter()
+                .any(|e| e.frame == 0 && e.kind == Kind::Program(45))
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| e.frame == 0 && e.midi == 72 && matches!(e.kind, Kind::On(_)))
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| e.frame == 11025 && e.midi == 60 && matches!(e.kind, Kind::On(_)))
+        );
+        assert!(
+            events.iter().any(
+                |e| e.midi == 11 && matches!(e.kind,Kind::Control(value)if value>80&&value<100)
+            )
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| e.frame == 0 && e.midi == 66 && e.kind == Kind::Control(127))
+        );
+        assert!(events.windows(2).all(|w| w[0].frame <= w[1].frame));
+    }
+}
+
+#[cfg(test)]
+mod voice_two_tests {
+    use super::*;
+    use crate::model::{Duration, Note, Pitch};
+    #[test]
+    fn identical_keys_in_two_voices_receive_independent_sampler_note_offs() {
+        let mut score = Score::blank();
+        score.tempo = 120;
+        score.parts.truncate(1);
+        score.parts[0].measures.truncate(1);
+        let first = Note {
+            layer: 0,
+            voice: 0,
+            voice_launch: None,
+            start: 0,
+            duration: Duration::Whole,
+            dotted: false,
+            tuplet: None,
+            pitches: vec![Pitch::from_midi(60)],
+            velocity: 80,
+            staccato: false,
+            tied: false,
+            articulations: vec![],
+        };
+        let mut second = first.clone();
+        second.voice = 1;
+        second.voice_launch = Some(0);
+        second.duration = Duration::Quarter;
+        second.tied = true;
+        let mut last = second.clone();
+        last.start = 480;
+        last.tied = false;
+        score.parts[0].measures[0].notes = vec![first, second, last];
+        let timeline = crate::performance::Timeline::new(&score).unwrap();
+        let primary = decorated_commands(&timeline, 0, 0);
+        let secondary = decorated_commands(&timeline, 0, 4);
+        assert!(
+            primary
+                .iter()
+                .any(|c| c.midi == 60 && c.kind == Kind::Off && c.frame == 88200)
+        );
+        assert!(
+            secondary
+                .iter()
+                .any(|c| c.midi == 60 && c.kind == Kind::Off && c.frame == 44100)
+        );
+        assert_eq!(
+            primary
+                .iter()
+                .filter(|c| matches!(c.kind, Kind::On(_)))
+                .count(),
+            1
+        );
+        assert_eq!(
+            secondary
+                .iter()
+                .filter(|c| matches!(c.kind, Kind::On(_)))
+                .count(),
+            1
+        );
+        assert!(decorated_commands(&timeline, 0, 8).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod discrete_ornament_commands {
+    use super::*;
+    use crate::{
+        document::Anchor,
+        model::{Duration, Note, Pitch},
+        ornaments::{Ornament, OrnamentKind},
+    };
+    #[test]
+    fn mordent_sampler_note_offs_precede_next_on_and_last_main_sustains() {
+        let mut s = Score::blank();
+        s.tempo = 120;
+        s.parts.truncate(1);
+        s.parts[0].measures.truncate(1);
+        s.parts[0].measures[0].notes = vec![Note {
+            layer: 0,
+            voice: 1,
+            voice_launch: None,
+            start: 0,
+            duration: Duration::Quarter,
+            dotted: false,
+            tuplet: None,
+            pitches: vec![Pitch::from_midi(60)],
+            velocity: 80,
+            staccato: false,
+            articulations: vec![],
+            tied: false,
+        }];
+        let a = Anchor {
+            part: 0,
+            measure: 0,
+            tick: 0,
+            layer: 0,
+            voice: 1,
+        };
+        s.notation
+            .ornaments
+            .push(Ornament::new(a, OrnamentKind::Mordent));
+        let timeline = crate::performance::Timeline::new(&s).unwrap();
+        let commands = decorated_commands(&timeline, 0, 4);
+        let on: Vec<_> = commands
+            .iter()
+            .filter(|c| matches!(c.kind, Kind::On(_)))
+            .map(|c| (c.midi, c.frame))
+            .collect();
+        assert_eq!(on, vec![(60, 0), (59, 1838), (60, 3675)]);
+        let off: Vec<_> = commands
+            .iter()
+            .filter(|c| matches!(c.kind, Kind::Off))
+            .map(|c| (c.midi, c.frame))
+            .collect();
+        assert_eq!(off, vec![(60, 1838), (59, 3675), (60, 22050)]);
+        assert!(decorated_commands(&timeline, 0, 0).is_empty());
+        let frame: Vec<_> = commands
+            .iter()
+            .filter(|c| c.frame == 1838)
+            .map(|c| c.kind)
+            .collect();
+        assert_eq!(frame, vec![Kind::Off, Kind::On(80)]);
+    }
+}
+
+#[cfg(test)]
+mod percussion_tests {
+    use super::*;
+    use crate::{
+        model::Duration,
+        performance::percussion_tests::{fixture, note},
+    };
+    #[test]
+    fn all_drum_voices_share_one_ordered_command_stream_without_program_changes() {
+        let mut s = fixture();
+        s.parts[0].measures[0].notes = vec![
+            note(0, Duration::Half, 1, 0, 0),
+            note(240, Duration::Quarter, 2, 1, 3),
+            note(480, Duration::Quarter, 3, 0, 1),
+        ];
+        let t = crate::performance::Timeline::new(&s).unwrap();
+        let commands = drum_commands(&t, 0);
+        assert!(commands.iter().all(|c| !matches!(c.kind, Kind::Program(_))));
+        assert_eq!(
+            commands
+                .iter()
+                .filter(|c| matches!(c.kind, Kind::On(_)))
+                .map(|c| (c.frame, c.midi))
+                .collect::<Vec<_>>(),
+            vec![(0, 46), (11025, 42), (22050, 38)]
+        );
+    }
+    #[test]
+    fn bundled_kits_are_real_samples_and_cross_voice_hihat_chokes() {
+        let path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/soundfonts/GeneralUser-GS.sf2");
+        if !path.exists() {
+            return;
+        }
+        let bank = SampleBank::load(&path).unwrap();
+        assert_eq!(bank.drum_kits().len(), 13);
+        let mut s = fixture();
+        for &(kit, _) in bank.drum_kits() {
+            s.parts[0].percussion.as_mut().unwrap().kit = kit;
+            // SFX has its own key map;39 is a populated effect, not GM snare38.
+            s.parts[0].percussion.as_mut().unwrap().sounds[2].midi =
+                Some(if kit == 56 { 39 } else { 38 });
+            let audio = bank.render_part_note(&s.parts[0], 3, 100, 0.15).unwrap();
+            assert!(audio.iter().all(|n| n.is_finite()));
+            assert!(audio.iter().any(|n| n.abs() > 0.0001), "kit {kit}");
+        }
+        s.parts[0].percussion.as_mut().unwrap().kit = 3;
+        assert!(
+            bank.render_part_note(&s.parts[0], 3, 100, 0.1)
+                .unwrap_err()
+                .contains("no bank128 percussion kit")
+        );
+        s.parts[0].percussion.as_mut().unwrap().kit = 0;
+        s.parts[0].percussion.as_mut().unwrap().sounds[2].midi = Some(38);
+        s.parts[0].measures[0].notes = vec![note(0, Duration::Whole, 1, 0, 0)];
+        let open = bank.render(&s).unwrap();
+        s.parts[0].measures[0]
+            .notes
+            .push(note(240, Duration::Quarter, 2, 1, 0));
+        let closed = bank.render(&s).unwrap();
+        let lo = (0.7 * SAMPLE_RATE as f32) as usize * 2;
+        let hi = (1.0 * SAMPLE_RATE as f32) as usize * 2;
+        let energy = |a: &[f32]| a[lo..hi].iter().map(|v| f64::from(*v).powi(2)).sum::<f64>();
+        assert!(energy(&open) > 0.0001);
+        assert!(
+            energy(&closed) < energy(&open) * 0.25,
+            "open {}, closed {}",
+            energy(&open),
+            energy(&closed)
+        );
+    }
+}
+
+#[cfg(test)]
+mod measured_tremolo_tests {
+    use super::*;
+    use crate::{
+        document::Anchor,
+        model::Duration,
+        tremolos::{
+            Tremolo,
+            tests::{fixture, note},
+        },
+    };
+    #[test]
+    fn slurred_same_key_roll_has_no_stale_sampler_off_after_the_next_attack() {
+        let (mut s, a) = fixture();
+        s.parts[0].instrument = Instrument::Violin;
+        s.parts[0].measures[0].notes = vec![
+            note(0, Duration::Quarter, &[60]),
+            note(480, Duration::Quarter, &[60]),
+            note(960, Duration::Quarter, &[60]),
+        ];
+        let mut mark = Tremolo::new(a);
+        mark.strokes = 2;
+        s.notation.tremolos.push(mark);
+        s.notation
+            .slurs
+            .push(crate::slurs::Slur::new(a, Anchor { tick: 960, ..a }));
+        let timeline = crate::performance::Timeline::new(&s).unwrap();
+        for pair in timeline.notes.windows(2) {
+            assert!(pair[0].sampler_end <= pair[1].start, "{:?}", pair);
+        }
+        let commands = decorated_commands(&timeline, 0, 0);
+        let ons: Vec<_> = commands
+            .iter()
+            .filter(|e| matches!(e.kind, Kind::On(_)))
+            .map(|e| e.frame)
+            .collect();
+        let offs: Vec<_> = commands
+            .iter()
+            .filter(|e| e.kind == Kind::Off)
+            .map(|e| e.frame)
+            .collect();
+        assert_eq!(ons.len(), 6);
+        assert_eq!(offs.len(), 6);
+        for i in 0..ons.len() - 1 {
+            assert!(offs[i] <= ons[i + 1]);
+        }
+        for start in ons.iter().skip(1) {
+            let simultaneous: Vec<_> = commands
+                .iter()
+                .filter(|e| e.frame == *start && e.midi == 60)
+                .collect();
+            if simultaneous.len() == 2 {
+                assert_eq!(simultaneous[0].kind, Kind::Off);
+                assert!(matches!(simultaneous[1].kind, Kind::On(_)));
+            }
+        }
+    }
+    #[test]
+    fn sampled_tremolos_rearticulate_melodic_and_shared_drum_engines() {
+        let path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/soundfonts/GeneralUser-GS.sf2");
+        if !path.exists() {
+            return;
+        }
+        let bank = SampleBank::load(&path).unwrap();
+        let (mut s, a) = fixture();
+        s.parts[0].instrument = Instrument::Violin;
+        s.parts[0].measures[0]
+            .notes
+            .push(note(480, Duration::Quarter, &[67]));
+        let mut mark = Tremolo::new(a);
+        mark.end = Some(Anchor { tick: 480, ..a });
+        mark.strokes = 2;
+        s.notation.tremolos.push(mark);
+        let t = crate::performance::Timeline::new(&s).unwrap();
+        assert_eq!(
+            decorated_commands(&t, 0, 0)
+                .iter()
+                .filter(|c| matches!(c.kind, Kind::On(_)))
+                .count(),
+            8
+        );
+        let plain = {
+            let mut plain = s.clone();
+            plain.notation.tremolos.clear();
+            bank.render(&plain).unwrap()
+        };
+        let audio = bank.render(&s).unwrap();
+        assert!(audio.iter().all(|v| v.is_finite()));
+        assert!(audio.iter().any(|v| v.abs() > 0.001));
+        assert_ne!(audio, plain);
+        let mut drums = crate::performance::percussion_tests::fixture();
+        let mut mark = Tremolo::new(a);
+        mark.strokes = 3;
+        drums.notation.tremolos.push(mark);
+        let t = crate::performance::Timeline::new(&drums).unwrap();
+        assert_eq!(
+            drum_commands(&t, 0)
+                .iter()
+                .filter(|c| matches!(c.kind, Kind::On(_)))
+                .count(),
+            8
+        );
+        let audio = bank.render(&drums).unwrap();
+        assert!(audio.iter().all(|v| v.is_finite()));
+        assert!(audio.iter().any(|v| v.abs() > 0.001));
     }
 }

@@ -20,7 +20,7 @@ The native application supports Linux, Windows and macOS through eframe and rodi
 
 ## Compose
 
-Use **Light mode / Dark mode** in the header to switch appearance. Encore remembers the choice between launches and keeps score paper white. [Preview the light appearance](examples/Encore-Light.png).
+Use **Light mode / Dark mode** in the header to switch appearance. Monochromatic charcoal, gray and white dark mode is the default. Encore remembers your choice between launches and keeps score paper white. [Preview the light appearance](examples/Encore-Light.png).
 
 Encore opens **First Light**, an original eight-bar ensemble miniature. Press **Space** to listen. **File → New score** starts an empty piano grand staff. Browse sounds with **Instruments** in the top menu or **+** in the Instruments panel. The editor uses dark panels, clear transport controls and a light score page.
 
@@ -28,48 +28,81 @@ Encore opens **First Light**, an original eight-bar ensemble miniature. Press **
 
 The rendered audio, editable project, full score and a reduced opening score are in `examples/` under `Carol of the Bells - Epic` and `Carol of the Bells - Opening`.
 
-- Choose **Write**, select a duration and click a staff to insert a note. **Shift-click** an existing event to add a chord tone with that event's duration.
-- **1–5** selects whole, half, quarter, eighth or sixteenth notes. **R** toggles rest entry; **.** toggles dotted entry. The accidental controls choose the key signature, flat, natural or sharp.
-- **A–G** enters notes at the cursor using the inspector's octave. **Enter** inserts the current rest or a C. Entry advances to the next position and adds a measure when necessary.
-- In **Select** mode, click a note to edit it, or click empty staff space to move the entry cursor. **Left/Right** moves the cursor by the current duration.
-- The Inspector edits note duration, dots, velocity, staccato and ties. **Up/Down** transposes selected notes by one semitone; **Shift+Up/Down** transposes by an octave. **Delete** removes an event.
-- **Ctrl+Z** undoes; **Ctrl+Shift+Z** or **Ctrl+Y** redoes. **Ctrl+S** saves; **Ctrl+Shift+S** saves as; **Ctrl+O** opens; **Ctrl+N** creates a score. On macOS, use Command.
-- **M/S** mutes or solos a staff. Staff volume and pan control its mix. Editing a playing score stops playback so the next play reflects the changes.
-- Click the piano keyboard to audition the active instrument; **Shift-click** a key to enter it into the score. **Space** plays/pauses the score; **Escape** stops.
+- Choose **Write**, a rhythmic **Layer 1–4**, **V1/V2**, and a duration. Click a staff to insert a note; Shift-click adds a chord tone.
+- The default **Simple Entry · Laptop** profile follows Finale: **0–8** selects 128th through breve, with **5** for a quarter. **A–G** enters notes, **Shift+A–G** adds chord tones, **Tab** enters a rest, and **Alt/Option+R** toggles rest entry.
+- **Period** dots the selected entry; **Shift+Period** toggles dotted entry. **Up/Down** moves its active pitch diatonically; **Shift+Up/Down** moves by an octave. Left/Right selects entries in the active layer and voice.
+- To enter an eighth-note triplet, choose **4**, enter the first note, then press **9**. Two rests appear; enter the next two notes to replace them. The toolbar offers triplet entry; the inspector edits exact custom ratios.
+- Choose **Speedy Entry** for Finale's duration-triggered workflow. Its number keys, rests, ties and navigation differ from Simple Entry. See the full implemented mapping and platform limits in [SHORTCUTS.md](SHORTCUTS.md).
+- **Ctrl+Z** undoes and **Ctrl+Y** redoes on Windows/Linux; macOS uses **Command+Z** and **Command+Shift+Z**. **Ctrl+Shift+Z** on Windows/Linux or **Command+Y** on macOS opens the undo/redo list. Cut/copy/paste handles a single event or selected whole-measure region. **Selection** offers range transposition and inserted measure stacks.
+- The Inspector edits rhythm, layer, dynamics, chord pitches, staccato, accent, marcato, tenuto, staccatissimo and ties. Mixer buttons mute/solo staves; volume and pan control their mix.
+- Click piano keys to audition the active instrument; Shift-click enters notes. Space plays/pauses and Escape stops.
 
-The editor prevents overlapping events and notes extending past a barline. Enter longer notes as tied notes in adjacent measures. Empty space is engraved and exported as rests. Key-signature changes retain existing pitch spellings; new notes use the new signature.
+Each staff supports four layers with two independent voices per layer. Events in the same voice cannot overlap; different voices can sound together. In Speedy Entry, apostrophe switches V1/V2; select an existing primary note or rest before launching a secondary branch. Notes must fit their bar; longer notes can be tied across measures. Empty space is engraved and exported as rests. Tuplets use exact 480-PPQ timing; ratios requiring fractional ticks, nested groups and mixed-duration grouping remain incomplete.
+
+**Notation → Lyrics** adds numbered verses, choruses and sections. Select a melody note and type on the score: Space/hyphen advances, underscore extends the word, Left/Right changes notes and Up/Down changes the lyric number. The Notation window also assigns a whole passage atomically and adjusts syllable baselines. **Slurs** draws phrase curves by two clicks or dragging between endpoints; direction, arch and endpoint offsets are editable. Both continue across systems in PDF/SVG.
+
+**Notation → Ornaments and arpeggios** adds performed turns, inverted turns, lower/upper mordents, upward/downward chord rolls and non-arpeggiate signs. Neighbors follow the key or explicit intervals; the chosen window/delay borrows from the principal without changing written rhythm. The [Ornaments and Chord Rolls Study](<examples/Ornaments and Chord Rolls Study.encore>) combines them with grace notes and independent voices.
+
+Slurs also support dashed/dotted strokes and asymmetric manual control points. Select a slur handle with Draw slurs to open its controls; Reset curve retains its style. The [Advanced Slur Study](<examples/Advanced Slur Study.pdf>) shows cross-voice phrases and system continuations. Cross-staff curves remain pending.
+
+**Notation → Repeats and endings** defines bounded repeat regions, pass counts and alternate endings, plus D.C./D.S., segno/coda and Fine navigation. The performed order is shown before playback. MIDI and both audio engines follow the same traversal; explicit short articulations override slur legato.
+
+Open [Cantabile](examples/Cantabile.encore) for an original study combining two verses, a chorus melisma, phrase slurs, alternate endings and transposed linked parts. The [printed score](examples/Cantabile.pdf) and extracted parts in `examples/Cantabile Parts/` show the resulting layouts.
+
+The [Independent Voices Study](<examples/Independent Voices Study.encore>) demonstrates secondary branches and simultaneous layer/voice pairs; its [printed score](<examples/Independent Voices Study.pdf>) uses the same source music as playback. The [Eight Voice Engraving Study](<examples/Eight Voice Engraving Study.encore>) adds eight-way unisons, separate lyric rows, grace notes and cross-system phrase continuations.
+
+**Manage linked parts** can select layers/voices and the highest, lowest or ranked chord tones, with a conditional policy for bars containing multiple layers. Voiced parts use precise source-note/tone mappings and offer **Edit source score** and **Extract standalone part**. [Voiced Parts Study](<examples/Voiced Parts Study.encore>) has three filtered parts; [Clarinet I](<examples/Voiced Parts - Clarinet I.pdf>) and [Clarinet II](<examples/Voiced Parts - Clarinet II.pdf>) show written transpositions from shared source music. See [LINKED_PARTS.md](LINKED_PARTS.md) for preservation rules and limits.
+
+A short [Rhythm and Articulation Study](<examples/Rhythm and Articulation Study.encore>) demonstrates four layers, triplets, quintuplets, short-note spacing and ordinary articulations.
 
 ## Save, print and exchange
 
-**File → Open** now accepts MusicXML (`.musicxml`, `.xml`, `.mxl`), MuseScore (`.mscx`, `.mscz`, versions 2–4), and a supported subset of modern Finale `.musx` files. Imported scores save as new Encore projects; import notes explain feature losses. Legacy Finale `.mus`, Finale `.lib` settings libraries, and Garritan/ARIA plug-ins are not directly supported. See [COMPATIBILITY.md](COMPATIBILITY.md) for the precise limits and Finale 27 migration workflow.
+**File → Open** now accepts MusicXML (`.musicxml`, `.xml`, `.mxl`), MuseScore (`.mscx`, `.mscz`, versions 2–4), MIDI (`.mid`, `.midi`), and a supported subset of modern Finale `.musx` files. Imported scores save as new Encore projects; import notes explain feature losses. MIDI opening offers exact timing or explicit grid quantization, with timing changes reported. Legacy Finale `.mus`, Finale `.lib` settings libraries, and Garritan/ARIA plug-ins are not directly supported. See [COMPATIBILITY.md](COMPATIBILITY.md) for the precise limits and Finale 27 migration workflow.
 
-**.encore** is a validated, readable JSON project format, saved atomically. Existing projects retain their original instrument identities. Projects using the additional `GeneralMidi` instruments require Encore 0.4 or later. The application warns before closing or replacing unsaved work. Undo/redo is kept in memory for the last 100 changes.
+**Layout → Staff groups and barlines** edits named brackets/braces and independent barline spans for the current score or linked part. Automatic defaults and an explicitly ungrouped layout remain distinct; see [STAFF_GROUPS.md](STAFF_GROUPS.md). **Notation → Measured tremolos** adds repeated notes/chords and alternating quarter/half pairs with shared sampled/procedural/MIDI scheduling, including percussion rolls; see [TREMOLOS.md](TREMOLOS.md).
+
+**Layout** provides Go to Measure and page-fit controls as well as editing paper, margins, staff scale, system/page breaks, locked systems, measure widths and publication headers/footers for the current score or linked part. **Notation → Entry engraving** controls stems, beams, cue sizes, notehead shapes, accidental displays and individual chord-pitch ties. **Expressions and tempo** adds dynamics, rehearsal/technique text, hairpins and tempo changes or ramps. Playback and MIDI follow the tempo map; sustained hairpins use a bounded expression-controller envelope. **Performance lines** adds octave, damper/sostenuto pedal, trill and chromatic glissando spans, with documented playback limits. **Playback…** offers seeking, cursor-start listening and performed-bar loop ranges.
+
+Open [Production Layout Study](<examples/Production Layout Study.encore>) or [Entry Engraving Study](<examples/Entry Engraving Study.encore>) to review these controls.
+
+**Notation → Grace notes** adds editable before/after ornaments to a selected
+principal note, with slash, beams, chords and borrowed-time playback. Click a
+small note to edit its group. [Ornaments and Harmony Study](<examples/Ornaments and Harmony Study.encore>)
+combines these groups with chord diagrams and an octave line. Grace groups keep
+the principal note's written timing; converting existing rhythmic entries into
+grace notes remains pending. [Performance Lines Study](<examples/Performance Lines Study.encore>) demonstrates damper/sostenuto, a partial-note trill, a chromatic glissando, GM techniques and a sustained hairpin.
+
+**Notation → Chord symbols and fretboards** offers letter-name chord entry, alternate basses and stacked symbols, with suggested guitar shapes and editable 4–12-string diagrams. Harmony can play alongside the notation; linked parts accept written chord names.
+
+**.encore** is a validated, readable JSON project format, saved atomically. Existing projects retain their original instrument identities. Projects using additional `GeneralMidi` instruments require Encore 0.4 or later; layers and tuplet metadata require 0.6 or later; lyrics, slurs, repeats/navigation and linked-part definitions require 0.7 or later; regional editing, layout, entry engraving, expressions, hairpins and tempo maps require 0.8 or later. Grace groups, chord symbols/fretboards and performance lines require 0.9 or later. Older Encore releases cannot safely preserve new notation fields. The application warns before closing or replacing unsaved work. Undo/redo is kept in memory for the last 100 changes.
 
 The **Export** menu produces:
 
 | Format | Use |
 | --- | --- |
-| PDF | Multipage letter-size sheet music; open it in a PDF viewer to print. Text and notation are vector outlines, so no external music or text fonts are needed. |
+| PDF | Multipage sheet music with configurable score/part paper formats; open it in a PDF viewer to print. Text and notation are vector outlines, so no external music or text fonts are needed. |
 | SVG | Vector pages; additional pages are saved beside the chosen file with `-2`, `-3`, etc. |
-| MusicXML 4.0 | Score interchange with notation applications, preserving written pitches, timing, chords, dynamics, instruments and ties. |
-| MIDI | Type-1 performance with tempo, programs, channels/ports, volume, pan, dynamics, ties, staccato and mute/solo. |
+| MusicXML 4.0 | Score interchange with notation applications, preserving source pitches, timing, chords, dynamics, instruments, ties, lyrics, slurs and supported repeats/navigation. |
+| MIDI | Type-1 performance with tempo, programs, channels/ports, volume, pan, dynamics, ties, slur gates, repeated/navigation order, UTF-8 lyric cues, staccato and mute/solo. |
 | WAV | 44.1 kHz, 16-bit stereo audio using the selected sampled or procedural engine. |
 
-Choose **Part** above the score to view the active staff. PDF and SVG export follow the current full-score/part view. MusicXML, MIDI and WAV export the complete score, with mute/solo affecting MIDI and WAV playback.
+Choose **Part** above the score and select a named linked part. **Parts…** manages staff groups, written transpositions and independent page formats; viewing does not dirty the score. Editing notes in a part changes the shared source. PDF and SVG export follow the current full-score/part view; **Notation → Export all linked parts as PDF…** exports the complete set. See [LINKED_PARTS.md](LINKED_PARTS.md). MusicXML, MIDI and WAV export the complete score, with mute/solo affecting MIDI and WAV playback.
 
 ## Instruments
 
-Version 0.5 exposes **all 128 melodic General MIDI instruments**, played through the bundled 31 MiB GeneralUser GS SoundFont by default. The collection includes acoustic and electric pianos, mallets, organs, guitars, basses, solo and ensemble strings, choirs, brass, saxophones, woodwinds, synthesizer leads and pads, world instruments, pitched percussion and sound effects. All 128 use SoundFont sample playback; electronic and effect presets are sampled or synthesized sound designs, rather than recordings of 128 acoustic instruments. No network access or additional asset download is required during use.
+Encore exposes **all 128 melodic General MIDI instruments**, played through the bundled 31 MiB GeneralUser GS SoundFont by default. The collection includes acoustic and electric pianos, mallets, organs, guitars, basses, solo and ensemble strings, choirs, brass, saxophones, woodwinds, synthesizer leads and pads, world instruments, pitched percussion and sound effects. All 128 use SoundFont sample playback; electronic and effect presets are sampled or synthesized sound designs, rather than recordings of 128 acoustic instruments. No network access or additional asset download is required during use.
 
 Open **Instruments** in the top menu, **+** in the Instruments panel, or **Instrument lab** above the piano keyboard to open the **Instrument library**. Search by name or filter by family. Select a sound to see its actual SoundFont preset, character notes and concert-pitch audition guide. Use the pitch, velocity and hold controls for a single note, or play a four-bar test phrase. **Add staff** creates a new part; **Use on active staff** changes the current part's sound and clef while preserving its notes. **Export phrase…** saves the audition as a WAV. Additional GM voices have useful keyboard audition ranges, which are not claims about an acoustic instrument's physical compass.
 
 OxiSynth, a Rust SoundFont engine, plays the bank's samples with their envelopes, loops, filters and velocity/control modulators. Woodwinds and harp now use samples alongside piano, bowed strings, brass and timpani. **Double bass** is the sustained bowed contrabass preset; **Acoustic bass** in the Bass family is plucked. The bundled bank has conservative instrument-level trims for the original orchestral palette; additional GM sounds retain their native bank balance. Note velocities and the score's mixer values are preserved.
 
-In the library's **Playback sounds** controls, choose **Sampled library** or **Procedural**. The selected source applies to the score, keyboard auditions, test phrases and WAV exports. **Load SoundFont…** accepts an SF2 bank containing all 128 melodic bank-0 GM programs. A missing preset or corrupt bank produces a visible error and retains the current engine. An explicitly invalid `ENCORE_SOUNDFONT` at startup produces a visible warning and procedural fallback. Banks are loaded once and shared across render jobs. The upstream GeneralUser GS bank contains 261 presets and 13 drum kits; this version exposes its 128 melodic bank-0 programs. GS variations and drum-kit selection are not implemented.
+In the library's **Playback sounds** controls, choose **Sampled library** or **Procedural**. The selected source applies to the score, keyboard auditions, test phrases and WAV exports. **Load SoundFont…** accepts an SF2 bank containing all 128 melodic bank-0 GM programs. A missing preset or corrupt bank produces a visible error and retains the current engine. An explicitly invalid `ENCORE_SOUNDFONT` at startup produces a visible warning and procedural fallback. Banks are loaded once and shared across render jobs. The upstream GeneralUser GS bank contains 261 presets and 13 drum kits; Encore exposes its 128 melodic bank-0 programs and all 13 available bank-128 kits. **+ Drum staff** adds unpitched percussion with named-sound entry and independently editable positions, noteheads and playback keys. **Percussion map** selects an exact kit from the active bank. See [PERCUSSION.md](PERCUSSION.md) for one/five-line staves, map editing and interchange limits. Melodic GS variations remain pending.
 
 For a direct comparison, listen to `examples/Carol of the Bells - Sampled.wav` and `examples/Carol of the Bells - Procedural.wav`. Matching 16-second opening excerpts are named `Carol of the Bells - Opening - Sampled.wav` and `Carol of the Bells - Opening - Procedural.wav`. Both play the same unmodified 80-second score and mix settings, with the engine's final release tail appended. The sampled render is also the current `Carol of the Bells - Epic.wav`. The procedural files preserve the original comparison baseline.
 
 The optional procedural engine retains the original 18 instrument voices with register-dependent resonances, velocity-dependent color and reproducible variation between strokes. Piano models string beating and hammer excitation; bowed strings use moving partials, woodwinds and brass use instrument-specific resonances, and timpani uses tuned membrane modes. The additional 110 GM choices use related procedural family approximations in this mode. Choose **Sampled library** to hear each bank preset's distinct sound. Both engines share stereo room reflections and soft limiting.
+
+For a percussion staff, named sound buttons replace the piano keys; Up/Down selects sounds by printed position, including shared-position alternatives. Enter uses the selected sound, and Shift-click enters a palette sound. Pitched transposition and accidentals do not change drum IDs.
 
 The score keyboard starts in a useful register for the active staff; **Octave −/+** moves through the remaining range. Auditions reuse an audio output rather than opening a new device for every key.
 
@@ -89,17 +122,21 @@ The score keyboard starts in a useful register for the active staff; **Octave �
 ./run-encore --export examples/First\ Light.encore exports/performance.wav
 ./run-encore --validate examples/First\ Light.encore
 ./run-encore --import source.mscz converted.encore
+./run-encore --import-midi performance.mid converted.encore --quantize 16th
 ./run-encore --export source.mxl score.pdf
+./run-encore --parts examples/Cantabile.encore exports/parts
 ./run-encore --instruments exports/instruments
 ./run-encore --audio-check
 cargo test --locked --all-targets
 ```
 
-The demo commands write native scores, PDF, SVG pages, MusicXML, MIDI and WAV. The Carol command also writes an eight-bar timpani/bass opening PDF. `--instruments` writes 128 four-bar WAV auditions, one for each melodic GM instrument, in useful keyboard registers. `--compare-carol` renders the same Carol score with both engines and writes matching opening excerpts. `--procedural` and `--soundfont PATH` select a backend for command-line audio operations and can appear before or after the command. `ENCORE_SOUNDFONT=/path/to/bank.sf2 ./run-encore` selects a bank for desktop startup; otherwise Encore discovers the bundled bank beside the application or in the source tree. Export destination directories must already exist, except directories created by the demo and instrument commands.
+Extract one linked part with `./run-encore --extract-part "examples/Voiced Parts Study.encore" clarinet-1 /tmp/Clarinet.encore`. The selector accepts a stable part ID or a one-based part number. PDF/SVG extraction uses written pitch; native, MusicXML, MIDI and WAV use concert pitch.
+
+The demo commands write native scores, PDF, SVG pages, MusicXML, MIDI and WAV. The Carol command also writes an eight-bar timpani/bass opening PDF. `--instruments` writes 128 four-bar WAV auditions, one for each melodic GM instrument, in useful keyboard registers. `--compare-carol` renders the same Carol score with both engines and writes matching opening excerpts. `--procedural` and `--soundfont PATH` select a backend for command-line audio operations and can appear before or after the command. `ENCORE_SOUNDFONT=/path/to/bank.sf2 ./run-encore` selects a bank for desktop startup; otherwise Encore discovers the bundled bank beside the application or in the source tree. Export destination directories must already exist, except directories created by the demo, instrument and linked-parts commands.
 
 ## Verification
 
-The Linux build passes 125 automated tests and Clippy with warnings denied. Import coverage includes a licensed real Finale 27.4.1.146 file and a public MuseScore score checked against all 64 original pitches. Theme switching, preference storage and source-file preservation are also tested. Coverage includes score persistence, all 128 program identities and native round trips, MIDI/MusicXML timing and program exports, engraving, the original 18 procedural voices, and the complete sampled catalog. Recorded-bank checks verify finite audible output for all 128 presets, bowed-bass sustain and release, low timpani resonance, velocity response, mute/solo behavior, ties, staccato, malformed or incomplete banks and recovery of the shared bank after an interrupted renderer. UI checks cover library search and family filters, instrument replacement and undo, engine errors, stale playback cancellation, keyboard input and Escape stopping auditions while the library is open. Both editor and library are rendered with actual egui meshes and fonts in display-independent tests.
+Encore 0.13 passes 582 library/editor/CLI tests and all-target Clippy with warnings denied on Linux. Cantabile's MusicXML round trip preserves all 65 syllables, both slurs, alternate endings and source pitches; the new production/engraving studies also retain expressions, hairpins, tempo ramps and manual entry styles; printed score/part layouts and both appearances have been inspected. Import coverage includes a licensed real Finale 27.4.1.146 file and a public MuseScore score checked against all 64 original pitches. Theme switching, preference storage and source-file preservation are also tested. Coverage includes score persistence, all 128 program identities and native round trips, MIDI/MusicXML timing and program exports, engraving, the original 18 procedural voices, and the complete sampled catalog. Recorded-bank checks verify finite audible output for all 128 presets, bowed-bass sustain and release, low timpani resonance, velocity response, mute/solo behavior, ties, staccato, malformed or incomplete banks and recovery of the shared bank after an interrupted renderer. UI checks cover library search and family filters, instrument replacement and undo, engine errors, stale playback cancellation, keyboard input and Escape stopping auditions while the library is open. Both editor and library are rendered with actual egui meshes and fonts in display-independent tests.
 
 The sampled Carol render contains 80 seconds of music plus a three-second release tail. The procedural comparison retains its 1.8-second tail and is byte-for-byte identical to the previous procedural render. Both are 44.1 kHz, 16-bit stereo with no clipped PCM samples. Printed notation and the editable score are unchanged.
 
@@ -113,15 +150,24 @@ ENCORE_LAB_SCREENSHOT=/tmp/encore-lab.ppm cargo test --bin encore headless_instr
 
 ## Current scope
 
-Encore 0.5 supports one rhythmic voice per staff, with chords; piano uses separate right- and left-hand staves. Add another staff for independent rhythms. All notation and playback use **concert pitch**.
+Encore 0.13 supports four independent rhythmic layers with two voices each per staff, chords, breve through 128th notes, exact representable tuplets, four additional ordinary articulations, and MIDI score import alongside its native and notation formats. Piano uses separate right- and left-hand staves. The full score and playback use **concert pitch**; linked parts show written transpositions.
 
-This version does not yet support tuplets, lyrics, slurs, repeat playback, percussion maps, transposing-instrument parts, MIDI keyboard input or MIDI import. Foreign-score import is bounded by the same model; direct Finale support covers a subset of `.musx`, while legacy `.mus` requires conversion through MusicXML. Ties are forward connections to matching pitches at the next contiguous event. Large ensembles are divided into staff groups across pages. Audio renders up to ten minutes in memory; notation and MIDI can be longer. The native model supports up to 64 staves, 1,024 measures and 200,000 events, with up to 16 pitches in a chord. Project files are limited to 16 MiB.
+Encore is still substantially short of Finale 27.4.1 parity. [FINALE_PARITY.md](FINALE_PARITY.md) tracks the audited gaps and acceptance checks. The current lyric/slur/repeat/linked-part workflows are implemented with documented limits. Rich lyric styling, cross-staff phrase curves, arbitrary repeat expressions, multimeasure rests and independent object-position unlinking remain open, alongside advanced percussion layouts, MIDI keyboard input, plug-in hosting and advanced production engraving. The eight-voice workflow preserves independent entry, source annotations, engraving, playback and MusicXML interchange; advanced layer policies and cross-voice ties remain open.
+
+Foreign import has explicit feature limits; legacy Finale `.mus` requires MusicXML conversion. Ties connect matching pitches in contiguous events within the same layer and voice. Audio renders up to ten minutes in memory; notation and MIDI can be longer. Native projects support up to 64 staves, 1,024 measures and 200,000 events, with 16 pitches per chord and a 16 MiB file limit.
 
 ## Source
 
 | Module | Responsibility |
 | --- | --- |
+| `src/groups.rs`, `src/tremolos.rs` | Independent visual staff groups and measured repeated/alternating attacks |
+| `src/percussion.rs`, `src/app/percussion.rs`, `src/engraving/display.rs` | Unpitched sound maps, named entry and printed percussion geometry |
 | `src/model.rs` | Score, pitch spelling, validation, demo, atomic project persistence |
+| `src/document.rs`, `src/lyrics.rs`, `src/slurs.rs` | Persistent anchored underlay and phrase curves, validation and structural repairs |
+| `src/repeats.rs`, `src/repeats/` | Bounded performed traversal, endings and D.C./D.S./coda/Fine navigation |
+| `src/parts.rs`, `src/layout.rs` | Linked projections, score/part page formats and batch PDFs |
+| `src/editing.rs`, `src/entry_style.rs` | Atomic region editing, appearance overrides and per-pitch ties |
+| `src/expressions.rs` | Dynamic/hairpin lanes and performed tempo maps |
 | `src/engraving.rs` | Layout, original notation glyphs, hit maps, SVG and PDF |
 | `src/synth.rs` | Procedural voices, shared room/mix processing, WAV and rodio playback |
 | `src/sampled.rs` | Validated SF2 loading, all 128 GM presets and sampled event scheduling |
@@ -129,8 +175,8 @@ This version does not yet support tuplets, lyrics, slurs, repeat playback, percu
 | `src/instruments.rs` | Concert-pitch and keyboard audition guides, character notes and phrases |
 | `src/demos.rs` | Winter Ascendant orchestration and section map |
 | `src/export.rs` | MusicXML and MIDI |
-| `src/import.rs`, `src/import/` | Bounded MusicXML, MuseScore and modern Finale readers with import notes |
-| `src/app.rs` | Native editor, input, inspector, mixer, history, transport |
+| `src/import.rs`, `src/import/` | Bounded MusicXML, MuseScore, modern Finale and MIDI readers with import notes |
+| `src/app.rs`, `src/app/`, `src/shortcuts.rs` | Native editor, Finale entry profiles, clipboard, inspector, mixer, history, transport |
 | `src/main.rs` | Desktop startup and command-line exports |
 
 Encore code is MIT licensed. Bundled Liberation Serif/Sans fonts are distributed under the SIL Open Font License in `assets/Serif-LICENSE.txt`; their outlines are used for portable printed text. Noto Music provides interface symbols under `assets/Music-LICENSE.txt`. The GeneralUser GS bank and its documentation retain their original license in `assets/soundfonts/GeneralUser-GS-LICENSE.txt`; see `assets/soundfonts/NOTICE.md` for source and checksum. OxiSynth is LGPL-2.1; its license and source/rebuild information are included under `assets/third-party/`. Other Rust libraries retain their respective licenses.

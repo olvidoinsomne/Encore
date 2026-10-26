@@ -93,6 +93,7 @@ pub fn carol_of_the_bells() -> Score {
         .map(|(instrument, name, volume, pan)| Part {
             name: name.into(),
             instrument,
+            percussion: None,
             clef: instrument.default_clef(),
             measures: vec![Measure::default(); BARS],
             volume,
@@ -109,6 +110,7 @@ pub fn carol_of_the_bells() -> Score {
         time_denominator: 4,
         key_fifths: 1,
         parts,
+        notation: Default::default(),
     };
     score.parts[HORN].clef = Clef::Treble;
 
@@ -824,9 +826,14 @@ fn push(
     staccato: bool,
 ) {
     score.parts[part].measures[bar].notes.push(Note {
+        voice: 0,
+        voice_launch: None,
+        articulations: Vec::new(),
         start,
         duration,
         dotted: false,
+        tuplet: None,
+        layer: 0,
         pitches: pitches
             .iter()
             .map(|pitch| Pitch::from_midi(*pitch))

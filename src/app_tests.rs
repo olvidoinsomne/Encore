@@ -2,8 +2,773 @@
 use super::*;
 use std::collections::HashMap;
 
+#[test]
+fn staff_group_mode_and_save_buttons_work_at_minimum_size_and_are_undoable() {
+    let ctx = egui::Context::default();
+    configure_context(&ctx);
+    let source = Score::blank();
+    let mut app = controller(source.clone());
+    app.write_mode = true;
+    app.open_groups();
+    let plain = egui::Modifiers::NONE;
+    let input = |frame, events| {
+        let mut input = raw_input(frame, events, plain);
+        input.screen_rect = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(980.0, 680.0)));
+        input
+    };
+    let mut frame = 0;
+    for label in ["Custom groups", "Save staff groups"] {
+        let mut target = None;
+        for _ in 0..3 {
+            let output = ctx.run(input(frame, vec![]), |ctx| app.ui(ctx));
+            target = visible_text_rect(&output, label);
+            frame += 1;
+        }
+        let target = target.unwrap_or_else(|| panic!("{label} must be visible"));
+        assert!(target.min.y >= 0.0 && target.max.y <= 680.0);
+        for pressed in [true, false] {
+            let position = target.center();
+            let _ = ctx.run(
+                input(
+                    frame,
+                    vec![
+                        egui::Event::PointerMoved(position),
+                        egui::Event::PointerButton {
+                            pos: position,
+                            button: egui::PointerButton::Primary,
+                            pressed,
+                            modifiers: plain,
+                        },
+                    ],
+                ),
+                |ctx| app.ui(ctx),
+            );
+            frame += 1;
+        }
+    }
+    assert!(app.score.notation.layout.groups.is_some());
+    assert_eq!(app.score.parts, source.parts);
+    assert_eq!(app.undo.len(), 1);
+    app.undo();
+    assert_eq!(app.score, source);
+}
+
+#[test]
+fn measured_tremolo_save_button_changes_only_metadata_and_is_undoable() {
+    let ctx = egui::Context::default();
+    configure_context(&ctx);
+    let mut source = Score::blank();
+    source.parts[0].measures[0]
+        .notes
+        .push(event(0, Duration::Quarter, &[60]));
+    let mut app = controller(source.clone());
+    app.selected = Some(Selection {
+        part: 0,
+        measure: 0,
+        note: 0,
+    });
+    app.open_tremolos();
+    let plain = egui::Modifiers::NONE;
+    let mut target = None;
+    for frame in 0..3 {
+        let output = ctx.run(raw_input(frame, vec![], plain), |ctx| app.ui(ctx));
+        target = visible_text_rect(&output, "Save tremolo");
+    }
+    let position = target.expect("Save tremolo must be visible").center();
+    for (frame, pressed) in [(3, true), (4, false)] {
+        let _ = ctx.run(
+            raw_input(
+                frame,
+                vec![
+                    egui::Event::PointerMoved(position),
+                    egui::Event::PointerButton {
+                        pos: position,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: plain,
+                    },
+                ],
+                plain,
+            ),
+            |ctx| app.ui(ctx),
+        );
+    }
+    assert_eq!(app.score.notation.tremolos.len(), 1);
+    assert_eq!(app.score.parts, source.parts);
+    assert_eq!(app.undo.len(), 1);
+    app.undo();
+    assert_eq!(app.score, source);
+}
+
+#[test]
+fn percussion_keyboard_uses_named_sound_and_map_window_suppresses_note_entry() {
+    let ctx = egui::Context::default();
+    configure_context(&ctx);
+    let mut score = Score::blank();
+    score.parts[0].percussion = Some(encore::percussion::Staff::general_midi());
+    let mut app = controller(score);
+    app.write_mode = true;
+    app.entry_pitch = Pitch::from_midi(46);
+    app.open_percussion();
+    let before = app.score.clone();
+    let plain = egui::Modifiers::NONE;
+    let _ = ctx.run(raw_input(0, vec![], plain), |ctx| app.ui(ctx));
+    let _ = ctx.run(
+        raw_input(1, vec![key(egui::Key::Enter, true, plain)], plain),
+        |ctx| app.ui(ctx),
+    );
+    assert_eq!(app.score, before);
+    assert!(app.undo.is_empty());
+    app.percussion_editor.open = false;
+    let _ = ctx.run(
+        raw_input(2, vec![key(egui::Key::Enter, false, plain)], plain),
+        |ctx| app.ui(ctx),
+    );
+    let _ = ctx.run(
+        raw_input(3, vec![key(egui::Key::Enter, true, plain)], plain),
+        |ctx| app.ui(ctx),
+    );
+    assert_eq!(
+        app.score.parts[0].measures[0].notes[0].pitches,
+        vec![Pitch::from_midi(46)]
+    );
+    assert_eq!(app.undo.len(), 1);
+    app.undo();
+    assert_eq!(app.score, before);
+}
+
+#[test]
+fn percussion_map_primary_actions_and_playback_fields_are_reachable_at_minimum_window_size() {
+    let ctx = egui::Context::default();
+    configure_context(&ctx);
+    let mut score = Score::blank();
+    score.parts[0].percussion = Some(encore::percussion::Staff::general_midi());
+    let mut app = controller(score.clone());
+    app.open_percussion();
+    let plain = egui::Modifiers::NONE;
+    let input = |frame, events| {
+        let mut input = raw_input(frame, events, plain);
+        input.screen_rect = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(980.0, 680.0)));
+        input
+    };
+    let mut save = None;
+    for frame in 0..5 {
+        let output = ctx.run(input(frame, vec![]), |ctx| app.ui(ctx));
+        save = visible_text_rect(&output, "Save percussion map");
+    }
+    let save = save.expect("Save must be visible before scrolling");
+    assert!(save.min.y >= 0.0 && save.max.y <= 680.0);
+    let mut audition = None;
+    for frame in 5..25 {
+        let output = ctx.run(
+            input(
+                frame,
+                vec![
+                    egui::Event::PointerMoved(Pos2::new(720.0, 470.0)),
+                    egui::Event::MouseWheel {
+                        unit: egui::MouseWheelUnit::Point,
+                        delta: Vec2::new(0.0, -120.0),
+                        modifiers: plain,
+                    },
+                ],
+            ),
+            |ctx| app.ui(ctx),
+        );
+        audition = visible_text_rect(&output, "Audition sound").or(audition);
+    }
+    let audition = audition.expect("Playback mapping and audition must be reachable by scrolling");
+    assert!(audition.min.y >= 0.0 && audition.max.y <= 680.0);
+    assert_eq!(app.score, score);
+    assert!(app.undo.is_empty());
+}
+
+#[test]
+fn one_line_percussion_mouse_entry_uses_position_and_selected_alias() {
+    let ctx = egui::Context::default();
+    configure_context(&ctx);
+    let mut score = Score::blank();
+    let mut map = encore::percussion::Staff::general_midi();
+    map.lines = 1;
+    map.sounds.retain(|sound| [38, 42, 46].contains(&sound.id));
+    for sound in &mut map.sounds {
+        sound.position = if sound.id == 38 { -2 } else { 2 };
+    }
+    score.parts[0].percussion = Some(map);
+    let mut app = controller(score);
+    app.write_mode = true;
+    app.entry_pitch = Pitch::from_midi(46);
+    app.duration = Duration::Quarter;
+    let plain = egui::Modifiers::NONE;
+    let mut paper = None;
+    for frame in 0..3 {
+        let output = ctx.run(raw_input(frame, vec![], plain), |ctx| app.ui(ctx));
+        paper = output.shapes.iter().find_map(|shape| match &shape.shape {
+            egui::Shape::Rect(rect)
+                if rect.fill == Color32::WHITE
+                    && rect.rect.width() > 700.0
+                    && rect.rect.height() > 900.0 =>
+            {
+                Some(rect.rect)
+            }
+            _ => None,
+        });
+    }
+    let staff = &app.cached_pages[0].staves[0];
+    assert_eq!(staff.lines, 1);
+    let position = paper.unwrap().min
+        + Vec2::new(
+            staff.x_at_tick(480.0),
+            staff.bottom_line_y() - staff.spacing,
+        ) * app.zoom;
+    for (frame, pressed) in [(3, true), (4, false)] {
+        let _ = ctx.run(
+            raw_input(
+                frame,
+                vec![
+                    egui::Event::PointerMoved(position),
+                    egui::Event::PointerButton {
+                        pos: position,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: plain,
+                    },
+                ],
+                plain,
+            ),
+            |ctx| app.ui(ctx),
+        );
+    }
+    let note = app.score.parts[0].measures[0]
+        .notes
+        .iter()
+        .find(|note| note.start == 480)
+        .unwrap();
+    assert_eq!(note.pitches, vec![Pitch::from_midi(46)]);
+    app.score.validate().unwrap();
+}
+
+#[test]
+fn individual_drum_chord_heads_select_the_clicked_sound_in_a_reordered_part() {
+    let ctx = egui::Context::default();
+    configure_context(&ctx);
+    let mut score = Score::blank();
+    score.parts[1].percussion = Some(encore::percussion::Staff::general_midi());
+    score.parts[1].measures[0]
+        .notes
+        .push(event(0, Duration::Quarter, &[36, 42]));
+    let mut definition = encore::parts::definitions(&score).pop().unwrap();
+    definition.staves = vec![1, 0];
+    definition.id = "reordered-drums".into();
+    score.notation.parts = vec![definition];
+    let mut app = controller(score);
+    app.part_view = true;
+    let plain = egui::Modifiers::NONE;
+    let mut paper = None;
+    for frame in 0..3 {
+        let output = ctx.run(raw_input(frame, vec![], plain), |ctx| app.ui(ctx));
+        paper = output.shapes.iter().find_map(|shape| match &shape.shape {
+            egui::Shape::Rect(rect)
+                if rect.fill == Color32::WHITE
+                    && rect.rect.width() > 700.0
+                    && rect.rect.height() > 900.0 =>
+            {
+                Some(rect.rect)
+            }
+            _ => None,
+        });
+    }
+    let hit = app.cached_pages[0]
+        .sound_hits
+        .iter()
+        .find(|hit| hit.sound_id == 42)
+        .unwrap();
+    assert_eq!(hit.anchor.part, 1);
+    let position = paper.unwrap().min + Vec2::new(hit.x, hit.y) * app.zoom;
+    for (frame, pressed) in [(3, true), (4, false)] {
+        let _ = ctx.run(
+            raw_input(
+                frame,
+                vec![
+                    egui::Event::PointerMoved(position),
+                    egui::Event::PointerButton {
+                        pos: position,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: plain,
+                    },
+                ],
+                plain,
+            ),
+            |ctx| app.ui(ctx),
+        );
+    }
+    assert_eq!(app.selected.unwrap().part, 1);
+    assert_eq!(app.entry_pitch, Pitch::from_midi(42));
+}
+
+#[test]
+fn midi_import_requires_a_timing_choice_and_reports_quantization_without_changing_the_source() {
+    let directory = ImportTestDirectory::new();
+    let path = directory.0.join("Detached performance.mid");
+    let mut score = Score::blank();
+    let mut short = event(0, Duration::SixtyFourth, &[60]);
+    short.articulations = vec![Articulation::Staccatissimo];
+    score.parts[0].measures[0].notes = vec![short, event(30, Duration::SixtyFourth, &[62])];
+    let bytes = encore::export::midi(&score).unwrap();
+    std::fs::write(&path, &bytes).unwrap();
+    let ctx = egui::Context::default();
+    configure_context(&ctx);
+    let original = Score::demo();
+    let mut app = controller(original.clone());
+    app.begin_open_document(path.clone()).unwrap();
+    assert_eq!(app.score, original);
+    assert!(app.midi_import.is_some());
+    assert!(app.midi_grid.is_none());
+    let mut frame = 0;
+    for quantized in [false, true] {
+        if quantized {
+            app.midi_grid = Some(15);
+        }
+        let mut button = None;
+        for _ in 0..3 {
+            let output = ctx.run(raw_input(frame, vec![], egui::Modifiers::NONE), |ctx| {
+                app.ui(ctx)
+            });
+            button = visible_text_rect(&output, "Import");
+            frame += 1;
+        }
+        let position = button.unwrap().center();
+        for pressed in [true, false] {
+            let _ = ctx.run(
+                raw_input(
+                    frame,
+                    vec![
+                        egui::Event::PointerMoved(position),
+                        egui::Event::PointerButton {
+                            pos: position,
+                            button: egui::PointerButton::Primary,
+                            pressed,
+                            modifiers: egui::Modifiers::NONE,
+                        },
+                    ],
+                    egui::Modifiers::NONE,
+                ),
+                |ctx| app.ui(ctx),
+            );
+            frame += 1;
+        }
+        if !quantized {
+            assert!(app.midi_import_error.is_some());
+            assert_eq!(app.score, original);
+        }
+    }
+    assert!(app.midi_import.is_none());
+    assert!(app.midi_import_error.is_none());
+    assert!(app.path.is_none() && app.needs_native_save && app.dirty());
+    assert!(
+        app.import_warnings
+            .iter()
+            .any(|warning| warning.to_lowercase().contains("quantiz"))
+    );
+    assert_eq!(app.score.parts[0].measures[0].notes[0].ticks(), 15);
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    app.score.validate().unwrap();
+}
+
+#[test]
+fn staff_clicks_use_the_inverse_spacing_map_in_a_dense_passage() {
+    let ctx = egui::Context::default();
+    configure_context(&ctx);
+    let mut score = Score::blank();
+    score.parts[0].measures[0].notes = (0..8)
+        .map(|i| event(i * 15, Duration::OneTwentyEighth, &[72]))
+        .collect();
+    score.parts[0].measures[0]
+        .notes
+        .push(event(960, Duration::Quarter, &[72]));
+    let mut app = controller(score);
+    app.write_mode = true;
+    app.duration = Duration::Eighth;
+    let mut paper = None;
+    for frame in 0..3 {
+        let output = ctx.run(raw_input(frame, vec![], egui::Modifiers::NONE), |ctx| {
+            app.ui(ctx)
+        });
+        paper = output.shapes.iter().find_map(|shape| match &shape.shape {
+            egui::Shape::Rect(rect)
+                if rect.fill == Color32::WHITE
+                    && rect.rect.width() > 700.0
+                    && rect.rect.height() > 900.0 =>
+            {
+                Some(rect.rect)
+            }
+            _ => None,
+        });
+    }
+    let staff = &app.cached_pages[0].staves[0];
+    let position = paper.unwrap().min
+        + Vec2::new(staff.x_at_tick(720.0), staff.y + 4.0 * staff.spacing) * app.zoom;
+    for (frame, pressed) in [(3, true), (4, false)] {
+        let _ = ctx.run(
+            raw_input(
+                frame,
+                vec![
+                    egui::Event::PointerMoved(position),
+                    egui::Event::PointerButton {
+                        pos: position,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+                egui::Modifiers::NONE,
+            ),
+            |ctx| app.ui(ctx),
+        );
+    }
+    let inserted = app.score.parts[0].measures[0]
+        .notes
+        .iter()
+        .find(|note| note.start == 720)
+        .expect("click must insert at the displayed beat");
+    assert_eq!(inserted.pitches[0].midi(), 64);
+    assert_eq!(inserted.ticks(), 240);
+    app.score.validate().unwrap();
+}
+
+#[test]
+fn clicking_write_allows_immediate_keyboard_entry_and_rest_continuation() {
+    let ctx = egui::Context::default();
+    configure_context(&ctx);
+    let mut app = controller(Score::blank());
+    let plain = egui::Modifiers::NONE;
+    let mut output = ctx.run(raw_input(0, vec![], plain), |ctx| app.ui(ctx));
+    for frame in 1..3 {
+        output = ctx.run(raw_input(frame, vec![], plain), |ctx| app.ui(ctx));
+    }
+    let position = visible_text_rect(&output, "Write").unwrap().center();
+    for (frame, pressed) in [(3, true), (4, false)] {
+        let _ = ctx.run(
+            raw_input(
+                frame,
+                vec![
+                    egui::Event::PointerMoved(position),
+                    egui::Event::PointerButton {
+                        pos: position,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: plain,
+                    },
+                ],
+                plain,
+            ),
+            |ctx| app.ui(ctx),
+        );
+    }
+    assert!(app.write_mode);
+    let _ = ctx.run(
+        raw_input(5, vec![key(egui::Key::C, true, plain)], plain),
+        |ctx| app.ui(ctx),
+    );
+    assert_eq!(app.score.parts[0].measures[0].notes.len(), 1);
+    let _ = ctx.run(
+        raw_input(
+            6,
+            vec![
+                key(egui::Key::C, false, plain),
+                key(egui::Key::Tab, true, plain),
+            ],
+            plain,
+        ),
+        |ctx| app.ui(ctx),
+    );
+    let _ = ctx.run(
+        raw_input(
+            7,
+            vec![
+                key(egui::Key::Tab, false, plain),
+                key(egui::Key::D, true, plain),
+            ],
+            plain,
+        ),
+        |ctx| app.ui(ctx),
+    );
+    assert_eq!(app.score.parts[0].measures[0].notes.len(), 3);
+}
+
+#[test]
+fn tab_rest_keeps_score_entry_focus_for_the_next_pitch() {
+    let ctx = egui::Context::default();
+    configure_context(&ctx);
+    let mut app = controller(Score::blank());
+    app.write_mode = true;
+    let plain = egui::Modifiers::NONE;
+    let _ = ctx.run(raw_input(0, vec![], plain), |ctx| app.ui(ctx));
+    let _ = ctx.run(
+        raw_input(1, vec![key(egui::Key::Tab, true, plain)], plain),
+        |ctx| app.ui(ctx),
+    );
+    let _ = ctx.run(
+        raw_input(
+            2,
+            vec![
+                key(egui::Key::Tab, false, plain),
+                key(egui::Key::C, true, plain),
+            ],
+            plain,
+        ),
+        |ctx| app.ui(ctx),
+    );
+    let notes = &app.score.parts[0].measures[0].notes;
+    assert_eq!(notes.len(), 2);
+    assert!(notes[0].pitches.is_empty());
+    assert_eq!(notes[1].pitches[0].midi(), 60);
+    assert_eq!(notes[1].start, 480);
+}
+
+#[test]
+fn replacing_a_document_clears_entry_groups_and_layers_but_preserves_preferences() {
+    let mut app = controller(Score::blank());
+    app.theme = Theme::Light;
+    app.entry_profile = EntryProfile::Speedy;
+    app.active_layer = 3;
+    app.tuplet = Some(Tuplet::TRIPLET);
+    app.tuplet_remaining = Some(2);
+    app.duration = Duration::OneTwentyEighth;
+    app.dotted = true;
+    app.rest = true;
+    app.accidental = Some(2);
+    app.entry_pitch = Pitch::from_midi(84);
+    app.octave = 6;
+    app.replace_document(Score::blank(), None);
+    assert_eq!(app.active_layer, 0);
+    assert!(app.tuplet.is_none() && app.tuplet_remaining.is_none());
+    assert_eq!(app.duration, Duration::Quarter);
+    assert!(!app.dotted && !app.rest && app.accidental.is_none());
+    assert_eq!(app.entry_pitch, Pitch::from_midi(60));
+    assert_eq!(app.octave, 4);
+    assert_eq!(app.theme, Theme::Light);
+    assert_eq!(app.entry_profile, EntryProfile::Speedy);
+}
+
+#[test]
+fn document_confirmation_stops_later_key_and_paste_events_in_the_same_frame() {
+    let ctx = egui::Context::default();
+    configure_context(&ctx);
+    let mut app = controller(Score::blank());
+    app.write_mode = true;
+    app.score.title = "Unsaved title".into();
+    let original = app.score.clone();
+    let plain = egui::Modifiers::NONE;
+    let command = egui::Modifiers {
+        ctrl: !cfg!(target_os = "macos"),
+        mac_cmd: cfg!(target_os = "macos"),
+        command: true,
+        ..plain
+    };
+    let _ = ctx.run(raw_input(0, vec![], plain), |ctx| app.ui(ctx));
+    let _ = ctx.run(
+        raw_input(
+            1,
+            vec![
+                key(egui::Key::N, true, command),
+                key(egui::Key::D, true, plain),
+                egui::Event::Paste("invalid clipboard text".into()),
+            ],
+            command,
+        ),
+        |ctx| app.ui(ctx),
+    );
+    assert!(app.pending.is_some());
+    assert_eq!(app.score, original);
+    assert!(app.undo.is_empty());
+}
+
+#[test]
+fn native_copy_and_paste_events_use_the_score_clipboard_and_record_undo() {
+    let ctx = egui::Context::default();
+    configure_context(&ctx);
+    let mut app = controller(Score::blank());
+    app.write_mode = true;
+    let plain = egui::Modifiers::NONE;
+    let _ = ctx.run(raw_input(0, vec![], plain), |ctx| app.ui(ctx));
+    let _ = ctx.run(
+        raw_input(1, vec![key(egui::Key::C, true, plain)], plain),
+        |ctx| app.ui(ctx),
+    );
+    let output = ctx.run(
+        raw_input(
+            2,
+            vec![key(egui::Key::C, false, plain), egui::Event::Copy],
+            plain,
+        ),
+        |ctx| app.ui(ctx),
+    );
+    let copied = output
+        .platform_output
+        .commands
+        .iter()
+        .find_map(|command| match command {
+            egui::OutputCommand::CopyText(text) => Some(text.clone()),
+            _ => None,
+        })
+        .expect("native copy emits clipboard data");
+    assert_eq!(app.undo.len(), 1);
+    let _ = ctx.run(
+        raw_input(3, vec![egui::Event::Paste(copied)], plain),
+        |ctx| app.ui(ctx),
+    );
+    assert_eq!(app.score.parts[0].measures[0].notes.len(), 2);
+    assert_eq!(app.score.parts[0].measures[0].notes[1].start, 480);
+    assert_eq!(app.undo.len(), 2);
+    app.undo();
+    assert_eq!(app.score.parts[0].measures[0].notes.len(), 1);
+}
+
 fn controller(score: Score) -> EncoreApp {
     EncoreApp::from_score(score, None, "Ready".into())
+}
+
+#[test]
+fn trimming_a_required_coda_target_is_rejected_without_changing_the_score() {
+    use encore::repeats::{NavigationKind, NavigationMark};
+    let mut score = Score::blank();
+    score.notation.navigation = [
+        (0, NavigationKind::ToCoda),
+        (2, NavigationKind::DaCapoAlCoda),
+        (3, NavigationKind::Coda),
+    ]
+    .into_iter()
+    .map(|(measure, kind)| NavigationMark {
+        measure,
+        kind,
+        play_repeats_after_jump: false,
+    })
+    .collect();
+    score.validate().unwrap();
+    let mut app = controller(score.clone());
+    assert!(
+        app.trim_last_empty_bar()
+            .unwrap_err()
+            .contains("coda target")
+    );
+    assert_eq!(app.score, score);
+    assert!(!app.dirty());
+    app.score.validate().unwrap();
+}
+
+#[test]
+fn selecting_another_staff_in_a_part_view_follows_that_staff_before_keyboard_entry() {
+    let ctx = egui::Context::default();
+    configure_context(&ctx);
+    let mut score = Score::blank();
+    score.parts[0].instrument = Instrument::Clarinet;
+    let mut app = controller(score);
+    app.part_view = true;
+    app.write_mode = true;
+    let _ = ctx.run(raw_input(0, vec![], egui::Modifiers::NONE), |ctx| {
+        app.ui(ctx)
+    });
+    app.active_part = 1;
+    app.octave = 4;
+    let _ = ctx.run(
+        raw_input(
+            1,
+            vec![key(egui::Key::C, true, egui::Modifiers::NONE)],
+            egui::Modifiers::NONE,
+        ),
+        |ctx| app.ui(ctx),
+    );
+    assert_eq!(app.selected_linked_part, 1);
+    assert_eq!(
+        app.score.parts[1].measures[0].notes[0].pitches[0].midi(),
+        60
+    );
+    assert!(app.score.parts[0].measures[0].notes.is_empty());
+    assert!(
+        app.cached_pages
+            .iter()
+            .flat_map(|page| &page.staves)
+            .all(|staff| staff.part == 1)
+    );
+}
+
+#[test]
+fn written_part_mouse_entry_edits_source_and_view_shortcuts_leave_it_saved() {
+    let ctx = egui::Context::default();
+    configure_context(&ctx);
+    let mut score = Score::blank();
+    score.parts[0].instrument = Instrument::Clarinet;
+    let mut app = controller(score);
+    app.part_view = true;
+    app.write_mode = true;
+    let mut paper = None;
+    for frame in 0..3 {
+        let output = ctx.run(raw_input(frame, vec![], egui::Modifiers::NONE), |ctx| {
+            app.ui(ctx)
+        });
+        paper = output.shapes.iter().find_map(|shape| match &shape.shape {
+            egui::Shape::Rect(rect)
+                if rect.fill == Color32::WHITE
+                    && rect.rect.width() > 700.0
+                    && rect.rect.height() > 900.0 =>
+            {
+                Some(rect.rect)
+            }
+            _ => None,
+        });
+    }
+    assert!(!app.dirty());
+    let staff = &app.cached_pages[0].staves[0];
+    // Written D4 below the treble staff sounds C4 on a B-flat clarinet.
+    let position = paper.unwrap().min + Vec2::new(staff.x_at_tick(0.0), staff.y + 45.0) * app.zoom;
+    for (frame, pressed) in [(3, true), (4, false)] {
+        let _ = ctx.run(
+            raw_input(
+                frame,
+                vec![
+                    egui::Event::PointerMoved(position),
+                    egui::Event::PointerButton {
+                        pos: position,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+                egui::Modifiers::NONE,
+            ),
+            |ctx| app.ui(ctx),
+        );
+    }
+    assert_eq!(
+        app.score.parts[0].measures[0].notes[0].pitches[0].midi(),
+        60
+    );
+    assert_eq!(app.undo.len(), 1);
+    let edited = app.score.clone();
+    let modifiers = egui::Modifiers {
+        ctrl: true,
+        command: true,
+        alt: true,
+        ..Default::default()
+    };
+    for (frame, key) in [
+        (5, egui::Key::Period),
+        (6, egui::Key::Comma),
+        (7, egui::Key::Slash),
+    ] {
+        let _ = ctx.run(
+            raw_input(frame, vec![key_event_for_test(key, modifiers)], modifiers),
+            |ctx| app.ui(ctx),
+        );
+    }
+    assert_eq!(app.score, edited);
+    assert_eq!(app.undo.len(), 1);
+    app.score.validate().unwrap();
+}
+
+fn key_event_for_test(key_value: egui::Key, modifiers: egui::Modifiers) -> egui::Event {
+    key(key_value, true, modifiers)
 }
 
 fn screenshot_theme(app: &mut EncoreApp, ctx: &egui::Context) {
@@ -55,11 +820,85 @@ fn appearance_preferences_restore_and_save_without_serializing_the_score() {
         assert_eq!(Theme::from_storage(Some(&storage)), theme);
         assert_eq!(storage.0["encore.theme"], theme.key());
         assert_eq!(storage.0["unrelated.preference"], "keep");
-        assert_eq!(storage.0.len(), 2);
+        assert_eq!(storage.0["encore.entry-profile"], app.entry_profile.key());
+        assert_eq!(storage.0.len(), 3);
         assert_eq!(app.score, score);
         assert!(!app.dirty());
         assert!(app.undo.is_empty() && app.redo.is_empty());
     }
+}
+
+#[test]
+fn default_dark_appearance_is_monochromatic_with_readable_control_text() {
+    let ctx = egui::Context::default();
+    configure_context(&ctx);
+    let app = controller(Score::blank());
+    assert_eq!(app.theme, Theme::Dark);
+    assert!(ctx.style().visuals.dark_mode);
+    let colors = Palette::for_theme(app.theme);
+    let neutral = |color: Color32| {
+        assert_eq!(color.r(), color.g(), "red and green must be neutral");
+        assert_eq!(color.g(), color.b(), "green and blue must be neutral");
+    };
+    for color in [
+        colors.text,
+        colors.muted,
+        colors.accent,
+        colors.surface,
+        colors.raised,
+        colors.border,
+        colors.selected,
+        colors.workspace,
+        colors.hovered,
+        colors.key_ink,
+        colors.key_hover,
+        colors.playhead,
+        ctx.style().visuals.warn_fg_color,
+        ctx.style().visuals.error_fg_color,
+    ] {
+        neutral(color);
+    }
+    let luminance = |color: Color32| {
+        let srgb = f64::from(color.r()) / 255.0;
+        if srgb <= 0.04045 {
+            srgb / 12.92
+        } else {
+            ((srgb + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    let contrast = |a, b| {
+        let a = luminance(a);
+        let b = luminance(b);
+        (a.max(b) + 0.05) / (a.min(b) + 0.05)
+    };
+    for background in [
+        colors.surface,
+        colors.raised,
+        colors.selected,
+        colors.workspace,
+        colors.hovered,
+    ] {
+        assert!(contrast(colors.text, background) >= 4.5);
+        assert!(contrast(colors.muted, background) >= 4.5);
+    }
+    assert!(contrast(colors.accent, colors.workspace) >= 7.0);
+}
+
+#[test]
+fn score_preview_colors_follow_the_theme_without_changing_page_primitives() {
+    let selected_note = [42, 111, 192];
+    let selection_fill = [222, 237, 255];
+    for original in [selected_note, selection_fill, [29, 34, 42], [255; 3]] {
+        let dark = page_preview_color(original, true);
+        assert_eq!(dark.r(), dark.g());
+        assert_eq!(dark.g(), dark.b());
+        assert_eq!(
+            page_preview_color(original, false),
+            Color32::from_rgb(original[0], original[1], original[2])
+        );
+    }
+    assert!(page_preview_color(selected_note, true).r() < 128);
+    assert!(page_preview_color(selection_fill, true).r() > 220);
 }
 
 struct ImportTestDirectory(PathBuf);
@@ -199,12 +1038,17 @@ fn clicking_the_staff_enters_the_pitch_at_the_written_position() {
 
 fn event(start: u32, duration: Duration, pitches: &[u8]) -> Note {
     Note {
+        voice: 0,
+        voice_launch: None,
         start,
         duration,
+        tuplet: None,
+        layer: 0,
         dotted: false,
         pitches: pitches.iter().map(|midi| Pitch::from_midi(*midi)).collect(),
         velocity: 88,
         staccato: false,
+        articulations: vec![],
         tied: false,
     }
 }
@@ -651,21 +1495,142 @@ impl SoftwarePainter {
 fn headless_full_editor_renders_notation_and_font_textures() {
     let ctx = egui::Context::default();
     configure_context(&ctx);
-    let mut app = controller(Score::demo());
+    let score = std::env::var_os("ENCORE_HEADLESS_SCORE").map_or_else(Score::demo, |path| {
+        Score::load(&PathBuf::from(path)).unwrap()
+    });
+    let mut app = controller(score);
+    if let Ok(index) = std::env::var("ENCORE_HEADLESS_PART") {
+        app.part_view = true;
+        app.selected_linked_part = index.parse().unwrap();
+    }
+    if std::env::var_os("ENCORE_HEADLESS_PERCUSSION").is_some()
+        && let Some(part) = app
+            .score
+            .parts
+            .iter()
+            .position(|staff| staff.percussion.is_some())
+    {
+        app.active_part = part;
+        app.open_percussion();
+    }
+    if std::env::var_os("ENCORE_HEADLESS_GROUPS").is_some() {
+        app.open_groups();
+    }
+    if std::env::var_os("ENCORE_HEADLESS_TREMOLOS").is_some() {
+        app.selected = app
+            .score
+            .parts
+            .iter()
+            .enumerate()
+            .find_map(|(part, staff)| {
+                staff
+                    .measures
+                    .iter()
+                    .enumerate()
+                    .find_map(|(measure, bar)| {
+                        bar.notes
+                            .iter()
+                            .position(|note| !note.pitches.is_empty())
+                            .map(|note| Selection {
+                                part,
+                                measure,
+                                note,
+                            })
+                    })
+            });
+        app.open_tremolos();
+    }
+    app.show_layout = std::env::var_os("ENCORE_HEADLESS_LAYOUT").is_some();
+    if std::env::var_os("ENCORE_HEADLESS_STYLE").is_some() {
+        app.show_entry_style = true;
+        app.selected = Some(Selection {
+            part: 0,
+            measure: 0,
+            note: 0,
+        });
+    }
+    if std::env::var_os("ENCORE_HEADLESS_GRACE").is_some() {
+        app.selected = app
+            .score
+            .parts
+            .iter()
+            .enumerate()
+            .find_map(|(part, staff)| {
+                staff
+                    .measures
+                    .iter()
+                    .enumerate()
+                    .find_map(|(measure, bar)| {
+                        bar.notes
+                            .iter()
+                            .position(|note| !note.pitches.is_empty())
+                            .map(|note| Selection {
+                                part,
+                                measure,
+                                note,
+                            })
+                    })
+            });
+        app.open_grace();
+    }
+    if std::env::var_os("ENCORE_HEADLESS_CHORDS").is_some() {
+        app.open_chords();
+    }
+    if std::env::var_os("ENCORE_HEADLESS_LINES").is_some() {
+        app.open_lines();
+    }
+    if std::env::var_os("ENCORE_HEADLESS_ORNAMENTS").is_some() {
+        app.selected = app
+            .score
+            .parts
+            .iter()
+            .enumerate()
+            .find_map(|(part, staff)| {
+                staff
+                    .measures
+                    .iter()
+                    .enumerate()
+                    .find_map(|(measure, bar)| {
+                        bar.notes
+                            .iter()
+                            .position(|n| !n.pitches.is_empty())
+                            .map(|note| Selection {
+                                part,
+                                measure,
+                                note,
+                            })
+                    })
+            });
+        app.open_ornaments();
+    }
+    if std::env::var_os("ENCORE_HEADLESS_SLURS").is_some() {
+        app.open_slurs();
+    }
+    app.show_parts = std::env::var_os("ENCORE_HEADLESS_PARTS").is_some();
+    app.playback_editor.open = std::env::var_os("ENCORE_HEADLESS_PLAYBACK").is_some();
+    let (width, height) = std::env::var("ENCORE_HEADLESS_SIZE")
+        .ok()
+        .and_then(|s| {
+            s.split_once('x')
+                .map(|(w, h)| (w.parse::<usize>().unwrap(), h.parse::<usize>().unwrap()))
+        })
+        .unwrap_or((1440, 1000));
     screenshot_theme(&mut app, &ctx);
     if let Some(path) = std::env::var_os("ENCORE_LAB_SOUNDFONT") {
         app.set_audio_engine(AudioEngine::from_soundfont(&PathBuf::from(path)).unwrap());
     }
     let mut textures = HashMap::new();
-    let mut painter = SoftwarePainter::new(1440, 1000);
-    for frame in 0..3 {
-        let output = ctx.run(
-            raw_input(frame, vec![], egui::Modifiers::default()),
-            |ctx| app.ui(ctx),
-        );
+    let mut painter = SoftwarePainter::new(width, height);
+    for frame in 0..12 {
+        let mut input = raw_input(frame, vec![], egui::Modifiers::default());
+        input.screen_rect = Some(Rect::from_min_size(
+            Pos2::ZERO,
+            Vec2::new(width as f32, height as f32),
+        ));
+        let output = ctx.run(input, |ctx| app.ui(ctx));
         assert!(!output.shapes.is_empty());
         apply_textures(&mut textures, &output.textures_delta);
-        if frame == 2 {
+        if frame == 11 {
             let meshes = ctx.tessellate(output.shapes, output.pixels_per_point);
             assert!(meshes.iter().any(|primitive| matches!(&primitive.primitive,egui::epaint::Primitive::Mesh(mesh) if mesh.indices.len()>100)));
             painter.paint(&meshes, &textures, output.pixels_per_point);
@@ -695,8 +1660,20 @@ fn headless_full_editor_renders_notation_and_font_textures() {
         "Expected visible staff lines, notes, labels, and fonts; found {dark_pixels} dark pixels"
     );
     assert!(
-        paper_pixels > 100_000,
-        "Expected a visible white score page"
+        app.show_layout
+            || app.show_entry_style
+            || app.grace_editor.open
+            || app.chord_editor.open
+            || app.lines_editor.open
+            || app.ornaments_editor.open
+            || app.percussion_editor.open
+            || app.groups_editor.open
+            || app.tremolos_editor.open
+            || app.notation_editor.open
+            || app.show_parts
+            || app.playback_editor.open
+            || paper_pixels > width * height / 25,
+        "Expected a visible white score page or an open editing dialog"
     );
     if let Some(path) = std::env::var_os("ENCORE_HEADLESS_SCREENSHOT") {
         let path = PathBuf::from(path);
@@ -1288,4 +2265,723 @@ fn instrument_library_keeps_primary_controls_visible_at_the_smallest_window() {
             path.display()
         );
     }
+}
+
+#[test]
+fn engraving_shortcuts_undo_and_layer_selection_follow_real_editor_frames() {
+    let ctx = egui::Context::default();
+    configure_context(&ctx);
+    let mut score = Score::blank();
+    score.parts[0].measures[0].notes = vec![event(0, Duration::Quarter, &[61, 65])];
+    let mut app = controller(score.clone());
+    app.write_mode = true;
+    app.selected = Some(Selection {
+        part: 0,
+        measure: 0,
+        note: 0,
+    });
+    app.entry_pitch = Pitch::from_midi(61);
+    let plain = egui::Modifiers::NONE;
+    let command = egui::Modifiers {
+        ctrl: true,
+        command: true,
+        ..plain
+    };
+    for (frame, events, mods) in [
+        (0, vec![], plain),
+        (1, vec![key(egui::Key::L, true, plain)], plain),
+        (
+            2,
+            vec![
+                key(egui::Key::L, false, plain),
+                key(egui::Key::P, true, plain),
+            ],
+            plain,
+        ),
+    ] {
+        let _ = ctx.run(raw_input(frame, events, mods), |ctx| app.ui(ctx));
+    }
+    let anchor = encore::document::Anchor {
+        voice: 0,
+        part: 0,
+        measure: 0,
+        tick: 0,
+        layer: 0,
+    };
+    assert_eq!(
+        encore::entry_style::at(&app.score, &anchor)
+            .unwrap()
+            .accidental(61),
+        encore::entry_style::AccidentalDisplay::Parenthesized
+    );
+    let _ = ctx.run(
+        raw_input(
+            3,
+            vec![
+                key(egui::Key::P, false, plain),
+                key(egui::Key::Z, true, command),
+            ],
+            command,
+        ),
+        |ctx| app.ui(ctx),
+    );
+    assert_eq!(
+        encore::entry_style::at(&app.score, &anchor)
+            .unwrap()
+            .accidental(61),
+        encore::entry_style::AccidentalDisplay::Auto
+    );
+    assert_eq!(app.score.parts, score.parts);
+    let layer_mod = egui::Modifiers {
+        alt: true,
+        shift: true,
+        ..plain
+    };
+    let _ = ctx.run(
+        raw_input(
+            4,
+            vec![
+                key(egui::Key::Z, false, command),
+                key(egui::Key::Num3, true, layer_mod),
+            ],
+            layer_mod,
+        ),
+        |ctx| app.ui(ctx),
+    );
+    assert_eq!(app.active_layer, 2);
+    assert!(app.selected.is_none());
+    assert_eq!(app.score.parts, score.parts);
+}
+
+#[test]
+fn expression_editor_prevents_note_commands_until_escape() {
+    let ctx = egui::Context::default();
+    configure_context(&ctx);
+    let mut app = controller(Score::blank());
+    app.write_mode = true;
+    app.expressions_editor.open = true;
+    let before = app.score.clone();
+    let plain = egui::Modifiers::NONE;
+    for (frame, events) in [
+        (0, vec![]),
+        (1, vec![key(egui::Key::C, true, plain)]),
+        (
+            2,
+            vec![
+                key(egui::Key::C, false, plain),
+                key(egui::Key::Escape, true, plain),
+            ],
+        ),
+    ] {
+        let _ = ctx.run(raw_input(frame, events, plain), |ctx| app.ui(ctx));
+    }
+    assert_eq!(app.score, before);
+    assert!(!app.expressions_editor.open);
+}
+
+#[test]
+fn page_navigation_and_fit_view_scroll_the_score_without_dirtying_it() {
+    let ctx = egui::Context::default();
+    configure_context(&ctx);
+    let mut app = controller(Score::demo());
+    let before = app.score.clone();
+    let plain = egui::Modifiers::NONE;
+    for frame in 0..3 {
+        let _ = ctx.run(raw_input(frame, vec![], plain), |ctx| app.ui(ctx));
+    }
+    assert!(app.navigation.content.y > app.navigation.viewport.y);
+    let _ = ctx.run(
+        raw_input(3, vec![key(egui::Key::PageDown, true, plain)], plain),
+        |ctx| app.ui(ctx),
+    );
+    assert!(app.navigation.scroll.y > 0.0);
+    app.fit_view(true);
+    let _ = ctx.run(
+        raw_input(4, vec![key(egui::Key::PageDown, false, plain)], plain),
+        |ctx| app.ui(ctx),
+    );
+    assert!(app.cached_pages[0].width * app.zoom <= app.navigation.viewport.x);
+    assert!(app.cached_pages[0].height * app.zoom <= app.navigation.viewport.y);
+    assert_eq!(app.score, before);
+    assert!(!app.dirty());
+    assert!(app.undo.is_empty());
+}
+
+#[test]
+fn ottava_mouse_entry_inverts_the_printed_pitch() {
+    let ctx = egui::Context::default();
+    configure_context(&ctx);
+    let mut score = Score::blank();
+    let a = encore::document::Anchor {
+        voice: 0,
+        part: 0,
+        measure: 0,
+        tick: 0,
+        layer: 0,
+    };
+    score
+        .notation
+        .lines
+        .push(encore::lines::PerformanceLine::new(
+            a,
+            encore::document::Anchor { tick: 960, ..a },
+            encore::lines::LineKind::Ottava { semitones: 12 },
+        ));
+    let mut app = controller(score);
+    app.write_mode = true;
+    let plain = egui::Modifiers::NONE;
+    let mut paper = None;
+    for frame in 0..3 {
+        let output = ctx.run(raw_input(frame, vec![], plain), |ctx| app.ui(ctx));
+        paper = output.shapes.iter().find_map(|shape| match &shape.shape {
+            egui::Shape::Rect(rect)
+                if rect.fill == Color32::WHITE
+                    && rect.rect.width() > 700.0
+                    && rect.rect.height() > 900.0 =>
+            {
+                Some(rect.rect)
+            }
+            _ => None,
+        });
+    }
+    let staff = &app.cached_pages[0].staves[0];
+    let point = paper.unwrap().min
+        + Vec2::new(staff.x_at_tick(0.0), staff.y + staff.spacing * 5.0) * app.zoom;
+    for (frame, pressed) in [(3, true), (4, false)] {
+        let _ = ctx.run(
+            raw_input(
+                frame,
+                vec![
+                    egui::Event::PointerMoved(point),
+                    egui::Event::PointerButton {
+                        pos: point,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: plain,
+                    },
+                ],
+                plain,
+            ),
+            |ctx| app.ui(ctx),
+        );
+    }
+    assert_eq!(
+        app.score.parts[0].measures[0].notes[0].pitches[0].midi(),
+        72
+    );
+    app.score.validate().unwrap();
+}
+
+#[test]
+fn tempo_clock_is_reused_for_navigation_and_refreshed_for_music_changes() {
+    let ctx = egui::Context::default();
+    configure_context(&ctx);
+    let mut app = controller(Score::demo());
+    let plain = egui::Modifiers::NONE;
+    let _ = ctx.run(raw_input(0, vec![], plain), |ctx| app.ui(ctx));
+    let clock = app.playback_editor.clock.clone().unwrap();
+    let seconds = clock.duration_seconds();
+    app.selected = Some(Selection {
+        part: 0,
+        measure: 0,
+        note: 0,
+    });
+    let _ = ctx.run(raw_input(1, vec![], plain), |ctx| app.ui(ctx));
+    assert!(std::sync::Arc::ptr_eq(
+        &clock,
+        app.playback_editor.clock.as_ref().unwrap()
+    ));
+    app.score.tempo = app.score.tempo.saturating_add(20);
+    let _ = ctx.run(raw_input(2, vec![], plain), |ctx| app.ui(ctx));
+    assert!(!std::sync::Arc::ptr_eq(
+        &clock,
+        app.playback_editor.clock.as_ref().unwrap()
+    ));
+    assert!(app.cached_score_seconds() < seconds as f32);
+}
+
+#[test]
+fn chord_typing_preserves_global_undo_and_never_enters_notes() {
+    let ctx = egui::Context::default();
+    configure_context(&ctx);
+    let mut app = controller(Score::blank());
+    let before = app.score.clone();
+    let plain = egui::Modifiers::NONE;
+    app.open_chords();
+    app.chord_editor.open = false;
+    let _ = ctx.run(
+        raw_input(
+            0,
+            vec![
+                egui::Event::Text("Cmaj7".into()),
+                key(egui::Key::Enter, true, plain),
+            ],
+            plain,
+        ),
+        |ctx| app.ui(ctx),
+    );
+    assert_eq!(app.score.notation.chords.len(), 1);
+    assert_eq!(app.score.parts, before.parts);
+    assert_eq!(app.undo.len(), 1);
+    let command = egui::Modifiers {
+        ctrl: true,
+        command: true,
+        ..plain
+    };
+    let _ = ctx.run(
+        raw_input(
+            1,
+            vec![
+                key(egui::Key::Enter, false, plain),
+                key(egui::Key::Z, true, command),
+            ],
+            command,
+        ),
+        |ctx| app.ui(ctx),
+    );
+    assert_eq!(app.score, before);
+    assert!(!app.dirty());
+    assert!(app.chord_editor.active);
+}
+
+#[test]
+fn linked_part_chord_and_grace_clicks_resolve_their_source_staff() {
+    let ctx = egui::Context::default();
+    configure_context(&ctx);
+    let mut score = Score::blank();
+    score.parts[1].measures[0].notes = vec![event(0, Duration::Quarter, &[48])];
+    let anchor = encore::document::Anchor {
+        voice: 0,
+        part: 1,
+        measure: 0,
+        tick: 0,
+        layer: 0,
+    };
+    score.notation.grace.push(encore::grace::GraceGroup::new(
+        anchor,
+        vec![encore::grace::GraceNote::new(
+            Pitch::from_midi(50),
+            Duration::Eighth,
+        )],
+    ));
+    score.notation.chords.push(encore::chords::ChordSymbol::new(
+        anchor,
+        encore::chords::parse("Dm7").unwrap(),
+    ));
+    let mut part = encore::parts::default_definitions(&score)[0].clone();
+    part.staves = vec![1];
+    score.notation.parts = vec![part];
+    let before = score.clone();
+    let mut app = controller(score);
+    app.part_view = true;
+    let plain = egui::Modifiers::NONE;
+    let mut paper = None;
+    for frame in 0..3 {
+        let output = ctx.run(raw_input(frame, vec![], plain), |ctx| app.ui(ctx));
+        paper = output.shapes.iter().find_map(|shape| match &shape.shape {
+            egui::Shape::Rect(rect)
+                if rect.fill == Color32::WHITE
+                    && rect.rect.width() > 700.0
+                    && rect.rect.height() > 900.0 =>
+            {
+                Some(rect.rect)
+            }
+            _ => None,
+        });
+    }
+    let hit = app.cached_pages[0].chord_hits.first().unwrap();
+    assert_eq!(hit.anchor.part, 1);
+    let chord_point = paper.unwrap().min
+        + Vec2::new(hit.x + hit.width * 0.5, hit.y + hit.height * 0.5) * app.zoom;
+    for (frame, pressed) in [(3, true), (4, false)] {
+        let _ = ctx.run(
+            raw_input(
+                frame,
+                vec![
+                    egui::Event::PointerMoved(chord_point),
+                    egui::Event::PointerButton {
+                        pos: chord_point,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: plain,
+                    },
+                ],
+                plain,
+            ),
+            |ctx| app.ui(ctx),
+        );
+    }
+    assert!(app.chord_editor.open);
+    assert_eq!(app.active_part, 1);
+    assert_eq!(app.score, before);
+    app.exit_chord_entry();
+    ctx.memory_mut(|memory| memory.move_focus(egui::FocusDirection::None));
+    for frame in 5..17 {
+        let _ = ctx.run(raw_input(frame, vec![], plain), |ctx| app.ui(ctx));
+    }
+    let hit = app.cached_pages[0].grace_hits.first().unwrap();
+    assert_eq!(hit.selection.anchor.part, 1);
+    let point = paper.unwrap().min + Vec2::new(hit.x, hit.y) * app.zoom;
+    for (frame, pressed) in [(17, true), (18, false)] {
+        let _ = ctx.run(
+            raw_input(
+                frame,
+                vec![
+                    egui::Event::PointerMoved(point),
+                    egui::Event::PointerButton {
+                        pos: point,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: plain,
+                    },
+                ],
+                plain,
+            ),
+            |ctx| app.ui(ctx),
+        );
+    }
+    assert!(app.grace_editor.open);
+    assert_eq!(app.grace_editor.selected.unwrap().anchor.part, 1);
+    assert_eq!(app.score, before);
+}
+
+#[test]
+fn next_part_shortcut_activates_the_new_staff_before_reconciliation() {
+    let ctx = egui::Context::default();
+    configure_context(&ctx);
+    let mut score = Score::blank();
+    score.parts[1].instrument = Instrument::Flute;
+    score.parts[1].name = "Flute".into();
+    let mut app = controller(score.clone());
+    app.activate_linked_part(0);
+    let plain = egui::Modifiers::NONE;
+    for frame in 0..2 {
+        let _ = ctx.run(raw_input(frame, vec![], plain), |ctx| app.ui(ctx));
+    }
+    let modifiers = egui::Modifiers {
+        ctrl: true,
+        command: true,
+        alt: true,
+        ..plain
+    };
+    let _ = ctx.run(
+        raw_input(2, vec![key(egui::Key::Period, true, modifiers)], modifiers),
+        |ctx| app.ui(ctx),
+    );
+    assert_eq!(app.selected_linked_part, 1);
+    assert_eq!(app.active_part, 1);
+    assert!(
+        app.cached_pages
+            .iter()
+            .flat_map(|page| &page.staves)
+            .all(|staff| staff.part == 1)
+    );
+    assert_eq!(app.score, score);
+    assert!(!app.dirty());
+}
+
+#[test]
+fn speedy_voice_shortcut_enters_secondary_with_real_undo_redo_frames() {
+    let ctx = egui::Context::default();
+    configure_context(&ctx);
+    let mut score = Score::blank();
+    score.parts[0].measures[0]
+        .notes
+        .push(event(0, Duration::Half, &[72]));
+    let original = score.clone();
+    let mut app = controller(score);
+    app.write_mode = true;
+    app.entry_profile = EntryProfile::Speedy;
+    app.selected = Some(Selection {
+        part: 0,
+        measure: 0,
+        note: 0,
+    });
+    let plain = egui::Modifiers::NONE;
+    let command = egui::Modifiers {
+        ctrl: true,
+        command: true,
+        ..plain
+    };
+    let _ = ctx.run(raw_input(0, vec![], plain), |ctx| app.ui(ctx));
+    let _ = ctx.run(
+        raw_input(1, vec![key(egui::Key::Quote, true, plain)], plain),
+        |ctx| app.ui(ctx),
+    );
+    assert_eq!(app.active_voice, 1);
+    assert_eq!(app.score, original);
+    assert!(app.undo.is_empty());
+    let _ = ctx.run(
+        raw_input(
+            2,
+            vec![
+                key(egui::Key::Quote, false, plain),
+                key(egui::Key::Num4, true, plain),
+            ],
+            plain,
+        ),
+        |ctx| app.ui(ctx),
+    );
+    let entered = app.score.clone();
+    assert_eq!(entered.parts[0].measures[0].notes.len(), 2);
+    assert_eq!(entered.parts[0].measures[0].notes[1].voice_launch, Some(0));
+    assert_eq!(app.undo.len(), 1);
+    let _ = ctx.run(
+        raw_input(
+            3,
+            vec![
+                key(egui::Key::Num4, false, plain),
+                key(egui::Key::Z, true, command),
+            ],
+            command,
+        ),
+        |ctx| app.ui(ctx),
+    );
+    assert_eq!(app.score, original);
+    let _ = ctx.run(
+        raw_input(
+            4,
+            vec![
+                key(egui::Key::Z, false, command),
+                key(egui::Key::Y, true, command),
+            ],
+            command,
+        ),
+        |ctx| app.ui(ctx),
+    );
+    assert_eq!(app.score, entered);
+    app.selected = Some(Selection {
+        part: 0,
+        measure: 0,
+        note: 1,
+    });
+    app.apply_style_command(shortcuts::StyleCommand::FlipStem);
+    assert_eq!(
+        app.score.notation.entries[0].stem,
+        encore::entry_style::StemDirection::Up
+    );
+}
+
+fn voiced_controller_fixture() -> Score {
+    use encore::parts::{ChordFilter, StaffVoicing};
+    let mut score = Score::blank();
+    let mut excluded = event(0, Duration::Quarter, &[60]);
+    excluded.layer = 0;
+    let mut first = event(0, Duration::Quarter, &[60, 76, 67]);
+    first.layer = 1;
+    let mut second = event(480, Duration::Quarter, &[62, 77, 69]);
+    second.layer = 1;
+    score.parts[1].measures[0].notes = vec![excluded, first, second];
+    score.parts[1].instrument = Instrument::Clarinet;
+    let mut definition = encore::parts::default_definitions(&score)
+        .last()
+        .unwrap()
+        .clone();
+    definition.staves = vec![1];
+    definition.voicing = vec![StaffVoicing {
+        lanes: 1 << 1,
+        chord: ChordFilter::Highest,
+        ..StaffVoicing::new(1)
+    }];
+    score.notation.parts = vec![definition];
+    score.validate().unwrap();
+    score
+}
+#[test]
+fn voiced_parts_block_hidden_source_mutations_and_preserve_allowed_controls() {
+    let score = voiced_controller_fixture();
+    let mut app = controller(score.clone());
+    app.activate_linked_part(0);
+    assert!(app.view_is_voiced());
+    app.selected_linked_part = 99;
+    assert!(app.selected_part_projection().unwrap().unwrap().is_voiced());
+    assert!(app.view_is_voiced());
+    assert!(!app.allow_source_edit());
+    app.selected_linked_part = 0;
+    app.selected = Some(Selection {
+        part: 1,
+        measure: 0,
+        note: 1,
+    });
+    app.delete_selected();
+    assert_eq!(app.score, score);
+    assert!(!app.edit_entry(|n| n.pitches.clear()));
+    assert_eq!(app.score, score);
+    app.enter_note(1, 0, 960, Pitch::from_midi(70), false);
+    assert_eq!(app.score, score);
+    let ctx = egui::Context::default();
+    app.copy_selection(&ctx, true);
+    assert_eq!(app.score, score);
+    app.score.parts[1].measures[0].notes[0].pitches.clear();
+    app.score.parts[1].volume = 0.42;
+    app.score.notation.parts[0].layout.staff_gap = 12.0;
+    app.protect_voiced_music(&score);
+    assert_eq!(
+        app.score.parts[1].measures[0].notes,
+        score.parts[1].measures[0].notes
+    );
+    assert_eq!(app.score.parts[1].volume, 0.42);
+    assert_eq!(app.score.notation.parts[0].layout.staff_gap, 12.0);
+    app.selected = Some(Selection {
+        part: 1,
+        measure: 0,
+        note: 1,
+    });
+    app.edit_voicing_source();
+    assert!(!app.part_view);
+    assert!(app.edit_entry(|n| n.velocity = 91));
+    assert_eq!(app.score.parts[1].measures[0].notes[1].velocity, 91);
+}
+#[test]
+fn voiced_part_clicks_select_retained_source_pitch_without_dirtying_music() {
+    let ctx = egui::Context::default();
+    configure_context(&ctx);
+    let score = voiced_controller_fixture();
+    let before = score.clone();
+    let mut app = controller(score);
+    app.activate_linked_part(0);
+    let plain = egui::Modifiers::NONE;
+    let mut paper = None;
+    for frame in 0..3 {
+        let output = ctx.run(raw_input(frame, vec![], plain), |ctx| app.ui(ctx));
+        paper = output.shapes.iter().find_map(|s| match &s.shape {
+            egui::Shape::Rect(r)
+                if r.fill == Color32::WHITE
+                    && r.rect.width() > 700.0
+                    && r.rect.height() > 900.0 =>
+            {
+                Some(r.rect)
+            }
+            _ => None,
+        });
+    }
+    let hit = app.cached_pages[0]
+        .hits
+        .iter()
+        .find(|h| {
+            h.selection
+                == Selection {
+                    part: 1,
+                    measure: 0,
+                    note: 1,
+                }
+        })
+        .unwrap();
+    let point = paper.unwrap().min + Vec2::new(hit.x, hit.y) * app.zoom;
+    for (frame, pressed) in [(3, true), (4, false)] {
+        let _ = ctx.run(
+            raw_input(
+                frame,
+                vec![
+                    egui::Event::PointerMoved(point),
+                    egui::Event::PointerButton {
+                        pos: point,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: plain,
+                    },
+                ],
+                plain,
+            ),
+            |ctx| app.ui(ctx),
+        );
+    }
+    assert_eq!(
+        app.selected,
+        Some(Selection {
+            part: 1,
+            measure: 0,
+            note: 1
+        })
+    );
+    assert_eq!(app.entry_pitch.midi(), 76);
+    assert_eq!(app.score, before);
+    assert!(!app.dirty());
+    assert!(app.undo.is_empty());
+}
+
+#[test]
+fn advanced_slur_controls_scroll_inside_small_windows_and_reset_keeps_style() {
+    let ctx = egui::Context::default();
+    configure_context(&ctx);
+    let mut score = Score::blank();
+    score.parts[0].measures[0].notes = vec![
+        event(0, Duration::Quarter, &[72]),
+        event(480, Duration::Quarter, &[76]),
+    ];
+    let start = encore::document::Anchor {
+        part: 0,
+        measure: 0,
+        tick: 0,
+        layer: 0,
+        voice: 0,
+    };
+    let mut slur = encore::slurs::Slur::new(start, encore::document::Anchor { tick: 480, ..start });
+    slur.style = encore::slurs::SlurStyle::Dotted;
+    slur.shape = Some(slur.shape_or_default());
+    score.notation.slurs.push(slur);
+    let mut app = controller(score.clone());
+    app.open_slurs();
+    let plain = egui::Modifiers::NONE;
+    let input = |frame, events| {
+        let mut input = raw_input(frame, events, plain);
+        input.screen_rect = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(980.0, 680.0)));
+        input
+    };
+    let mut point = None;
+    for frame in 0..5 {
+        let output = ctx.run(input(frame, vec![]), |ctx| app.ui(ctx));
+        point = visible_text_rect(&output, "Manual control points")
+            .map(|r| r.center())
+            .or(point);
+    }
+    let point = point.unwrap();
+    let mut reset = None;
+    let mut delete = None;
+    for frame in 5..25 {
+        let output = ctx.run(
+            input(
+                frame,
+                vec![
+                    egui::Event::PointerMoved(point),
+                    egui::Event::MouseWheel {
+                        unit: egui::MouseWheelUnit::Point,
+                        delta: Vec2::new(0.0, -120.0),
+                        modifiers: plain,
+                    },
+                ],
+            ),
+            |ctx| app.ui(ctx),
+        );
+        reset = visible_text_rect(&output, "Reset curve");
+        delete = visible_text_rect(&output, "Delete slur");
+    }
+    let reset = reset.expect("Reset must be reachable by scrolling");
+    let delete = delete.expect("Delete must be reachable by scrolling");
+    assert!(reset.min.y >= 0.0 && reset.max.y <= 680.0);
+    assert!(delete.min.y >= 0.0 && delete.max.y <= 680.0);
+    assert_eq!(app.score, score);
+    for (frame, pressed) in [(25, true), (26, false)] {
+        let point = reset.center();
+        let _ = ctx.run(
+            input(
+                frame,
+                vec![
+                    egui::Event::PointerMoved(point),
+                    egui::Event::PointerButton {
+                        pos: point,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: plain,
+                    },
+                ],
+            ),
+            |ctx| app.ui(ctx),
+        );
+    }
+    assert!(app.score.notation.slurs[0].shape.is_none());
+    assert_eq!(
+        app.score.notation.slurs[0].style,
+        encore::slurs::SlurStyle::Dotted
+    );
 }

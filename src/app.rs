@@ -1,3 +1,4 @@
+use crate::shortcuts::{self, EntryCommand, EntryProfile};
 use eframe::egui::{self, Color32, FontFamily, FontId, Pos2, Rect, RichText, Sense, Stroke, Vec2};
 use encore::{
     audio::AudioEngine,
@@ -9,7 +10,25 @@ use encore::{
 };
 use std::{path::PathBuf, sync::mpsc, time::Duration as StdDuration};
 
-const INK: Color32 = Color32::from_rgb(35, 44, 48);
+mod chords;
+mod clipboard;
+mod entry;
+mod expressions;
+mod grace;
+mod groups;
+mod layout;
+mod lines;
+mod navigation;
+mod notation;
+mod ornaments;
+mod parts;
+mod percussion;
+mod playback;
+mod regions;
+mod style;
+mod tremolos;
+mod voicing;
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum Theme {
     #[default]
@@ -46,6 +65,9 @@ struct Palette {
     selected: Color32,
     workspace: Color32,
     hovered: Color32,
+    key_ink: Color32,
+    key_hover: Color32,
+    playhead: Color32,
 }
 
 impl Palette {
@@ -53,15 +75,18 @@ impl Palette {
         let rgb = Color32::from_rgb;
         match theme {
             Theme::Dark => Self {
-                text: rgb(231, 236, 245),
-                muted: rgb(151, 165, 187),
-                accent: rgb(121, 224, 194),
-                surface: rgb(24, 31, 44),
-                raised: rgb(32, 42, 58),
-                border: rgb(48, 61, 81),
-                selected: rgb(31, 65, 66),
-                workspace: rgb(14, 20, 30),
-                hovered: rgb(48, 65, 85),
+                text: Color32::from_gray(236),
+                muted: Color32::from_gray(172),
+                accent: Color32::from_gray(225),
+                surface: Color32::from_gray(26),
+                raised: Color32::from_gray(36),
+                border: Color32::from_gray(62),
+                selected: Color32::from_gray(64),
+                workspace: Color32::from_gray(17),
+                hovered: Color32::from_gray(49),
+                key_ink: Color32::from_gray(35),
+                key_hover: Color32::from_gray(221),
+                playhead: Color32::from_rgba_unmultiplied(95, 95, 95, 180),
             },
             Theme::Light => Self {
                 text: rgb(32, 44, 61),
@@ -73,6 +98,9 @@ impl Palette {
                 selected: rgb(212, 237, 226),
                 workspace: rgb(221, 228, 238),
                 hovered: rgb(219, 231, 241),
+                key_ink: rgb(35, 44, 48),
+                key_hover: rgb(211, 234, 224),
+                playhead: Color32::from_rgba_unmultiplied(40, 150, 120, 180),
             },
         }
     }
@@ -108,6 +136,9 @@ pub struct EncoreApp {
     skip_history: bool,
     selected: Option<Selection>,
     active_part: usize,
+    active_layer: u8,
+    active_voice: u8,
+    active_voice_launch: Option<encore::document::Anchor>,
     cursor_measure: usize,
     cursor_tick: u32,
     duration: Duration,
@@ -115,19 +146,46 @@ pub struct EncoreApp {
     rest: bool,
     accidental: Option<i8>,
     octave: i8,
+    entry_pitch: Pitch,
+    entry_profile: EntryProfile,
+    tuplet: Option<Tuplet>,
+    tuplet_remaining: Option<u8>,
     write_mode: bool,
     zoom: f32,
     part_view: bool,
+    show_parts: bool,
+    selected_linked_part: usize,
+    previous_part_view: Option<Option<usize>>,
+    notation_editor: notation::Editor,
+    expressions_editor: expressions::Editor,
+    region_selection: Option<encore::editing::Region>,
+    region_editor: regions::Editor,
+    show_region_tools: bool,
+    show_layout: bool,
+    show_entry_style: bool,
+    navigation: navigation::Editor,
+    playback_editor: playback::Editor,
+    chord_editor: chords::Editor,
+    grace_editor: grace::Editor,
+    lines_editor: lines::Editor,
+    ornaments_editor: ornaments::Editor,
+    percussion_editor: percussion::Editor,
+    groups_editor: groups::Editor,
+    tremolos_editor: tremolos::Editor,
     master: f32,
     theme: Theme,
     needs_native_save: bool,
     import_warnings: Vec<String>,
     show_import_report: bool,
+    midi_import: Option<PathBuf>,
+    midi_grid: Option<u32>,
+    midi_import_error: Option<String>,
     playback: Option<synth::Playback>,
     worker: Option<mpsc::Receiver<JobResult>>,
     rendering_audio: bool,
     pending: Option<Action>,
     help: bool,
+    show_history: bool,
     properties: bool,
     status: String,
     cached_pages: Vec<Page>,
@@ -135,6 +193,7 @@ pub struct EncoreApp {
     cached_selection: Option<Selection>,
     cached_filter: Option<usize>,
     preview_sample: Option<(Instrument, u8)>,
+    preview_percussion: Option<(usize, u8)>,
     audition_playback: Option<synth::Playback>,
     audition_worker: Option<mpsc::Receiver<AuditionResult>>,
     audio_engine: AudioEngine,
@@ -161,11 +220,16 @@ impl EncoreApp {
             "Welcome to Encore. Press Space to hear First Light, or create a new score.".into(),
         );
         if let Some(path) = path
-            && let Err(error) = app.open_document(path)
+            && let Err(error) = app.begin_open_document(path)
         {
             app.status = format!("Could not open score: {error}");
         }
         app.theme = Theme::from_storage(cc.storage);
+        app.entry_profile = EntryProfile::from_key(
+            cc.storage
+                .and_then(|s| s.get_string("encore.entry-profile"))
+                .as_deref(),
+        );
         apply_theme(&cc.egui_ctx, app.theme);
         let (engine, warning) = AudioEngine::load_default();
         if let AudioEngine::Sampled(bank) = &engine {
@@ -188,6 +252,9 @@ impl EncoreApp {
             skip_history: false,
             selected: None,
             active_part: 0,
+            active_layer: 0,
+            active_voice: 0,
+            active_voice_launch: None,
             cursor_measure: 0,
             cursor_tick: 0,
             duration: Duration::Quarter,
@@ -195,19 +262,46 @@ impl EncoreApp {
             rest: false,
             accidental: None,
             octave: 4,
+            entry_pitch: Pitch::from_midi(60),
+            entry_profile: EntryProfile::default(),
+            tuplet: None,
+            tuplet_remaining: None,
             write_mode: false,
             zoom: 0.9,
             part_view: false,
+            show_parts: false,
+            selected_linked_part: 0,
+            previous_part_view: None,
+            notation_editor: Default::default(),
+            expressions_editor: Default::default(),
+            region_selection: None,
+            region_editor: Default::default(),
+            show_region_tools: false,
+            show_layout: false,
+            show_entry_style: false,
+            navigation: Default::default(),
+            playback_editor: Default::default(),
+            chord_editor: Default::default(),
+            grace_editor: Default::default(),
+            lines_editor: Default::default(),
+            ornaments_editor: Default::default(),
+            percussion_editor: Default::default(),
+            groups_editor: Default::default(),
+            tremolos_editor: Default::default(),
             master: 0.8,
             theme: Theme::Dark,
             needs_native_save: false,
             import_warnings: Vec::new(),
             show_import_report: false,
+            midi_import: None,
+            midi_grid: None,
+            midi_import_error: None,
             playback: None,
             worker: None,
             rendering_audio: false,
             pending: None,
             help: false,
+            show_history: false,
             properties: false,
             status,
             cached_pages: Vec::new(),
@@ -215,6 +309,7 @@ impl EncoreApp {
             cached_selection: None,
             cached_filter: None,
             preview_sample: None,
+            preview_percussion: None,
             audition_playback: None,
             audition_worker: None,
             audio_engine: AudioEngine::Procedural,
@@ -236,6 +331,11 @@ impl EncoreApp {
     fn set_theme(&mut self, ctx: &egui::Context, theme: Theme) {
         self.theme = theme;
         apply_theme(ctx, theme);
+    }
+
+    fn exit_chord_entry(&mut self) {
+        self.chord_editor.active = false;
+        self.chord_editor.open = false;
     }
 
     fn dirty(&self) -> bool {
@@ -261,15 +361,16 @@ impl EncoreApp {
                         "Scores",
                         &[
                             "encore", "json", "musicxml", "xml", "mxl", "mscx", "mscz", "musx",
-                            "mus",
+                            "mus", "mid", "midi",
                         ],
                     )
                     .add_filter("Encore projects", &["encore", "json"])
                     .add_filter("MusicXML", &["musicxml", "xml", "mxl"])
                     .add_filter("MuseScore", &["mscx", "mscz"])
                     .add_filter("Finale", &["musx", "mus"])
+                    .add_filter("MIDI performance", &["mid", "midi"])
                     .pick_file()
-                    && let Err(error) = self.open_document(path)
+                    && let Err(error) = self.begin_open_document(path)
                 {
                     self.status = format!("Could not open score: {error}");
                 }
@@ -295,8 +396,45 @@ impl EncoreApp {
         self.needs_native_save = false;
         self.import_warnings.clear();
         self.show_import_report = false;
+        self.midi_import = None;
+        self.midi_import_error = None;
         self.selected = None;
         self.active_part = 0;
+        self.active_layer = 0;
+        self.active_voice = 0;
+        self.active_voice_launch = None;
+        self.duration = Duration::Quarter;
+        self.dotted = false;
+        self.rest = false;
+        self.accidental = None;
+        self.entry_pitch = Pitch::from_midi(60);
+        self.octave = 4;
+        self.tuplet = None;
+        self.tuplet_remaining = None;
+        self.show_history = false;
+        self.show_parts = false;
+        self.selected_linked_part = 0;
+        self.previous_part_view = None;
+        self.part_view = false;
+        self.cached_score = None;
+        self.cached_filter = None;
+        self.notation_editor = Default::default();
+        self.expressions_editor = Default::default();
+        self.region_selection = None;
+        self.region_editor = Default::default();
+        self.show_region_tools = false;
+        self.show_layout = false;
+        self.show_entry_style = false;
+        self.navigation = Default::default();
+        self.playback_editor = Default::default();
+        self.chord_editor = Default::default();
+        self.grace_editor = Default::default();
+        self.lines_editor = Default::default();
+        self.ornaments_editor = Default::default();
+        self.percussion_editor = Default::default();
+        self.groups_editor = Default::default();
+        self.tremolos_editor = Default::default();
+        self.preview_percussion = None;
         self.cursor_measure = 0;
         self.cursor_tick = 0;
         self.undo.clear();
@@ -305,8 +443,31 @@ impl EncoreApp {
         self.status = "Ready. Choose Write and click a staff, or enter notes with A–G.".into();
     }
 
+    fn begin_open_document(&mut self, path: PathBuf) -> Result<(), String> {
+        if crate::midi_options::is_midi(&path) {
+            self.midi_import = Some(path);
+            self.midi_grid = None;
+            self.midi_import_error = None;
+            self.percussion_editor.open = false;
+            self.groups_editor.open = false;
+            self.tremolos_editor.open = false;
+            self.properties = false;
+            self.help = false;
+            self.show_history = false;
+            self.show_import_report = false;
+            Ok(())
+        } else {
+            self.open_document(path)
+        }
+    }
+
     fn open_document(&mut self, path: PathBuf) -> Result<(), String> {
         let result = encore::import::load(&path)?;
+        self.accept_import(path, result);
+        Ok(())
+    }
+
+    fn accept_import(&mut self, path: PathBuf, result: encore::import::ImportResult) {
         let native = path
             .extension()
             .and_then(|s| s.to_str())
@@ -332,7 +493,6 @@ impl EncoreApp {
                 }
             )
         };
-        Ok(())
     }
 
     fn save(&mut self, choose: bool) -> bool {
@@ -373,10 +533,19 @@ impl EncoreApp {
             return;
         }
         let mut score = self.score.clone();
+        let mut layout = None;
         if self.part_view && ["pdf", "svg"].contains(&ext) {
-            let part = score.parts[self.active_part].clone();
-            score.title = format!("{} — {}", score.title, part.name);
-            score.parts = vec![part];
+            match self.selected_part_projection() {
+                Ok(Some(projection)) => {
+                    score = projection.score;
+                    layout = Some(projection.layout);
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    self.status = error;
+                    return;
+                }
+            }
         }
         if let Some(path) = rfd::FileDialog::new()
             .add_filter(ext.to_uppercase(), &[ext])
@@ -388,7 +557,8 @@ impl EncoreApp {
             self.status = format!("Exporting {}…", path.display());
             let engine = self.audio_engine.clone();
             std::thread::spawn(move || {
-                let result = crate::export_to_with_engine(&score, &path, &engine).map(|()| path);
+                let result =
+                    crate::export_to_with_layout(&score, &path, &engine, layout).map(|()| path);
                 let _ = tx.send(JobResult::Export(result));
             });
         }
@@ -481,6 +651,8 @@ impl EncoreApp {
     }
 
     fn stop(&mut self) {
+        self.playback_editor.pending_start = None;
+        self.playback_editor.bounds = None;
         self.stop_audition();
         if self.rendering_audio {
             self.worker = None;
@@ -513,6 +685,10 @@ impl EncoreApp {
                 p.pause();
                 return;
             }
+        }
+        if let Err(error) = self.prepare_playback_start() {
+            self.status = error;
+            return;
         }
         if self.playback.is_none() {
             match synth::Playback::new() {
@@ -585,6 +761,12 @@ impl EncoreApp {
                                 p.set_volume(self.master);
                                 p.play(audio);
                                 self.status = "Playing score • Space to pause".into();
+                                if let Some(seconds) = self.playback_editor.pending_start.take()
+                                    && let Err(error) = p.seek_seconds(seconds)
+                                {
+                                    self.status =
+                                        format!("Cannot start at the requested position: {error}");
+                                }
                             }
                         }
                         JobResult::Audio(Err(error)) => {
@@ -625,6 +807,10 @@ impl EncoreApp {
             self.selected = None;
             self.clamp_cursor();
             self.skip_history = true;
+            self.clear_region_selection();
+            if self.chord_editor.active {
+                self.chord_click(self.active_part, self.cursor_measure, self.cursor_tick);
+            }
             self.status = "Undo".into();
         }
     }
@@ -635,27 +821,121 @@ impl EncoreApp {
             self.selected = None;
             self.clamp_cursor();
             self.skip_history = true;
+            self.clear_region_selection();
+            if self.chord_editor.active {
+                self.chord_click(self.active_part, self.cursor_measure, self.cursor_tick);
+            }
             self.status = "Redo".into();
         }
     }
 
     fn delete_selected(&mut self) {
-        if let Some(sel) = self.selected.take()
-            && let Some(m) = self
+        if !self.allow_source_edit() {
+            return;
+        }
+        let Some(sel) = self.selected else {
+            return;
+        };
+        let Some(anchor) = encore::document::Anchor::from_selection(&self.score, sel) else {
+            return;
+        };
+        let mut candidate = self.score.clone();
+        encore::document::remove_anchor(&mut candidate, &anchor);
+        candidate.parts[sel.part].measures[sel.measure]
+            .notes
+            .remove(sel.note);
+        if let Err(error) = candidate.validate() {
+            self.status = format!(
+                "Cannot delete this entry: {error} Remove or relocate its secondary branch first, or convert the primary entry to a rest."
+            );
+            return;
+        }
+        self.score = candidate;
+        self.selected = None;
+        self.cursor_measure = sel.measure;
+        self.cursor_tick = anchor.tick;
+        self.status = "Note removed".into();
+    }
+
+    fn trim_last_empty_bar(&mut self) -> Result<(), String> {
+        if self.score.measure_count() <= 1
+            || self
                 .score
                 .parts
-                .get_mut(sel.part)
-                .and_then(|p| p.measures.get_mut(sel.measure))
-            && sel.note < m.notes.len()
+                .iter()
+                .any(|part| part.measures.last().is_none_or(|bar| !bar.notes.is_empty()))
         {
-            let n = m.notes.remove(sel.note);
-            self.cursor_measure = sel.measure;
-            self.cursor_tick = n.start;
-            self.status = "Note removed".into();
+            return Err("Only a final empty measure can be removed here.".into());
+        }
+        let mut candidate = self.score.clone();
+        for staff in &mut candidate.parts {
+            staff.measures.pop();
+        }
+        encore::document::truncate_measures(&mut candidate)
+            .map_err(|error| format!("Cannot remove this bar: {error}"))?;
+        self.score = candidate;
+        self.selected = None;
+        self.clamp_cursor();
+        Ok(())
+    }
+
+    /// Follow deliberate staff selection while preserving an explicit part
+    /// switch made in the header during this frame.
+    fn reconcile_part_staff(&mut self) {
+        if !self.part_view || self.cached_filter != Some(self.selected_linked_part) {
+            return;
+        }
+        let definitions = encore::parts::definitions(&self.score);
+        if definitions
+            .get(self.selected_linked_part)
+            .is_some_and(|part| part.staves.contains(&self.active_part))
+        {
+            return;
+        }
+        if let Some(index) = definitions
+            .iter()
+            .position(|part| part.staves.contains(&self.active_part))
+        {
+            self.selected_linked_part = index;
+        } else {
+            self.part_view = false;
+        }
+        self.selected = None;
+    }
+
+    fn enter_note(&mut self, part: usize, measure: usize, start: u32, pitch: Pitch, chord: bool) {
+        if !self.allow_source_edit() {
+            return;
+        }
+        let original = self.score.clone();
+        let location = (
+            self.selected,
+            self.active_part,
+            self.cursor_measure,
+            self.cursor_tick,
+            self.entry_pitch,
+            self.octave,
+            self.tuplet,
+            self.tuplet_remaining,
+        );
+        self.enter_note_candidate(part, measure, start, pitch, chord);
+        if let Err(error) = self.score.validate() {
+            self.score = original;
+            (
+                self.selected,
+                self.active_part,
+                self.cursor_measure,
+                self.cursor_tick,
+                self.entry_pitch,
+                self.octave,
+                self.tuplet,
+                self.tuplet_remaining,
+            ) = location;
+            self.status = format!("Cannot enter this note: {error}");
         }
     }
 
-    fn enter_note(
+    fn enter_note_candidate(
         &mut self,
         part: usize,
         measure: usize,
@@ -674,12 +954,41 @@ impl EncoreApp {
             self.status = "Pitch is outside the supported MIDI range (C−1 to G9).".into();
             return;
         }
-        let ticks = self.duration.ticks() * if self.dotted { 3 } else { 2 } / 2;
+        let voice_launch = match self.entry_voice_launch(part, measure, start) {
+            Ok(value) => value,
+            Err(error) => {
+                self.status = error;
+                return;
+            }
+        };
+        let proposed = Note {
+            voice: self.active_voice,
+            voice_launch,
+            start,
+            duration: self.duration,
+            dotted: self.dotted,
+            tuplet: self.tuplet,
+            layer: self.active_layer,
+            pitches: if self.rest { vec![] } else { vec![pitch] },
+            velocity: 88,
+            staccato: false,
+            articulations: vec![],
+            tied: false,
+        };
+        let ticks = match proposed.checked_ticks() {
+            Ok(ticks) => ticks,
+            Err(error) => {
+                self.status = error;
+                return;
+            }
+        };
         let measure_ticks = self.score.measure_ticks();
         let m = &mut self.score.parts[part].measures[measure];
         if chord
             && !self.rest
-            && let Some(i) = m.notes.iter().position(|n| n.start == start)
+            && let Some(i) = m.notes.iter().position(|n| {
+                n.start == start && n.layer == self.active_layer && n.voice == self.active_voice
+            })
         {
             if !m.notes[i].pitches.iter().any(|p| p.midi() == pitch.midi())
                 && m.notes[i].pitches.len() < 16
@@ -698,32 +1007,55 @@ impl EncoreApp {
             self.status = "That duration crosses the barline. Choose a shorter note or enter tied notes in the next measure.".into();
             return;
         }
-        if m.notes
-            .iter()
-            .any(|n| n.start != start && start < n.start + n.ticks() && start + ticks > n.start)
-        {
+        if m.notes.iter().any(|n| {
+            n.layer == self.active_layer
+                && n.voice == self.active_voice
+                && n.start != start
+                && start < n.start + n.ticks()
+                && start + ticks > n.start
+        }) {
             self.status =
                 "This note overlaps another event. Delete that event or choose a shorter duration."
                     .into();
             return;
         }
-        m.notes.retain(|n| n.start != start);
-        m.notes.push(Note {
-            start,
-            duration: self.duration,
-            dotted: self.dotted,
-            pitches: if self.rest { vec![] } else { vec![pitch] },
-            velocity: 88,
-            staccato: false,
-            tied: false,
+        let previous_note = m
+            .notes
+            .iter()
+            .find(|n| {
+                n.start == start && n.layer == self.active_layer && n.voice == self.active_voice
+            })
+            .cloned();
+        m.notes.retain(|n| {
+            n.start != start || n.layer != self.active_layer || n.voice != self.active_voice
         });
-        m.notes.sort_by_key(|n| n.start);
-        let i = m.notes.iter().position(|n| n.start == start).unwrap();
+        m.notes.push(proposed);
+        m.notes.sort_by_key(|n| (n.start, n.layer, n.voice));
+        let i = m
+            .notes
+            .iter()
+            .position(|n| {
+                n.start == start && n.layer == self.active_layer && n.voice == self.active_voice
+            })
+            .unwrap();
         self.selected = Some(Selection {
             part,
             measure,
             note: i,
         });
+        if let Some(old) = previous_note {
+            encore::entry_style::synchronize_note(
+                &mut self.score,
+                &encore::document::Anchor {
+                    part,
+                    measure,
+                    tick: start,
+                    layer: self.active_layer,
+                    voice: self.active_voice,
+                },
+                &old,
+            );
+        }
         self.active_part = part;
         self.cursor_tick = start + ticks;
         self.cursor_measure = measure;
@@ -738,12 +1070,36 @@ impl EncoreApp {
                 self.cursor_tick = self.score.measure_ticks();
             }
         }
+        self.entry_pitch = pitch;
+        self.octave = self
+            .entry_written_pitch(pitch)
+            .map_or(pitch.octave, |written| written.octave);
+        if let Some(remaining) = self.tuplet_remaining {
+            if remaining <= 1 {
+                self.tuplet = None;
+                self.tuplet_remaining = None;
+            } else {
+                self.tuplet_remaining = Some(remaining - 1);
+            }
+        }
+        if self.rest {
+            encore::document::remove_anchor(
+                &mut self.score,
+                &encore::document::Anchor {
+                    part,
+                    measure,
+                    tick: start,
+                    layer: self.active_layer,
+                    voice: self.active_voice,
+                },
+            );
+        }
         self.status = format!(
             "{} entered • next: measure {}, beat {:.2}",
             if self.rest {
                 "Rest".into()
             } else {
-                pitch.name()
+                self.percussion_name(part, pitch)
             },
             self.cursor_measure + 1,
             self.cursor_tick as f32 / PPQ as f32 + 1.0
@@ -751,156 +1107,354 @@ impl EncoreApp {
     }
 
     fn transpose(&mut self, semitones: i8) {
-        if let Some(s) = self.selected {
-            let n = &mut self.score.parts[s.part].measures[s.measure].notes[s.note];
-            if n.pitches
-                .iter()
-                .any(|p| !(0..=127).contains(&(p.midi() as i16 + semitones as i16)))
-            {
-                self.status = "Transposition would move this chord outside the MIDI range.".into();
-                return;
-            }
-            for p in &mut n.pitches {
-                *p = Pitch::from_midi((p.midi() as i16 + semitones as i16) as u8);
-            }
+        if self.active_percussion().is_some() {
+            self.status = "Choose another percussion sound; drum IDs cannot be transposed.".into();
+            return;
         }
+        if self.selected_entry().is_some_and(|note| {
+            note.pitches
+                .iter()
+                .any(|pitch| !(0..=127).contains(&(i16::from(pitch.midi()) + i16::from(semitones))))
+        }) {
+            self.status = "Transposition would move this chord outside the MIDI range.".into();
+            return;
+        }
+        self.edit_entry(|note| {
+            for pitch in &mut note.pitches {
+                *pitch = Pitch::from_midi((i16::from(pitch.midi()) + i16::from(semitones)) as u8);
+            }
+        });
     }
 
     fn keyboard(&mut self, ctx: &egui::Context) {
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
             self.stop();
+            self.properties = false;
+            self.help = false;
+            self.show_history = false;
+            self.show_import_report = false;
+            self.show_parts = false;
+            self.show_layout = false;
+            self.show_region_tools = false;
+            self.show_entry_style = false;
+            self.expressions_editor.open = false;
+            self.navigation.open = false;
+            self.playback_editor.open = false;
+            self.chord_editor.active = false;
+            self.chord_editor.open = false;
+            self.grace_editor.open = false;
+            self.lines_editor.open = false;
+            self.ornaments_editor.open = false;
+            self.region_selection = None;
+            self.notation_editor = Default::default();
+            if self.midi_import.take().is_some() {
+                self.midi_import_error = None;
+                return;
+            }
             if !self.lab_open && self.pending.is_none() {
                 self.selected = None;
+                self.write_mode = false;
             }
-        }
-        if self.pending.is_some() || self.lab_open {
             return;
         }
-        let command = ctx.input(|i| i.modifiers.command);
-        if command && ctx.input(|i| i.key_pressed(egui::Key::S)) {
+        if self.pending.is_some() || self.lab_open || self.midi_import.is_some() {
+            return;
+        }
+        if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::S)) {
             self.save(ctx.input(|i| i.modifiers.shift));
-        }
-        if ctx.wants_keyboard_input() {
             return;
         }
-        if command {
-            if ctx.input(|i| i.key_pressed(egui::Key::N)) {
-                self.request(Action::New, ctx);
+        if ctx.wants_keyboard_input()
+            || self.properties
+            || self.help
+            || self.show_history
+            || self.show_import_report
+            || self.show_parts
+            || self.show_layout
+            || self.show_region_tools
+            || self.show_entry_style
+            || self.expressions_editor.open
+            || self.navigation.open
+            || self.playback_editor.open
+            || self.chord_editor.open
+            || self.grace_editor.open
+            || self.lines_editor.open
+            || self.ornaments_editor.open
+            || self.percussion_editor.open
+            || self.groups_editor.open
+            || self.tremolos_editor.open
+        {
+            return;
+        }
+        if ctx.input(|input| {
+            input.modifiers.command && input.modifiers.alt && input.key_pressed(egui::Key::Slash)
+        }) {
+            if let Some(previous) = self.previous_part_view {
+                self.part_view = previous.is_some();
+                if let Some(index) = previous {
+                    self.activate_linked_part(index);
+                }
             }
-            if ctx.input(|i| i.key_pressed(egui::Key::O)) {
-                self.request(Action::Open, ctx);
-            }
-            if ctx.input(|i| i.key_pressed(egui::Key::Z)) {
-                if ctx.input(|i| i.modifiers.shift) {
-                    self.redo();
+            return;
+        }
+        if self.annotation_keyboard(ctx) {
+            return;
+        }
+        if self.chord_keyboard(ctx) {
+            return;
+        }
+        if ctx.input(|input| {
+            input.modifiers.command
+                && input.modifiers.alt
+                && (input.key_pressed(egui::Key::Period) || input.key_pressed(egui::Key::Comma))
+        }) {
+            let count = encore::parts::definitions(&self.score).len();
+            if count > 0 {
+                let index = if ctx.input(|input| input.key_pressed(egui::Key::Comma)) {
+                    (self.selected_linked_part + count - 1) % count
                 } else {
-                    self.undo();
-                }
-            }
-            if ctx.input(|i| i.key_pressed(egui::Key::Y)) {
-                self.redo();
+                    (self.selected_linked_part + 1) % count
+                };
+                self.activate_linked_part(index);
             }
             return;
         }
-        if ctx.input(|i| i.key_pressed(egui::Key::Space)) {
-            self.toggle_play();
-        }
-        if ctx.input(|i| i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace)) {
-            self.delete_selected();
-        }
-        if ctx.input(|i| i.key_pressed(egui::Key::ArrowUp)) {
-            self.transpose(if ctx.input(|i| i.modifiers.shift) {
-                12
-            } else {
-                1
-            });
-        }
-        if ctx.input(|i| i.key_pressed(egui::Key::ArrowDown)) {
-            self.transpose(if ctx.input(|i| i.modifiers.shift) {
-                -12
-            } else {
-                -1
-            });
-        }
-        if ctx.input(|i| i.key_pressed(egui::Key::ArrowRight)) {
-            self.cursor_tick += self.duration.ticks();
-            if self.cursor_tick >= self.score.measure_ticks() {
-                self.cursor_tick = 0;
-                self.cursor_measure = (self.cursor_measure + 1).min(self.score.measure_count() - 1);
+        let events = ctx.input(|i| i.events.clone());
+        let mac = cfg!(target_os = "macos");
+        for event in events {
+            if self.pending.is_some()
+                || self.midi_import.is_some()
+                || self.lab_open
+                || self.properties
+                || self.help
+                || self.show_history
+                || self.show_import_report
+                || self.show_layout
+                || self.show_region_tools
+                || self.show_entry_style
+                || self.expressions_editor.open
+                || self.navigation.open
+                || self.playback_editor.open
+                || self.chord_editor.open
+                || self.grace_editor.open
+                || self.lines_editor.open
+                || self.ornaments_editor.open
+                || self.percussion_editor.open
+                || self.groups_editor.open
+                || self.tremolos_editor.open
+            {
+                break;
             }
-        }
-        if ctx.input(|i| i.key_pressed(egui::Key::ArrowLeft)) {
-            if self.cursor_tick == 0 && self.cursor_measure > 0 {
-                self.cursor_measure -= 1;
-                self.cursor_tick = self
-                    .score
-                    .measure_ticks()
-                    .saturating_sub(self.duration.ticks());
-            } else {
-                self.cursor_tick = self.cursor_tick.saturating_sub(self.duration.ticks());
+            match &event {
+                egui::Event::Text(text)
+                    if self.write_mode
+                        && self.entry_profile == EntryProfile::Speedy
+                        && text == "*" =>
+                {
+                    self.apply_style_command(shortcuts::StyleCommand::ToggleAccidental);
+                    continue;
+                }
+                egui::Event::Copy => {
+                    self.copy_selection(ctx, false);
+                    continue;
+                }
+                egui::Event::Cut => {
+                    self.copy_selection(ctx, true);
+                    continue;
+                }
+                egui::Event::Paste(text) => {
+                    self.paste_selection(text);
+                    continue;
+                }
+                _ => {}
             }
-        }
-        for (key, d) in [
-            (egui::Key::Num1, Duration::Whole),
-            (egui::Key::Num2, Duration::Half),
-            (egui::Key::Num3, Duration::Quarter),
-            (egui::Key::Num4, Duration::Eighth),
-            (egui::Key::Num5, Duration::Sixteenth),
-        ] {
-            if ctx.input(|i| i.key_pressed(key)) {
-                self.duration = d;
+            let egui::Event::Key {
+                key,
+                pressed: true,
+                modifiers,
+                ..
+            } = event
+            else {
+                continue;
+            };
+            if let Some(layer) = shortcuts::layer_command(key, modifiers, mac) {
+                self.active_layer = layer;
+                self.selected = None;
+                self.clear_region_selection();
+                continue;
             }
-        }
-        if ctx.input(|i| i.key_pressed(egui::Key::R)) {
-            self.rest = !self.rest;
-        }
-        if ctx.input(|i| i.key_pressed(egui::Key::Period)) {
-            self.dotted = !self.dotted;
-        }
-        if self.write_mode {
-            for (key, step) in [
-                (egui::Key::A, Step::A),
-                (egui::Key::B, Step::B),
-                (egui::Key::C, Step::C),
-                (egui::Key::D, Step::D),
-                (egui::Key::E, Step::E),
-                (egui::Key::F, Step::F),
-                (egui::Key::G, Step::G),
-            ] {
-                if ctx.input(|i| i.key_pressed(key)) {
-                    let natural = Pitch {
-                        step,
-                        octave: self.octave,
-                        alter: 0,
-                    };
-                    let pitch = Pitch::from_staff_step(natural.staff_step(), self.score.key_fifths);
-                    self.enter_note(
-                        self.active_part,
-                        self.cursor_measure,
-                        self.cursor_tick,
-                        pitch,
-                        false,
-                    );
+            if modifiers.command && !modifiers.alt {
+                let handled = match key {
+                    egui::Key::A if modifiers.shift => {
+                        self.exit_chord_entry();
+                        self.write_mode = false;
+                        self.selected = None;
+                        self.clear_region_selection();
+                        self.notation_editor = Default::default();
+                        true
+                    }
+                    egui::Key::A if !modifiers.shift => {
+                        self.select_region_all();
+                        true
+                    }
+                    egui::Key::I if !modifiers.shift => {
+                        self.request_region_insert_paste(ctx);
+                        true
+                    }
+                    egui::Key::P if !modifiers.shift => {
+                        self.export("pdf");
+                        true
+                    }
+                    egui::Key::Plus | egui::Key::Equals if !modifiers.shift => {
+                        self.zoom = (self.zoom + 0.1).min(2.0);
+                        true
+                    }
+                    egui::Key::Minus if !modifiers.shift => {
+                        self.zoom = (self.zoom - 0.1).max(0.1);
+                        true
+                    }
+                    egui::Key::L if !self.write_mode && !modifiers.shift => {
+                        self.lock_selected_systems();
+                        true
+                    }
+                    egui::Key::U if !self.write_mode && (modifiers.shift || !mac) => {
+                        self.unlock_selected_systems();
+                        true
+                    }
+                    egui::Key::M if !self.write_mode && modifiers.shift == mac => {
+                        self.show_layout = true;
+                        true
+                    }
+                    egui::Key::G if modifiers.shift => {
+                        self.open_go_to();
+                        true
+                    }
+                    egui::Key::CloseBracket if !mac && !modifiers.shift => {
+                        self.fit_view(false);
+                        true
+                    }
+                    egui::Key::OpenBracket if !mac && !modifiers.shift => {
+                        self.fit_view(true);
+                        true
+                    }
+                    egui::Key::N => {
+                        self.request(Action::New, ctx);
+                        true
+                    }
+                    egui::Key::O => {
+                        self.request(Action::Open, ctx);
+                        true
+                    }
+                    egui::Key::Q => {
+                        self.request(Action::Quit, ctx);
+                        true
+                    }
+                    egui::Key::Z if modifiers.shift && !mac => {
+                        self.show_history = true;
+                        true
+                    }
+                    egui::Key::Z if modifiers.shift => {
+                        self.redo();
+                        true
+                    }
+                    egui::Key::Z => {
+                        self.undo();
+                        true
+                    }
+                    egui::Key::Y if mac => {
+                        self.show_history = true;
+                        true
+                    }
+                    egui::Key::Y => {
+                        self.redo();
+                        true
+                    }
+                    egui::Key::C => {
+                        self.copy_selection(ctx, false);
+                        true
+                    }
+                    egui::Key::X => {
+                        self.copy_selection(ctx, true);
+                        true
+                    }
+                    _ => false,
+                };
+                if handled {
+                    if self.skip_history {
+                        return;
+                    }
+                    continue;
                 }
             }
-            if ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
-                self.enter_note(
-                    self.active_part,
-                    self.cursor_measure,
-                    self.cursor_tick,
-                    Pitch {
-                        step: Step::C,
-                        octave: self.octave,
-                        alter: 0,
-                    },
-                    false,
-                );
+            if mac && modifiers.mac_cmd && modifiers.alt && !modifiers.shift && !modifiers.ctrl {
+                if key == egui::Key::CloseBracket {
+                    self.fit_view(false);
+                    continue;
+                }
+                if key == egui::Key::OpenBracket {
+                    self.fit_view(true);
+                    continue;
+                }
+            }
+            if key == egui::Key::Space && !modifiers.command && !modifiers.alt {
+                self.toggle_play();
+                continue;
+            }
+            if key == egui::Key::F1 {
+                self.help = true;
+                continue;
+            }
+            if !self.write_mode {
+                if !modifiers.any() && (key == egui::Key::L || key == egui::Key::U) {
+                    if key == egui::Key::L {
+                        self.lock_selected_systems();
+                    } else {
+                        self.unlock_selected_systems();
+                    }
+                    continue;
+                }
+                if self.region_keyboard(key, modifiers, mac) {
+                    ctx.input_mut(|input| {
+                        input.consume_key(modifiers, key);
+                    });
+                } else if self.view_keyboard(key, modifiers, mac) {
+                    continue;
+                } else if key == egui::Key::Delete {
+                    self.delete_selected();
+                }
+                continue;
+            }
+            if self.view_keyboard(key, modifiers, mac) {
+                continue;
+            }
+            if let Some(command) = shortcuts::entry_command(self.entry_profile, key, modifiers, mac)
+            {
+                self.apply_entry_command(command);
+                ctx.input_mut(|input| {
+                    input.consume_key(modifiers, key);
+                });
+                ctx.memory_mut(|memory| memory.move_focus(egui::FocusDirection::None));
             }
         }
     }
 
     fn top(&mut self, ctx: &egui::Context) {
         let colors = Palette::for_context(ctx);
+        let primary = if cfg!(target_os = "macos") {
+            "Cmd"
+        } else {
+            "Ctrl"
+        };
+        let redo_key = if cfg!(target_os = "macos") {
+            "Cmd+Shift+Z"
+        } else {
+            "Ctrl+Y"
+        };
+        let history_key = if cfg!(target_os = "macos") {
+            "Cmd+Y"
+        } else {
+            "Ctrl+Shift+Z"
+        };
         egui::TopBottomPanel::top("header")
             .frame(
                 egui::Frame::new()
@@ -925,19 +1479,42 @@ impl EncoreApp {
                     ui.add_space(18.0);
                     egui::MenuBar::new().ui(ui, |ui| {
                         ui.menu_button("File", |ui| {
-                            if ui.button("New score          Ctrl+N").clicked() {
+                            if ui
+                                .add(
+                                    egui::Button::new("New score")
+                                        .shortcut_text(format!("{primary}+N")),
+                                )
+                                .clicked()
+                            {
                                 ui.close();
                                 self.request(Action::New, ctx);
                             }
-                            if ui.button("Open…                Ctrl+O").clicked() {
+                            if ui
+                                .add(
+                                    egui::Button::new("Open…")
+                                        .shortcut_text(format!("{primary}+O")),
+                                )
+                                .clicked()
+                            {
                                 ui.close();
                                 self.request(Action::Open, ctx);
                             }
-                            if ui.button("Save                    Ctrl+S").clicked() {
+                            if ui
+                                .add(
+                                    egui::Button::new("Save").shortcut_text(format!("{primary}+S")),
+                                )
+                                .clicked()
+                            {
                                 ui.close();
                                 self.save(false);
                             }
-                            if ui.button("Save as…").clicked() {
+                            if ui
+                                .add(
+                                    egui::Button::new("Save as…")
+                                        .shortcut_text(format!("{primary}+Shift+S")),
+                                )
+                                .clicked()
+                            {
                                 ui.close();
                                 self.save(true);
                             }
@@ -960,7 +1537,7 @@ impl EncoreApp {
                             if ui
                                 .add_enabled(
                                     !self.undo.is_empty(),
-                                    egui::Button::new("Undo    Ctrl+Z"),
+                                    egui::Button::new("Undo").shortcut_text(format!("{primary}+Z")),
                                 )
                                 .clicked()
                             {
@@ -970,11 +1547,53 @@ impl EncoreApp {
                             if ui
                                 .add_enabled(
                                     !self.redo.is_empty(),
-                                    egui::Button::new("Redo    Ctrl+Shift+Z"),
+                                    egui::Button::new("Redo").shortcut_text(redo_key),
                                 )
                                 .clicked()
                             {
                                 self.redo();
+                                ui.close();
+                            }
+                            if ui
+                                .add(
+                                    egui::Button::new("Undo/Redo list…").shortcut_text(history_key),
+                                )
+                                .clicked()
+                            {
+                                self.show_history = true;
+                                ui.close();
+                            }
+                            ui.separator();
+                            if ui
+                                .add_enabled(
+                                    self.selected.is_some(),
+                                    egui::Button::new("Cut event")
+                                        .shortcut_text(format!("{primary}+X")),
+                                )
+                                .clicked()
+                            {
+                                self.copy_selection(ctx, true);
+                                ui.close();
+                            }
+                            if ui
+                                .add_enabled(
+                                    self.selected.is_some(),
+                                    egui::Button::new("Copy event")
+                                        .shortcut_text(format!("{primary}+C")),
+                                )
+                                .clicked()
+                            {
+                                self.copy_selection(ctx, false);
+                                ui.close();
+                            }
+                            if ui
+                                .add(
+                                    egui::Button::new("Paste event at cursor")
+                                        .shortcut_text(format!("{primary}+V")),
+                                )
+                                .clicked()
+                            {
+                                ctx.send_viewport_cmd(egui::ViewportCommand::RequestPaste);
                                 ui.close();
                             }
                             if ui
@@ -1000,6 +1619,127 @@ impl EncoreApp {
                             }
                             if ui.button("Score properties…").clicked() {
                                 self.properties = true;
+                                ui.close();
+                            }
+                        });
+                        ui.menu_button("Selection", |ui| {
+                            if ui.button("Select all measures").clicked() {
+                                self.select_region_all();
+                                ui.close();
+                            }
+                            if ui.button("Measure range tools…").clicked() {
+                                self.show_region_tools = true;
+                                ui.close();
+                            }
+                            if ui
+                                .add_enabled(
+                                    self.region_selection.is_some(),
+                                    egui::Button::new("Clear selected music"),
+                                )
+                                .clicked()
+                            {
+                                self.clear_selected_region();
+                                ui.close();
+                            }
+                            if ui
+                                .add_enabled(
+                                    self.region_selection.is_some(),
+                                    egui::Button::new("Delete selected measure stacks"),
+                                )
+                                .clicked()
+                            {
+                                self.delete_selected_measures();
+                                ui.close();
+                            }
+                            if ui.button("Insert from clipboard").clicked() {
+                                self.request_region_insert_paste(ctx);
+                                ui.close();
+                            }
+                        });
+                        ui.menu_button("Layout", |ui| {
+                            if ui.button("Go to measure…").clicked() {
+                                self.open_go_to();
+                                ui.close();
+                            }
+                            if ui.button("Fit page width").clicked() {
+                                self.fit_view(false);
+                                ui.close();
+                            }
+                            if ui.button("Fit page in window").clicked() {
+                                self.fit_view(true);
+                                ui.close();
+                            }
+                            ui.separator();
+                            if ui.button("Staff groups and barlines…").clicked() {
+                                self.open_groups();
+                                ui.close();
+                            }
+                            if ui.button("Page and system layout…").clicked() {
+                                self.show_layout = true;
+                                ui.close();
+                            }
+                            if ui.button("Lock selected systems").clicked() {
+                                self.lock_selected_systems();
+                                ui.close();
+                            }
+                            if ui.button("Unlock selected systems").clicked() {
+                                self.unlock_selected_systems();
+                                ui.close();
+                            }
+                        });
+                        ui.menu_button("Notation", |ui| {
+                            if ui
+                                .button("Octave, pedal, trill and glissando lines…")
+                                .clicked()
+                            {
+                                self.open_lines();
+                                ui.close();
+                            }
+                            if ui.button("Measured tremolos…").clicked() {
+                                self.open_tremolos();
+                                ui.close();
+                            }
+                            if ui.button("Ornaments and arpeggios…").clicked() {
+                                self.open_ornaments();
+                                ui.close();
+                            }
+                            if ui.button("Grace notes…").clicked() {
+                                self.open_grace();
+                                ui.close();
+                            }
+                            if ui.button("Chord symbols and fretboards…").clicked() {
+                                self.open_chords();
+                                ui.close();
+                            }
+                            ui.separator();
+                            if ui.button("Entry engraving and articulations…").clicked() {
+                                self.show_entry_style = true;
+                                ui.close();
+                            }
+                            if ui.button("Expressions, hairpins and tempo…").clicked() {
+                                self.open_expressions();
+                                ui.close();
+                            }
+                            ui.separator();
+                            if ui.button("Lyrics…").clicked() {
+                                self.open_lyrics();
+                                ui.close();
+                            }
+                            if ui.button("Slurs…").clicked() {
+                                self.open_slurs();
+                                ui.close();
+                            }
+                            if ui.button("Repeats and endings…").clicked() {
+                                self.open_repeats();
+                                ui.close();
+                            }
+                            ui.separator();
+                            if ui.button("Manage linked parts…").clicked() {
+                                self.show_parts = true;
+                                ui.close();
+                            }
+                            if ui.button("Export all linked parts as PDF…").clicked() {
+                                self.export_all_linked_parts();
                                 ui.close();
                             }
                         });
@@ -1123,9 +1863,40 @@ impl EncoreApp {
                         }
                         ui.label(format!("{:.0}%", self.zoom * 100.0));
                         if ui.button("−").clicked() {
-                            self.zoom = (self.zoom - 0.1).max(0.4);
+                            self.zoom = (self.zoom - 0.1).max(0.1);
                         }
                         ui.separator();
+                        if ui.small_button("Parts…").clicked() {
+                            self.show_parts = true;
+                        }
+                        let definitions = encore::parts::definitions(&self.score);
+                        self.selected_linked_part = self
+                            .selected_linked_part
+                            .min(definitions.len().saturating_sub(1));
+                        if self.part_view {
+                            egui::ComboBox::from_id_salt("view-part")
+                                .selected_text(
+                                    definitions
+                                        .get(self.selected_linked_part)
+                                        .map(|part| part.name.as_str())
+                                        .unwrap_or("Part"),
+                                )
+                                .width(135.0)
+                                .show_ui(ui, |ui| {
+                                    for (index, part) in definitions.iter().enumerate() {
+                                        if ui
+                                            .selectable_value(
+                                                &mut self.selected_linked_part,
+                                                index,
+                                                &part.name,
+                                            )
+                                            .changed()
+                                        {
+                                            self.activate_linked_part(index);
+                                        }
+                                    }
+                                });
+                        }
                         ui.selectable_value(&mut self.part_view, true, "Part");
                         ui.selectable_value(&mut self.part_view, false, "Full score");
                     });
@@ -1139,33 +1910,131 @@ impl EncoreApp {
             )
             .show(ctx, |ui| {
                 ui.horizontal_wrapped(|ui| {
-                    ui.selectable_value(&mut self.write_mode, false, "Select")
-                        .on_hover_text("Click a note to inspect or edit it");
-                    ui.selectable_value(&mut self.write_mode, true, "Write")
+                    if ui
+                        .selectable_label(
+                            !self.write_mode
+                                && !self.chord_editor.active
+                                && self.notation_editor.tool == notation::Tool::Select,
+                            "Select",
+                        )
+                        .clicked()
+                    {
+                        self.write_mode = false;
+                        self.exit_chord_entry();
+                        self.notation_editor.tool = notation::Tool::Select;
+                    }
+                    let write = ui
+                        .add_enabled(!self.view_is_voiced(),egui::Button::new("Write").selected(self.write_mode))
                         .on_hover_text(
                             "Click a staff to insert; Shift-click an event to add a chord tone",
                         );
+                    if write.clicked() {
+                        self.write_mode=true;
+                        self.exit_chord_entry();
+                        self.notation_editor.tool = notation::Tool::Select;
+                        write.surrender_focus();
+                    }
+                    if ui
+                        .selectable_label(
+                            self.notation_editor.tool == notation::Tool::Lyrics,
+                            "Lyrics",
+                        )
+                        .clicked()
+                    {
+                        self.open_lyrics();
+                    }
+                    if ui
+                        .selectable_label(
+                            self.notation_editor.tool == notation::Tool::Slurs,
+                            "Slurs",
+                        )
+                        .clicked()
+                    {
+                        self.open_slurs();
+                    }
+                    if ui
+                        .selectable_label(self.chord_editor.active, "Chords")
+                        .clicked()
+                    {
+                        self.open_chords();
+                    }
+                    if ui.button("Repeats…").clicked() {
+                        self.open_repeats();
+                    }
                     ui.separator();
-                    for (i, d) in Duration::ALL.iter().enumerate() {
+                    egui::ComboBox::from_id_salt("active-layer")
+                        .selected_text(format!("Layer {}", self.active_layer + 1))
+                        .show_ui(ui, |ui| {
+                            for layer in 0..4 {
+                                if ui
+                                    .selectable_value(
+                                        &mut self.active_layer,
+                                        layer,
+                                        format!("Layer {}", layer + 1),
+                                    )
+                                    .changed()
+                                {
+                                    self.selected = None;
+                                }
+                            }
+                        });
+                    for voice in 0..=1 {
+                        if ui.selectable_label(self.active_voice==voice,format!("V{}",voice+1))
+                            .on_hover_text("Two independent rhythmic voices in each layer; Speedy Entry: apostrophe")
+                            .clicked() { self.set_entry_voice(voice); }
+                    }
+                    for d in Duration::ALL {
                         ui.selectable_value(
                             &mut self.duration,
                             *d,
-                            format!("{} {}", i + 1, d.name()),
+                            format!(
+                                "{} {}",
+                                shortcuts::duration_digit(*d),
+                                match d {
+                                    Duration::DoubleWhole => "Breve",
+                                    Duration::Eighth => "8th",
+                                    Duration::Sixteenth => "16th",
+                                    _ => d.name(),
+                                }
+                            ),
                         )
                         .on_hover_text("Duration for new notes");
                     }
                     ui.separator();
                     ui.toggle_value(&mut self.dotted, "Dotted");
-                    ui.toggle_value(&mut self.rest, "Rest  R");
-                    ui.separator();
-                    for (a, name) in [
-                        (None, "Key"),
-                        (Some(-1), "♭"),
-                        (Some(0), "♮"),
-                        (Some(1), "♯"),
-                    ] {
-                        ui.selectable_value(&mut self.accidental, a, name);
+                    ui.toggle_value(&mut self.rest, "Rest · Alt+R");
+                    let mut triplet = self.tuplet.is_some();
+                    if ui.toggle_value(&mut triplet, "Triplet 3:2").changed() {
+                        self.tuplet = triplet.then_some(Tuplet {
+                            actual: 3,
+                            normal: 2,
+                        });
+                        self.tuplet_remaining = None;
                     }
+                    if ui.available_size_before_wrap().x < 165.0 {
+                        ui.end_row();
+                    }
+                    egui::ComboBox::from_id_salt("entry-profile")
+                        .width(150.0)
+                        .selected_text(match self.entry_profile {
+                            EntryProfile::SimpleLaptop => "Simple · Laptop",
+                            EntryProfile::Speedy => "Speedy Entry",
+                        })
+                        .show_ui(ui, |ui| {
+                            for profile in [EntryProfile::SimpleLaptop, EntryProfile::Speedy] {
+                                ui.selectable_value(
+                                    &mut self.entry_profile,
+                                    profile,
+                                    profile.name(),
+                                );
+                            }
+                        });
+                    ui.separator();
+                    if self.active_percussion().is_none() {
+                        for (a, name) in [(None, "Key"), (Some(-1), "♭"), (Some(0), "♮"), (Some(1), "♯")] {
+                            ui.selectable_value(&mut self.accidental, a, name);
+                        }
+                    } else if ui.button("Percussion map…").clicked() { self.open_percussion(); }
                 });
             });
     }
@@ -1197,6 +2066,9 @@ impl EncoreApp {
                     });
                 });
                 ui.add_space(10.0);
+                if ui.button("+  Drum staff").clicked() {
+                    self.add_percussion_staff();
+                }
                 egui::ScrollArea::vertical()
                     .id_salt("part-list")
                     .max_height((ui.available_height() - 245.0).max(100.0))
@@ -1236,9 +2108,13 @@ impl EncoreApp {
                                         self.cursor_tick = 0;
                                     }
                                     ui.label(
-                                        RichText::new(part.instrument.name())
-                                            .size(11.0)
-                                            .color(colors.muted),
+                                        RichText::new(if part.percussion.is_some() {
+                                            "Sampled drum kit"
+                                        } else {
+                                            part.instrument.name()
+                                        })
+                                        .size(11.0)
+                                        .color(colors.muted),
                                     );
                                     ui.horizontal(|ui| {
                                         ui.toggle_value(&mut part.muted, "M")
@@ -1285,12 +2161,9 @@ impl EncoreApp {
                 if ui
                     .add_enabled(can_trim, egui::Button::new("Remove last empty bar"))
                     .clicked()
+                    && let Err(error) = self.trim_last_empty_bar()
                 {
-                    for p in &mut self.score.parts {
-                        p.measures.pop();
-                    }
-                    self.selected = None;
-                    self.clamp_cursor();
+                    self.status = error;
                 }
                 if ui.button("Score properties").clicked() {
                     self.properties = true;
@@ -1309,49 +2182,116 @@ impl EncoreApp {
     }
 
     fn inspector(&mut self, ctx: &egui::Context) {
+        if self.view_is_voiced() {
+            self.voiced_inspector(ctx);
+            return;
+        }
         let colors = Palette::for_context(ctx);
+        let written_interval = self.entry_transposition();
+        let drum_map = self.active_percussion().cloned();
+        let previous_anchor = self
+            .selected
+            .and_then(|selection| encore::document::Anchor::from_selection(&self.score, selection));
+        let previous_score = self.score.clone();
         egui::SidePanel::right("inspector").resizable(true).default_width(211.0).width_range(180.0..=300.0).frame(egui::Frame::new().fill(colors.surface).inner_margin(16)).show(ctx, |ui| {
             egui::ScrollArea::vertical().id_salt("inspector-scroll").show(ui,|ui| {
             ui.label(RichText::new("INSPECTOR").size(11.0).strong().color(colors.muted)); ui.add_space(15.0);
             let mut remove = false;
             if let Some(s) = self.selected {
                 if let Some(n) = self.score.parts.get_mut(s.part).and_then(|p| p.measures.get_mut(s.measure)).and_then(|m| m.notes.get_mut(s.note)) {
-                    ui.label(RichText::new(if n.pitches.is_empty() { "Rest".into() } else { n.pitches.iter().map(|p| p.name()).collect::<Vec<_>>().join(" · ") }).size(21.0).strong());
+                    ui.label(RichText::new(if n.pitches.is_empty() { "Rest".into() } else { n.pitches.iter().map(|p| drum_map.as_ref().and_then(|map|map.sound(p.midi())).map_or_else(||p.name(),|sound|sound.name.clone())).collect::<Vec<_>>().join(" · ") }).size(21.0).strong());
                     ui.label(RichText::new(format!("Measure {}  ·  Beat {:.2}", s.measure+1,n.start as f32 / PPQ as f32 + 1.0)).size(12.0).color(colors.muted));
                     ui.add_space(14.0);
                     let original = n.clone();
+                    if n.pitches.len()>1 {egui::ComboBox::from_id_salt("chord-pitch").selected_text(if drum_map.is_some(){"Edit sound".into()}else{format!("Edit pitch: {}",self.entry_pitch.name())}).show_ui(ui,|ui|{for pitch in &n.pitches{let label=drum_map.as_ref().and_then(|map|map.sound(pitch.midi())).map_or_else(||pitch.name(),|sound|sound.name.clone());if ui.selectable_value(&mut self.entry_pitch,*pitch,label).changed() && drum_map.is_none(){self.octave=written_interval.written_pitch(*pitch).map_or(pitch.octave,|written|written.octave);}}});}
                     egui::ComboBox::from_label("Duration").selected_text(n.duration.name()).show_ui(ui, |ui| { for &d in Duration::ALL { ui.selectable_value(&mut n.duration, d, d.name()); } });
-                    ui.checkbox(&mut n.dotted, "Dotted"); ui.checkbox(&mut n.staccato, "Staccato"); ui.add_enabled(!n.pitches.is_empty(), egui::Checkbox::new(&mut n.tied, "Tie to next note"));
+                    ui.label(format!("Voice {}", n.voice+1));
+                    egui::ComboBox::from_id_salt("note-layer").selected_text(format!("Layer {}",n.layer+1)).show_ui(ui,|ui|{for layer in 0..4{ui.selectable_value(&mut n.layer,layer,format!("Layer {}",layer+1));}});
+                    ui.checkbox(&mut n.dotted, "Dotted");
+                    let mut is_tuplet=n.tuplet.is_some();
+                    if ui.checkbox(&mut is_tuplet,"Tuplet").changed() {n.tuplet=is_tuplet.then_some(Tuplet{actual:3,normal:2});}
+                    if let Some(ratio)=&mut n.tuplet {ui.horizontal(|ui| {
+                        ui.add(egui::DragValue::new(&mut ratio.actual).range(2..=16));ui.label("in the time of");ui.add(egui::DragValue::new(&mut ratio.normal).range(1..=16));
+                    });}
+                    if let Err(error)=n.checked_ticks() {*n=original.clone();self.status=error;}
+                    ui.checkbox(&mut n.staccato, "Staccato");
+                    for articulation in [Articulation::Accent,Articulation::Marcato,Articulation::Tenuto,Articulation::Staccatissimo] {
+                        let mut enabled=n.articulations.contains(&articulation);
+                        if ui.checkbox(&mut enabled,articulation.name()).changed() {
+                            if enabled {n.articulations.push(articulation);} else {n.articulations.retain(|a|*a!=articulation);}
+                        }
+                    }
+                    ui.add_enabled(!n.pitches.is_empty(), egui::Checkbox::new(&mut n.tied, "Tie to next note"));
                     ui.add_space(10.0); ui.label("Dynamics"); ui.add(egui::Slider::new(&mut n.velocity, 1..=127).text("velocity"));
                     ui.horizontal_wrapped(|ui| { for (name,v) in [("pp",32),("p",48),("mp",64),("mf",80),("f",100),("ff",116)] { if ui.small_button(name).clicked() { n.velocity=v; } } });
                     if n.ticks() + n.start > self.score.measure_ticks() { self.score.parts[s.part].measures[s.measure].notes[s.note] = original.clone(); self.status = "That duration extends past the barline.".into(); }
                     let m = &self.score.parts[s.part].measures[s.measure];
                     let n = &m.notes[s.note];
-                    if m.notes.iter().enumerate().any(|(i,x)| i!=s.note && n.start < x.start+x.ticks() && n.start+n.ticks()>x.start) { self.score.parts[s.part].measures[s.measure].notes[s.note] = original; self.status = "That duration overlaps the next event.".into(); }
-                    ui.add_space(12.0); ui.horizontal(|ui| { if ui.button("− semitone").clicked() { self.transpose(-1); }
+                    if m.notes.iter().enumerate().any(|(i,x)| i!=s.note && n.lane()==x.lane() && n.start < x.start+x.ticks() && n.start+n.ticks()>x.start) { self.score.parts[s.part].measures[s.measure].notes[s.note] = original; self.status = "That duration overlaps the next event.".into(); }
+                    if drum_map.is_none() {ui.add_space(12.0); ui.horizontal(|ui| { if ui.button("− semitone").clicked() { self.transpose(-1); }
  if ui.button("+").clicked() { self.transpose(1); } });
                     ui.horizontal(|ui| { if ui.button("− octave").clicked() { self.transpose(-12); }
- if ui.button("+").clicked() { self.transpose(12); } });
+ if ui.button("+").clicked() { self.transpose(12); } });}
                     if ui.button("Delete note").clicked() { remove = true; }
                 }
             } else {
                 ui.label(RichText::new("Make your mark.").size(19.0).strong());
                 ui.add_space(8.0); ui.label("Choose Write, then click a staff to enter a note. Select a note to edit its expression here.");
-                ui.add_space(12.0); ui.label(RichText::new("Shift-click adds a chord tone.\nA–G enters notes at the cursor.\n1–5 chooses note duration.\n↑ / ↓ changes selected pitch.").size(12.0).color(colors.muted));
+                ui.add_space(12.0); ui.label(RichText::new(if drum_map.is_some(){"Choose a named sound below.\nEnter uses the selected sound.\n0–8 chooses duration (5 = quarter).\n↑ / ↓ selects a mapped sound."}else{"Shift-click adds a chord tone.\nA–G enters notes at the cursor.\n0–8 chooses duration (5 = quarter).\n↑ / ↓ moves by a diatonic step."}).size(12.0).color(colors.muted));
             }
             if remove { self.delete_selected(); }
             ui.add_space(20.0); ui.separator(); ui.add_space(14.0);
             let part = &mut self.score.parts[self.active_part];
             ui.label(RichText::new("STAFF").size(11.0).strong().color(colors.muted));
             ui.text_edit_singleline(&mut part.name);
-            egui::ComboBox::from_id_salt("instrument-select").selected_text(part.instrument.name()).show_ui(ui, |ui| { for &i in Instrument::ALL { ui.selectable_value(&mut part.instrument, i, i.name()); } });
-            egui::ComboBox::from_label("Clef").selected_text(format!("{:?}",part.clef)).show_ui(ui, |ui| { for c in [Clef::Treble,Clef::Bass,Clef::Alto] { ui.selectable_value(&mut part.clef,c,format!("{c:?}")); } });
+            if part.percussion.is_none() {
+                egui::ComboBox::from_id_salt("instrument-select").selected_text(part.instrument.name()).show_ui(ui, |ui| { for &i in Instrument::ALL { ui.selectable_value(&mut part.instrument, i, i.name()); } });
+                egui::ComboBox::from_label("Clef").selected_text(format!("{:?}",part.clef)).show_ui(ui, |ui| { for c in [Clef::Treble,Clef::Bass,Clef::Alto] { ui.selectable_value(&mut part.clef,c,format!("{c:?}")); } });
+            } else {ui.label("Unpitched percussion");}
             ui.add(egui::Slider::new(&mut part.pan, -1.0..=1.0).text("pan"));
-            if self.score.parts.len()>1 && ui.small_button("Remove this staff").clicked() { self.score.parts.remove(self.active_part); self.active_part=0; self.selected=None; }
+            if ui.button("Percussion map…").clicked() {self.open_percussion();}
+            if self.score.parts.len()>1 && ui.small_button("Remove this staff").clicked() { encore::document::remove_staff(&mut self.score, self.active_part); self.score.parts.remove(self.active_part); self.active_part=0; self.selected=None; self.clear_region_selection(); }
             ui.add_space(20.0); ui.label(RichText::new(format!("ENTRY CURSOR\nMeasure {}  ·  Beat {:.2}",self.cursor_measure+1,self.cursor_tick as f32 / PPQ as f32 +1.0)).size(11.0).color(colors.muted));
-            ui.add(egui::DragValue::new(&mut self.octave).range(0..=8).prefix("Octave "));
+            if drum_map.is_none() {ui.add(egui::DragValue::new(&mut self.octave).range(0..=8).prefix("Octave "));}
+            else {ui.label("Enter uses the selected percussion sound; Up/Down selects by printed position.");}
             });
         });
+        if let Some(anchor) = previous_anchor
+            && let Some(prior) = encore::document::note_at(&previous_score, &anchor)
+            && let Some(selection) = self.selected
+            && let Some(now) = self
+                .score
+                .parts
+                .get(selection.part)
+                .and_then(|staff| staff.measures.get(selection.measure))
+                .and_then(|bar| bar.notes.get(selection.note))
+            && prior.tied != now.tied
+            && let Some(style) = self
+                .score
+                .notation
+                .entries
+                .iter_mut()
+                .find(|style| style.anchor == anchor)
+        {
+            style.tie_pitches = None;
+        }
+        if let (Some(from), Some(to)) = (
+            previous_anchor,
+            self.selected.and_then(|selection| {
+                encore::document::Anchor::from_selection(&self.score, selection)
+            }),
+        ) && from != to
+            && let Err(error) = encore::document::move_anchor(&mut self.score, from, to)
+        {
+            self.score = previous_score.clone();
+            self.status = error;
+        }
+        if self.score != previous_score
+            && let Err(error) = self.score.validate()
+        {
+            self.score = previous_score;
+            self.status = format!("Cannot change entry: {error}");
+        }
     }
 
     fn transport(&mut self, ctx: &egui::Context) {
@@ -1392,8 +2332,8 @@ impl EncoreApp {
                             "{:02}:{:02} / {:02}:{:02}",
                             seconds as u32 / 60,
                             seconds as u32 % 60,
-                            synth::duration_seconds(&self.score) as u32 / 60,
-                            synth::duration_seconds(&self.score) as u32 % 60
+                            self.cached_score_seconds() as u32 / 60,
+                            self.cached_score_seconds() as u32 % 60
                         ))
                         .monospace()
                         .size(13.0),
@@ -1413,6 +2353,15 @@ impl EncoreApp {
                     });
                 });
                 ui.add_space(5.0);
+                ui.horizontal(|ui| {
+                    if ui.small_button("Playback…").clicked() {
+                        self.playback_editor.open = true;
+                    }
+                    self.playback_seek_control(ui);
+                    if self.playback_editor.repeat {
+                        ui.small("Loop enabled");
+                    }
+                });
                 ui.horizontal(|ui| {
                     ui.label(RichText::new(&self.status).size(11.0).color(colors.muted));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1439,6 +2388,10 @@ impl EncoreApp {
                     .inner_margin(egui::Margin::symmetric(20, 9)),
             )
             .show(ctx, |ui| {
+                if self.active_percussion().is_some() {
+                    self.percussion_palette(ui);
+                    return;
+                }
                 ui.horizontal(|ui| {
                     ui.label(
                         RichText::new("AUDITION")
@@ -1487,7 +2440,7 @@ impl EncoreApp {
                             r,
                             2.0,
                             if response.hovered() {
-                                Color32::from_rgb(211, 234, 224)
+                                colors.key_hover
                             } else {
                                 Color32::WHITE
                             },
@@ -1504,7 +2457,7 @@ impl EncoreApp {
                                 egui::Align2::LEFT_BOTTOM,
                                 format!("C{}", midi as i16 / 12 - 1),
                                 FontId::proportional(9.0),
-                                INK.gamma_multiply(0.65),
+                                colors.key_ink.gamma_multiply(0.65),
                             );
                         }
                         if response.clicked() {
@@ -1527,7 +2480,7 @@ impl EncoreApp {
                             if response.hovered() {
                                 colors.accent
                             } else {
-                                INK
+                                colors.key_ink
                             },
                         );
                         if response.clicked() {
@@ -1555,133 +2508,456 @@ impl EncoreApp {
     }
 
     fn score_canvas(&mut self, ctx: &egui::Context) {
+        self.reconcile_part_staff();
         let colors = Palette::for_context(ctx);
-        let filter = if self.part_view {
-            Some(self.active_part)
-        } else {
-            None
+        let projection = match self.selected_part_projection() {
+            Ok(projection) => projection,
+            Err(error) => {
+                self.status = error;
+                self.part_view = false;
+                None
+            }
         };
-        if self.cached_score.as_ref() != Some(&self.score)
-            || self.cached_selection != self.selected
-            || self.cached_filter != filter
+        let filter = self.part_view.then_some(self.selected_linked_part);
+        if self.cached_filter != filter {
+            self.previous_part_view = Some(self.cached_filter);
+            if let Some(projection) = &projection
+                && self.grace_editor.selected.is_some_and(|selection| {
+                    !projection.source_staves.contains(&selection.anchor.part)
+                })
+            {
+                self.grace_editor.open = false;
+                self.grace_editor.selected = None;
+            }
+            if let Some(projection) = &projection
+                && !projection.source_staves.contains(&self.active_part)
+            {
+                self.active_part = projection.source_staves[0];
+                self.selected = None;
+            }
+            self.octave = self
+                .entry_written_pitch(self.entry_pitch)
+                .map_or(self.entry_pitch.octave, |written| written.octave);
+        }
+        let timing_changed = self.cached_score.as_ref() != Some(&self.score);
+        if timing_changed {
+            self.playback_editor.clock = encore::expressions::TempoMap::new(&self.score)
+                .ok()
+                .map(std::sync::Arc::new);
+        }
+        if timing_changed || self.cached_selection != self.selected || self.cached_filter != filter
         {
+            let display_score = projection
+                .as_ref()
+                .map_or(&self.score, |projection| &projection.score);
             self.cached_pages = engraving::engrave(
-                &self.score,
+                display_score,
                 &EngravingOptions {
-                    selected: self.selected,
-                    playhead: None,
-                    part_filter: filter,
+                    selected: projection
+                        .as_ref()
+                        .and_then(|projection| {
+                            self.selected
+                                .and_then(|selected| projection.project_selection(selected))
+                        })
+                        .or(self.selected.filter(|_| projection.is_none())),
+                    layout: projection
+                        .as_ref()
+                        .map(|projection| projection.layout.clone()),
+                    ..Default::default()
                 },
             );
+            if let Some(projection) = &projection {
+                for page in &mut self.cached_pages {
+                    for staff in &mut page.staves {
+                        staff.part = projection.source_staves[staff.part];
+                    }
+                    for hit in &mut page.hits {
+                        if let Some(source) = projection.source_selection(hit.selection) {
+                            hit.selection = source;
+                        }
+                    }
+                    for hit in &mut page.grace_hits {
+                        hit.selection.anchor.part =
+                            projection.source_staves[hit.selection.anchor.part];
+                    }
+                    for hit in &mut page.chord_hits {
+                        hit.anchor.part = projection.source_staves[hit.anchor.part];
+                    }
+                    for hit in &mut page.sound_hits {
+                        hit.anchor.part = projection.source_staves[hit.anchor.part];
+                    }
+                    for hit in &mut page.slur_hits {
+                        hit.start.part = projection.source_staves[hit.start.part];
+                        hit.end.part = projection.source_staves[hit.end.part];
+                    }
+                }
+            }
             self.cached_score = Some(self.score.clone());
             self.cached_selection = self.selected;
             self.cached_filter = filter;
         }
+        let playback_order = self.score.playback_order().unwrap_or_default();
+        let tempo_map = if self.score.notation.tempo.is_empty() {
+            None
+        } else {
+            self.playback_editor.clock.clone()
+        };
         let mut click = None;
+        let mut slur_drag_start = None;
+        let slur_tool = self.notation_editor.tool == notation::Tool::Slurs;
+        let mut page_rects = Vec::new();
+        let mut reveal = self.navigation.reveal.take();
+        let active_slur = self.active_slur_endpoints();
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(colors.workspace))
             .show(ctx, |ui| {
-                egui::ScrollArea::both()
-                    .id_salt("score-scroll")
-                    .show(ui, |ui| {
-                        ui.add_space(25.0);
-                        for (page_index, page) in self.cached_pages.iter().enumerate() {
-                            let size = Vec2::new(page.width * self.zoom, page.height * self.zoom);
-                            let margin = ((ui.available_width() - size.x) / 2.0).max(24.0);
-                            ui.horizontal(|ui| {
-                                ui.add_space(margin);
-                                let (rect, response) = ui.allocate_exact_size(size, Sense::click());
-                                let shadow = rect.translate(Vec2::new(3.0, 5.0));
-                                ui.painter().rect_filled(
-                                    shadow,
-                                    1.0,
-                                    Color32::from_black_alpha(100),
+                let mut area = egui::ScrollArea::both().id_salt("score-scroll");
+                if let Some(offset) = self.navigation.offset.take() {
+                    area = area.scroll_offset(offset);
+                }
+                let scroll = area.show(ui, |ui| {
+                    ui.add_space(25.0);
+                    for (page_index, page) in self.cached_pages.iter().enumerate() {
+                        let size = Vec2::new(page.width * self.zoom, page.height * self.zoom);
+                        let margin = ((ui.available_width() - size.x) / 2.0).max(24.0);
+                        ui.horizontal(|ui| {
+                            ui.add_space(margin);
+                            let (rect, response) = ui.allocate_exact_size(
+                                size,
+                                if slur_tool {
+                                    Sense::click_and_drag()
+                                } else {
+                                    Sense::click()
+                                },
+                            );
+                            page_rects.push(rect);
+                            if let Some((part, bar, tick)) = reveal
+                                && let Some(staff) = page
+                                    .staves
+                                    .iter()
+                                    .find(|staff| staff.part == part && staff.measure == bar)
+                            {
+                                let target = rect.min
+                                    + Vec2::new(
+                                        staff.x_at_anchor(&encore::document::Anchor {
+                                            part,
+                                            measure: bar,
+                                            tick,
+                                            layer: self.active_layer,
+                                            voice: self.active_voice,
+                                        }),
+                                        staff.y + staff.spacing * 2.0,
+                                    ) * self.zoom;
+                                ui.scroll_to_rect(
+                                    Rect::from_center_size(target, Vec2::new(40.0, 100.0)),
+                                    Some(egui::Align::Center),
                                 );
-                                ui.painter().rect_filled(rect, 0.0, Color32::WHITE);
-                                if ui.is_rect_visible(rect) {
-                                    paint_page(ui.painter(), page, rect.min, self.zoom);
-                                }
-                                if let Some(p) = self
-                                    .playback
-                                    .as_ref()
-                                    .filter(|p| p.is_playing() || p.is_paused())
-                                {
-                                    let tick = p.position_seconds() * self.score.tempo as f32
-                                        / 60.0
-                                        * PPQ as f32;
-                                    let measure =
-                                        (tick / self.score.measure_ticks() as f32) as usize;
-                                    for staff in page.staves.iter().filter(|s| s.measure == measure)
-                                    {
-                                        let x = rect.left()
-                                            + (staff.content_x
-                                                + (tick % self.score.measure_ticks() as f32)
-                                                    / self.score.measure_ticks() as f32
-                                                    * staff.content_width)
-                                                * self.zoom;
-                                        ui.painter().line_segment(
-                                            [
-                                                Pos2::new(
-                                                    x,
-                                                    rect.top() + (staff.y - 14.0) * self.zoom,
-                                                ),
-                                                Pos2::new(
-                                                    x,
-                                                    rect.top()
-                                                        + (staff.y + staff.spacing * 4.0 + 14.0)
-                                                            * self.zoom,
-                                                ),
-                                            ],
-                                            Stroke::new(
-                                                2.0_f32,
-                                                Color32::from_rgba_unmultiplied(40, 150, 120, 180),
-                                            ),
+                                reveal = None;
+                            }
+                            let shadow = rect.translate(Vec2::new(3.0, 5.0));
+                            ui.painter()
+                                .rect_filled(shadow, 1.0, Color32::from_black_alpha(100));
+                            ui.painter().rect_filled(rect, 0.0, Color32::WHITE);
+                            if ui.is_rect_visible(rect) {
+                                if let Some(region) = &self.region_selection {
+                                    for staff in page.staves.iter().filter(|staff| {
+                                        region.staves.contains(&staff.part)
+                                            && (region.start..=region.end).contains(&staff.measure)
+                                    }) {
+                                        let area = Rect::from_min_max(
+                                            rect.min
+                                                + Vec2::new(staff.x, staff.y - 9.0) * self.zoom,
+                                            rect.min
+                                                + Vec2::new(
+                                                    staff.x + staff.width,
+                                                    staff.y + staff.spacing * 4.0 + 9.0,
+                                                ) * self.zoom,
+                                        );
+                                        ui.painter().rect_filled(
+                                            area,
+                                            0.0,
+                                            Color32::from_gray(220),
+                                        );
+                                        ui.painter().rect_stroke(
+                                            area,
+                                            0.0,
+                                            Stroke::new(0.8_f32, Color32::from_gray(100)),
+                                            egui::StrokeKind::Inside,
                                         );
                                     }
                                 }
-                                if response.clicked()
-                                    && let Some(pos) = response.interact_pointer_pos()
-                                {
-                                    click = Some((
-                                        page_index,
-                                        (pos - rect.min) / self.zoom,
-                                        ctx.input(|i| i.modifiers.shift),
-                                    ));
+                                paint_page(ui.painter(), page, rect.min, self.zoom);
+                                if slur_tool {
+                                    for hit in page
+                                        .slur_hits
+                                        .iter()
+                                        .filter(|h| Some((h.start, h.end)) == active_slur)
+                                    {
+                                        let center = rect.min + Vec2::new(hit.x, hit.y) * self.zoom;
+                                        ui.painter().rect_filled(
+                                            Rect::from_center_size(center, Vec2::splat(6.0)),
+                                            1.0,
+                                            colors.surface,
+                                        );
+                                        ui.painter().rect_stroke(
+                                            Rect::from_center_size(center, Vec2::splat(6.0)),
+                                            1.0,
+                                            Stroke::new(1.0_f32, colors.text),
+                                            egui::StrokeKind::Inside,
+                                        );
+                                    }
                                 }
-                                if self.write_mode {
-                                    response.on_hover_cursor(egui::CursorIcon::Crosshair);
-                                }
-                            });
-                            ui.add_space(8.0);
-                            ui.horizontal(|ui| {
-                                ui.add_space(margin);
-                                ui.label(
-                                    RichText::new(format!(
-                                        "PAGE {} / {}",
-                                        page_index + 1,
-                                        self.cached_pages.len()
-                                    ))
-                                    .size(10.0)
-                                    .color(colors.muted),
+                            }
+                            if let Some(p) = self
+                                .playback
+                                .as_ref()
+                                .filter(|p| p.is_playing() || p.is_paused())
+                            {
+                                let tick = tempo_map.as_ref().map_or_else(
+                                    || {
+                                        p.position_seconds() * self.score.tempo as f32 / 60.0
+                                            * PPQ as f32
+                                    },
+                                    |map| {
+                                        map.tick_at_seconds(f64::from(p.position_seconds())) as f32
+                                    },
                                 );
-                            });
-                            ui.add_space(22.0);
-                        }
-                    });
+                                let performed_measure =
+                                    (tick / self.score.measure_ticks() as f32) as usize;
+                                let measure = playback_order
+                                    .get(performed_measure)
+                                    .copied()
+                                    .unwrap_or(usize::MAX);
+                                for staff in page.staves.iter().filter(|s| s.measure == measure) {
+                                    let x = rect.left()
+                                        + staff.x_at_tick(tick % self.score.measure_ticks() as f32)
+                                            * self.zoom;
+                                    ui.painter().line_segment(
+                                        [
+                                            Pos2::new(x, rect.top() + (staff.y - 14.0) * self.zoom),
+                                            Pos2::new(
+                                                x,
+                                                rect.top()
+                                                    + (staff.y + staff.spacing * 4.0 + 14.0)
+                                                        * self.zoom,
+                                            ),
+                                        ],
+                                        Stroke::new(2.0_f32, colors.playhead),
+                                    );
+                                }
+                            }
+                            if slur_tool
+                                && response.drag_started()
+                                && let Some(origin) =
+                                    ctx.input(|input| input.pointer.press_origin())
+                            {
+                                let point = (origin - rect.min) / self.zoom;
+                                slur_drag_start = page
+                                    .hits
+                                    .iter()
+                                    .min_by(|a, b| {
+                                        Vec2::new(a.x - point.x, a.y - point.y)
+                                            .length_sq()
+                                            .total_cmp(
+                                                &Vec2::new(b.x - point.x, b.y - point.y)
+                                                    .length_sq(),
+                                            )
+                                    })
+                                    .filter(|hit| {
+                                        Vec2::new(hit.x - point.x, hit.y - point.y).length() < 18.0
+                                    })
+                                    .map(|hit| hit.selection);
+                            }
+                            if (response.clicked() || slur_tool && response.drag_stopped())
+                                && let Some(pos) = response
+                                    .interact_pointer_pos()
+                                    .or_else(|| ctx.input(|input| input.pointer.latest_pos()))
+                            {
+                                response.surrender_focus();
+                                click = Some((
+                                    page_index,
+                                    (pos - rect.min) / self.zoom,
+                                    ctx.input(|i| i.modifiers.shift),
+                                ));
+                            }
+                            if self.write_mode {
+                                response.on_hover_cursor(egui::CursorIcon::Crosshair);
+                            }
+                        });
+                        ui.add_space(8.0);
+                        ui.horizontal(|ui| {
+                            ui.add_space(margin);
+                            ui.label(
+                                RichText::new(format!(
+                                    "PAGE {} / {}",
+                                    page_index + 1,
+                                    self.cached_pages.len()
+                                ))
+                                .size(10.0)
+                                .color(colors.muted),
+                            );
+                        });
+                        ui.add_space(22.0);
+                    }
+                });
+                self.navigation.scroll = scroll.state.offset;
+                self.navigation.viewport = scroll.inner_rect.size();
+                self.navigation.content = scroll.content_size;
+                self.navigation.pages = page_rects
+                    .into_iter()
+                    .map(|rect| {
+                        rect.translate(scroll.state.offset - scroll.inner_rect.min.to_vec2())
+                    })
+                    .collect();
             });
+        self.navigation.reveal = reveal;
+        if let Some(selection) = slur_drag_start {
+            self.begin_slur_at(selection);
+        }
         if let Some((page_index, pos, chord)) = click {
             let page = &self.cached_pages[page_index];
+            if slur_tool
+                && let Some(hit) = page
+                    .slur_hits
+                    .iter()
+                    .filter(|h| Some((h.start, h.end)) == active_slur)
+                    .min_by(|a, b| {
+                        Vec2::new(a.x - pos.x, a.y - pos.y)
+                            .length_sq()
+                            .total_cmp(&Vec2::new(b.x - pos.x, b.y - pos.y).length_sq())
+                    })
+                    .filter(|h| Vec2::new(h.x - pos.x, h.y - pos.y).length_sq() < 81.0)
+                    .cloned()
+            {
+                self.select_slur_handle(&hit);
+                return;
+            }
+            if !self.write_mode
+                && let Some(hit) = page.chord_hits.iter().rev().find(|hit| {
+                    pos.x >= hit.x
+                        && pos.x <= hit.x + hit.width
+                        && pos.y >= hit.y
+                        && pos.y <= hit.y + hit.height
+                })
+            {
+                let anchor = hit.anchor;
+                if self.view_is_voiced() {
+                    self.active_part = anchor.part;
+                    self.cursor_measure = anchor.measure;
+                    self.cursor_tick = anchor.tick;
+                    self.status =
+                        "Edit the source score to change this voiced part's chord symbols.".into();
+                    return;
+                }
+                let slot = hit.slot;
+                self.chord_editor.active = true;
+                self.chord_editor.slot = slot;
+                self.chord_click(anchor.part, anchor.measure, anchor.tick);
+                self.chord_editor.open = true;
+                return;
+            }
+            if !self.write_mode
+                && !self.chord_editor.active
+                && let Some(hit) = page
+                    .grace_hits
+                    .iter()
+                    .min_by(|a, b| {
+                        Vec2::new(a.x - pos.x, a.y - pos.y)
+                            .length_sq()
+                            .total_cmp(&Vec2::new(b.x - pos.x, b.y - pos.y).length_sq())
+                    })
+                    .filter(|hit| Vec2::new(hit.x - pos.x, hit.y - pos.y).length() < 10.0)
+            {
+                let selection = hit.selection;
+                self.select_grace(selection);
+                return;
+            }
+            if self.chord_editor.active {
+                if let Some(staff) = page
+                    .staves
+                    .iter()
+                    .filter(|staff| {
+                        pos.x >= staff.content_x - 10.0 && pos.x <= staff.x + staff.width
+                    })
+                    .min_by(|a, b| {
+                        (pos.y - a.y - a.spacing * 2.0)
+                            .abs()
+                            .total_cmp(&(pos.y - b.y - b.spacing * 2.0).abs())
+                    })
+                {
+                    let part = staff.part;
+                    let bar = staff.measure;
+                    let beat = self.score.beat_ticks();
+                    let tick = (staff.tick_at_x(pos.x) / beat as f32).round() as u32 * beat;
+                    self.chord_click(part, bar, tick);
+                }
+                return;
+            }
+            let drum_hit = page
+                .sound_hits
+                .iter()
+                .min_by(|a, b| {
+                    Vec2::new(a.x - pos.x, a.y - pos.y)
+                        .length_sq()
+                        .total_cmp(&Vec2::new(b.x - pos.x, b.y - pos.y).length_sq())
+                })
+                .filter(|hit| Vec2::new(hit.x - pos.x, hit.y - pos.y).length() < 10.0)
+                .cloned();
             let nearest = page
                 .hits
                 .iter()
                 .map(|h| (h, Vec2::new(h.x - pos.x, h.y - pos.y).length()))
                 .filter(|(_, d)| *d < 14.0)
                 .min_by(|a, b| a.1.total_cmp(&b.1));
-            if !self.write_mode && !chord {
-                if let Some((h, _)) = nearest {
-                    let sel = h.selection;
+            let hit_selection = drum_hit
+                .as_ref()
+                .and_then(|hit| hit.anchor.selection(&self.score))
+                .or_else(|| nearest.map(|(hit, _)| hit.selection));
+            if !self.write_mode {
+                if let Some(sel) = hit_selection {
+                    if chord {
+                        self.select_region_at(sel.part, sel.measure, true);
+                        return;
+                    }
+                    self.region_selection = None;
+                    if self.annotation_click(sel) {
+                        return;
+                    }
                     self.selected = Some(sel);
                     self.active_part = sel.part;
+                    self.active_layer =
+                        self.score.parts[sel.part].measures[sel.measure].notes[sel.note].layer;
+                    self.active_voice =
+                        self.score.parts[sel.part].measures[sel.measure].notes[sel.note].voice;
+                    let pitch_index = drum_hit
+                        .as_ref()
+                        .and_then(|hit| {
+                            self.score.parts[sel.part].measures[sel.measure].notes[sel.note]
+                                .pitches
+                                .iter()
+                                .position(|pitch| pitch.midi() == hit.sound_id)
+                        })
+                        .or_else(|| {
+                            projection
+                                .as_ref()
+                                .and_then(|p| {
+                                    p.project_selection(sel)
+                                        .and_then(|display| p.source_pitch(display, 0))
+                                })
+                                .map(|(_, index)| index)
+                        })
+                        .unwrap_or(0);
+                    if let Some(pitch) = self.score.parts[sel.part].measures[sel.measure].notes
+                        [sel.note]
+                        .pitches
+                        .get(pitch_index)
+                        .copied()
+                    {
+                        self.entry_pitch = pitch;
+                        self.octave = self
+                            .entry_written_pitch(pitch)
+                            .map_or(pitch.octave, |written| written.octave);
+                    }
                     self.cursor_measure = sel.measure;
                     self.cursor_tick =
                         self.score.parts[sel.part].measures[sel.measure].notes[sel.note].start;
@@ -1698,20 +2974,19 @@ impl EncoreApp {
                 {
                     self.active_part = staff.part;
                     self.cursor_measure = staff.measure;
-                    self.cursor_tick = (((pos.x - staff.content_x) / staff.content_width
-                        * self.score.measure_ticks() as f32
-                        / self.duration.ticks() as f32)
-                        .floor() as u32
-                        * self.duration.ticks())
-                    .min(
-                        self.score
-                            .measure_ticks()
-                            .saturating_sub(self.duration.ticks()),
-                    );
+                    self.cursor_tick =
+                        ((staff.tick_at_x(pos.x) / self.entry_ticks() as f32).floor() as u32
+                            * self.entry_ticks())
+                        .min(
+                            self.score
+                                .measure_ticks()
+                                .saturating_sub(self.entry_ticks()),
+                        );
                     self.selected = None;
+                    self.select_region_at(staff.part, staff.measure, chord);
                 }
             } else {
-                let hit = nearest.map(|(h, _)| h.selection);
+                let hit = hit_selection;
                 let staff = page
                     .staves
                     .iter()
@@ -1726,6 +3001,22 @@ impl EncoreApp {
                 {
                     let part = staff.part;
                     let measure = staff.measure;
+                    let drum_pitch = self.score.parts[part].percussion.as_ref().and_then(|map| {
+                        let position = staff.position_at_y(pos.y);
+                        map.sounds
+                            .iter()
+                            .min_by(|a, b| {
+                                let da = (f32::from(a.position) - position).abs();
+                                let db = (f32::from(b.position) - position).abs();
+                                da.total_cmp(&db)
+                                    .then_with(|| {
+                                        (b.id == self.entry_pitch.midi())
+                                            .cmp(&(a.id == self.entry_pitch.midi()))
+                                    })
+                                    .then_with(|| a.id.cmp(&b.id))
+                            })
+                            .map(|sound| encore::percussion::token(sound.id))
+                    });
                     let step0 = match self.score.parts[part].clef {
                         Clef::Treble => 30,
                         Clef::Bass => 18,
@@ -1734,23 +3025,47 @@ impl EncoreApp {
                     let step = step0
                         + ((staff.y + staff.spacing * 4.0 - pos.y) / (staff.spacing / 2.0)).round()
                             as i32;
-                    let pitch = Pitch::from_staff_step(step, self.score.key_fifths);
+                    let written_key = projection
+                        .as_ref()
+                        .map_or(self.score.key_fifths, |projection| {
+                            projection.score.key_fifths
+                        });
+                    let mut pitch =
+                        drum_pitch.unwrap_or_else(|| Pitch::from_staff_step(step, written_key));
+                    if drum_pitch.is_none()
+                        && let Some(alter) = self.accidental
+                    {
+                        pitch.alter = alter;
+                    }
                     let start =
                         if let Some(s) = hit.filter(|s| s.part == part && s.measure == measure) {
                             self.score.parts[part].measures[measure].notes[s.note].start
                         } else {
-                            (((pos.x - staff.content_x).max(0.0) / staff.content_width
-                                * self.score.measure_ticks() as f32
-                                / self.duration.ticks() as f32)
-                                .round() as u32
-                                * self.duration.ticks())
+                            ((staff.tick_at_x(pos.x) / self.entry_ticks() as f32).round() as u32
+                                * self.entry_ticks())
                             .min(
                                 self.score
                                     .measure_ticks()
-                                    .saturating_sub(self.duration.ticks()),
+                                    .saturating_sub(self.entry_ticks()),
                             )
                         };
+                    let anchor = encore::document::Anchor {
+                        voice: self.active_voice,
+                        part,
+                        measure,
+                        tick: start,
+                        layer: self.active_layer,
+                    };
+                    let pitch = match self.concert_pitch_at(pitch, anchor) {
+                        Ok(pitch) => pitch,
+                        Err(error) => {
+                            self.status = error;
+                            return;
+                        }
+                    };
+                    let accidental = self.accidental.take();
                     self.enter_note(part, measure, start, pitch, chord);
+                    self.accidental = accidental;
                 }
             }
         }
@@ -1847,6 +3162,11 @@ impl EncoreApp {
     }
 
     fn replace_library_staff(&mut self) {
+        if self.active_percussion().is_some() {
+            self.status =
+                "Use Percussion map to change this staff's sampled kit or sound mappings.".into();
+            return;
+        }
         let part = &mut self.score.parts[self.active_part];
         if part.name == part.instrument.name() {
             part.name = self.lab_instrument.name().into();
@@ -1925,7 +3245,7 @@ impl EncoreApp {
 
                             ui.horizontal_wrapped(|ui| {
                                 if ui.add_enabled(self.score.parts.len() < MAX_PARTS, egui::Button::new("+  Add staff")).clicked() { self.add_library_staff(); }
-                                if ui.button("Use on active staff").on_hover_text("Change the current staff's instrument and clef; keep its notes").clicked() { self.replace_library_staff(); }
+                                if ui.add_enabled(self.active_percussion().is_none(),egui::Button::new("Use on active staff")).on_hover_text("Change a pitched staff's instrument and clef; use Percussion map for drum kits").clicked() { self.replace_library_staff(); }
                                 if ui.button("Export phrase…").clicked() { self.export_audition(); }
                             });
                             ui.add_space(8.0);
@@ -2010,6 +3330,85 @@ impl EncoreApp {
                     });
                 });
         }
+        if let Some(path) = self.midi_import.clone() {
+            let mut open = true;
+            let mut import = false;
+            let mut cancel = false;
+            egui::Window::new("Import MIDI performance").open(&mut open).resizable(false).default_width(440.0).show(ctx,|ui| {
+                ui.label(path.file_name().unwrap_or_default().to_string_lossy());
+                ui.label("Choose how performance timing becomes written rhythm. Exact timing preserves the source; a rhythmic grid snaps notes to that precision.");
+                ui.radio_value(&mut self.midi_grid,None,"Exact timing · reject unsupported rhythms");
+                egui::ComboBox::from_label("Quantize to").selected_text(self.midi_grid.and_then(|grid|crate::midi_options::GRIDS.iter().find(|(_,_,ticks)|*ticks==grid).map(|(_,label,_)|*label)).unwrap_or("Choose a grid…")).show_ui(ui,|ui| {
+                    for (_,label,grid) in crate::midi_options::GRIDS {ui.selectable_value(&mut self.midi_grid,Some(*grid),*label);}
+                });
+                if self.midi_grid.is_some(){ui.label("Timing changes are listed in the import notes. Use MusicXML to retain written rhythms and articulation marks.");}
+                if let Some(error)=&self.midi_import_error {ui.separator();ui.label(error);}
+                ui.horizontal(|ui|{import=ui.button("Import").clicked();cancel=ui.button("Cancel").clicked();});
+            });
+            if cancel || !open {
+                self.midi_import = None;
+                self.midi_import_error = None;
+            } else if import {
+                let result = match self.midi_grid {
+                    Some(grid) => encore::import::load_midi_quantized(&path, grid),
+                    None => encore::import::load(&path),
+                };
+                match result {
+                    Ok(imported) => self.accept_import(path, imported),
+                    Err(error) => self.midi_import_error = Some(error),
+                }
+            }
+        }
+        if self.show_history {
+            let mut open = true;
+            let mut undo_count = 0;
+            let mut redo_count = 0;
+            egui::Window::new("Undo/Redo list")
+                .open(&mut open)
+                .default_width(380.0)
+                .show(ctx, |ui| {
+                    ui.label("Choose how many score changes to undo or redo.");
+                    egui::ScrollArea::vertical()
+                        .max_height(320.0)
+                        .show(ui, |ui| {
+                            for count in 1..=self.undo.len() {
+                                if ui
+                                    .button(format!(
+                                        "Undo {count} {}",
+                                        if count == 1 { "change" } else { "changes" }
+                                    ))
+                                    .clicked()
+                                {
+                                    undo_count = count;
+                                }
+                            }
+                            if !self.undo.is_empty() && !self.redo.is_empty() {
+                                ui.separator();
+                            }
+                            for count in 1..=self.redo.len() {
+                                if ui
+                                    .button(format!(
+                                        "Redo {count} {}",
+                                        if count == 1 { "change" } else { "changes" }
+                                    ))
+                                    .clicked()
+                                {
+                                    redo_count = count;
+                                }
+                            }
+                            if self.undo.is_empty() && self.redo.is_empty() {
+                                ui.label("No score changes yet.");
+                            }
+                        });
+                });
+            for _ in 0..undo_count {
+                self.undo();
+            }
+            for _ in 0..redo_count {
+                self.redo();
+            }
+            self.show_history = open && undo_count == 0 && redo_count == 0;
+        }
         if self.properties {
             let mut open = true;
             egui::Window::new("Score properties").open(&mut open).resizable(false).show(ctx,|ui| {
@@ -2020,14 +3419,14 @@ impl EncoreApp {
                     ui.label("Key signature"); egui::ComboBox::from_id_salt("key-signature").selected_text(key_name(self.score.key_fifths)).show_ui(ui,|ui|{for f in -7..=7{ui.selectable_value(&mut self.score.key_fifths,f,key_name(f));}}); ui.end_row();
                     ui.label("Time signature"); ui.horizontal(|ui| {
                         let previous=(self.score.time_numerator,self.score.time_denominator);
-                        ui.add(egui::DragValue::new(&mut self.score.time_numerator).range(1..=12)); ui.label("/");
-                        egui::ComboBox::from_id_salt("denominator").selected_text(self.score.time_denominator.to_string()).show_ui(ui,|ui|{for d in [2,4,8,16]{ui.selectable_value(&mut self.score.time_denominator,d,d.to_string());}});
+                        ui.add(egui::DragValue::new(&mut self.score.time_numerator).range(1..=32)); ui.label("/");
+                        egui::ComboBox::from_id_salt("denominator").selected_text(self.score.time_denominator.to_string()).show_ui(ui,|ui|{for d in [1,2,4,8,16,32,64,128]{ui.selectable_value(&mut self.score.time_denominator,d,d.to_string());}});
                         let limit=self.score.measure_ticks();
                         if self.score.parts.iter().any(|p|p.measures.iter().any(|m|m.notes.iter().any(|n|n.start+n.ticks()>limit))) { self.score.time_numerator=previous.0; self.score.time_denominator=previous.1; self.status="Existing notes extend past this time signature. Shorten those measures first.".into(); }
                     }); ui.end_row();
                 });
                 self.clamp_cursor();
-                ui.add_space(12.0); ui.label(RichText::new("All instruments use concert pitch. Key changes update the signature; existing pitches retain their spelling.").size(12.0).color(colors.muted));
+                ui.add_space(12.0); ui.label(RichText::new("The full score uses concert pitch. Linked parts use their written transposition. Key changes update the signature; existing pitches retain their spelling.").size(12.0).color(colors.muted));
                 if ui.button("Done").clicked(){self.properties=false;}
             });
             if !open {
@@ -2036,13 +3435,14 @@ impl EncoreApp {
         }
         egui::Window::new("Getting started with Encore").open(&mut self.help).default_width(520.0).show(ctx,|ui| {
             ui.heading("From an idea to a printed score"); ui.add_space(8.0);
-            for text in ["1. File → New score creates a piano grand staff. Add orchestral staves with + in Instruments.","2. Select Write, choose a duration (1–5), and click a staff. Shift-click an existing event to add a chord tone. R toggles rests; the dot button adds half the duration.","3. A–G enters notes at the cursor and advances it. Set the octave in Inspector. Click a blank staff in Select mode to move the cursor. Left/Right moves by the current duration.","4. Select a note to edit its duration, dynamics, tie, or articulation. Up/Down transposes by a semitone; Shift adds an octave. Delete removes the event. Ctrl+Z undoes.","5. Space plays or pauses the score; Escape stops. M and S mute or solo staves. Click piano keys to audition the active instrument; Shift-click enters a note.","6. Open MusicXML, MuseScore, or supported Finale .musx files with File → Open. Review import notes and save a new Encore project.","7. Save your .encore project, then export PDF for printing, SVG for vector art, MusicXML for notation interchange, MIDI for a sequencer, or WAV for audio."] { ui.label(text); ui.add_space(9.0); }
-            ui.separator(); ui.label("This version supports one rhythmic voice per staff, with chords and explicit or automatic rests. Add another staff for an independent voice. Instruments play concert pitch. Instrument library offers 128 SoundFont instruments, with searchable families and note or phrase auditions. Procedural mode provides optional approximations.");
+            for text in ["1. File → New score creates a piano grand staff. Add orchestral staves with + in Instruments.","2. Select Write, choose a duration (0–8; 5 is a quarter note), and click a staff. Shift-click an existing event to add a chord tone. Tab enters a rest; Alt+R toggles the rest tool. Period dots the selected entry; Shift+Period toggles dotted entry.","3. A–G enters notes at the cursor and advances it. Set the octave in Inspector. Click a blank staff in Select mode to move the cursor. Left/Right selects the previous or next entry.","4. Select a note to edit its duration, dynamics, tie, or articulation. In Simple Entry, Up/Down moves by a diatonic step; Shift adds an octave. Delete removes the event. Ctrl/Command+Z undoes.","5. Space plays or pauses the score; Escape stops. Use the M/S mixer buttons to mute or solo staves. Click piano keys to audition the active instrument; Shift-click enters a note.","6. Open MusicXML, MIDI, MuseScore, or supported Finale .musx files with File → Open. Review import notes and save a new Encore project.","7. Notation adds lyrics, phrase slurs, repeats and endings. Lyrics mode uses Space/hyphen to advance and underscore for word extensions. Slurs join two clicked notes, with editable curves.","8. Parts opens linked instrumental parts with written transposition and independent page formats. Edit a part to update the shared score. Notation → Manage linked parts also exports every part as PDF.","9. Save your .encore project, then export PDF for printing, SVG for vector art, MusicXML for notation interchange, MIDI for a sequencer, or WAV for audio."] { ui.label(text); ui.add_space(9.0); }
+            ui.separator(); ui.label("Four independent rhythmic layers can share each staff, with chords and explicit or automatic rests. Select the active layer in the notation toolbar. Playback uses concert pitches; linked part views show written pitches. Instrument library offers 128 SoundFont instruments, with searchable families and note or phrase auditions. Procedural mode provides optional approximations.");
         });
     }
 
     pub fn ui(&mut self, ctx: &egui::Context) {
         self.poll_worker();
+        self.poll_playback_range();
         self.skip_history = false;
         let before = self.score.clone();
         self.active_part = self
@@ -2071,14 +3471,53 @@ impl EncoreApp {
             self.keyboard_instrument = instrument;
             self.keyboard_base = keyboard_base_for(instrument);
         }
+        if let Some(s) = self.selected
+            && let Some(note) = self
+                .score
+                .parts
+                .get(s.part)
+                .and_then(|p| p.measures.get(s.measure))
+                .and_then(|m| m.notes.get(s.note))
+        {
+            self.active_layer = note.layer;
+            self.active_voice = note.voice;
+            self.active_voice_launch = note.voice_launch.map(|tick| encore::document::Anchor {
+                part: s.part,
+                measure: s.measure,
+                tick,
+                layer: note.layer,
+                voice: 0,
+            });
+        }
+        self.reconcile_part_staff();
+        self.reconcile_percussion_caret();
+        self.close_voiced_editors();
         self.keyboard(ctx);
         self.top(ctx);
         self.transport(ctx);
         self.instruments(ctx);
+        self.reconcile_part_staff();
+        self.close_voiced_editors();
         self.inspector(ctx);
         self.score_canvas(ctx);
         self.dialogs(ctx);
+        self.notation_dialog(ctx);
+        self.linked_parts_dialog(ctx);
+        self.expressions_window(ctx);
+        self.go_to_dialog(ctx);
+        self.playback_dialog(ctx);
+        self.layout_dialog(ctx);
+        self.region_tools_dialog(ctx);
+        self.entry_style_window(ctx);
+        self.grace_dialog(ctx);
+        self.lines_window(ctx);
+        self.ornaments_window(ctx);
+        self.percussion_window(ctx);
+        self.groups_window(ctx);
+        self.tremolos_window(ctx);
+        self.chord_dialog(ctx);
         self.instrument_lab(ctx);
+        self.protect_voiced_music(&before);
         if self.score != before && !self.skip_history {
             if self.rendering_audio
                 || self
@@ -2100,6 +3539,11 @@ impl EncoreApp {
         }
         if let Some(p) = self.audition_playback.as_mut() {
             p.set_volume(self.master);
+        }
+        if let Some((part, token)) = self.preview_percussion.take()
+            && let Some(staff) = self.score.parts.get(part).cloned()
+        {
+            self.audition_part(staff, token, self.lab_velocity, 0.9);
         }
         if let Some((instrument, midi)) = self.preview_sample.take() {
             self.audition(instrument, Some(midi), self.lab_velocity, 0.9);
@@ -2126,6 +3570,7 @@ impl EncoreApp {
 impl eframe::App for EncoreApp {
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         storage.set_string("encore.theme", self.theme.key().into());
+        storage.set_string("encore.entry-profile", self.entry_profile.key().into());
     }
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.ui(ctx);
@@ -2168,6 +3613,10 @@ fn apply_theme(ctx: &egui::Context, theme: Theme) {
     style.visuals.selection.bg_fill = colors.selected;
     style.visuals.selection.stroke.color = colors.accent;
     style.visuals.hyperlink_color = colors.accent;
+    if theme == Theme::Dark {
+        style.visuals.warn_fg_color = colors.accent;
+        style.visuals.error_fg_color = colors.text;
+    }
     style.visuals.slider_trailing_fill = true;
     style.visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0_f32, colors.border);
     for widget in [
@@ -2244,7 +3693,7 @@ fn configure_context(ctx: &egui::Context) {
     );
     fonts.families.insert(
         FontFamily::Name("score-serif".into()),
-        vec!["score-serif".into()],
+        vec!["score-serif".into(), "music-symbols".into()],
     );
     ctx.set_fonts(fonts);
 }
@@ -2282,7 +3731,8 @@ fn key_name(f: i8) -> &'static str {
 
 fn paint_page(painter: &egui::Painter, page: &Page, origin: Pos2, scale: f32) {
     let pos = |x: f32, y: f32| Pos2::new(origin.x + x * scale, origin.y + y * scale);
-    let color = |c: [u8; 3]| Color32::from_rgb(c[0], c[1], c[2]);
+    let dark = painter.ctx().style().visuals.dark_mode;
+    let color = |c| page_preview_color(c, dark);
     for item in &page.items {
         match item {
             Primitive::Line {
@@ -2340,10 +3790,27 @@ fn paint_page(painter: &egui::Painter, page: &Page, origin: Pos2, scale: f32) {
                     }
                     painter.add(egui::Shape::mesh(mesh));
                     if stroke.is_none() && *closed {
-                        painter.add(egui::Shape::closed_line(
-                            points.clone(),
-                            Stroke::new(0.35 * scale, color(*fill)),
-                        ));
+                        let middle = points.len() / 2;
+                        let ribbon = middle > 2
+                            && points.len().is_multiple_of(2)
+                            && points[0].distance_sq(points[points.len() - 1]) < 0.01
+                            && points[middle - 1].distance_sq(points[middle]) < 0.01;
+                        if ribbon {
+                            // Tapered phrase curves have two coincident tips.
+                            // Outline each side separately so an acute closing
+                            // join cannot form an antialiasing spike.
+                            for side in points.chunks(middle) {
+                                painter.add(egui::Shape::line(
+                                    side.to_vec(),
+                                    Stroke::new(0.4 * scale, color(*fill)),
+                                ));
+                            }
+                        } else {
+                            painter.add(egui::Shape::closed_line(
+                                points.clone(),
+                                Stroke::new(0.35 * scale, color(*fill)),
+                            ));
+                        }
                     }
                 }
                 if let Some(c) = stroke {
@@ -2378,6 +3845,19 @@ fn paint_page(painter: &egui::Painter, page: &Page, origin: Pos2, scale: f32) {
                 );
             }
         }
+    }
+}
+
+fn page_preview_color(color: [u8; 3], dark: bool) -> Color32 {
+    if dark {
+        // Keep selection and engraving neutral on the white score without
+        // changing colors in the document or exported files.
+        let gray =
+            (u32::from(color[0]) * 2126 + u32::from(color[1]) * 7152 + u32::from(color[2]) * 722)
+                / 10_000;
+        Color32::from_gray(gray as u8)
+    } else {
+        Color32::from_rgb(color[0], color[1], color[2])
     }
 }
 
