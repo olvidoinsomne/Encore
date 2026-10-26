@@ -1224,6 +1224,30 @@ fn key(key: egui::Key, pressed: bool, modifiers: egui::Modifiers) -> egui::Event
     }
 }
 
+fn command_modifiers() -> egui::Modifiers {
+    egui::Modifiers {
+        ctrl: !cfg!(target_os = "macos"),
+        mac_cmd: cfg!(target_os = "macos"),
+        command: true,
+        ..egui::Modifiers::NONE
+    }
+}
+
+fn redo_shortcut() -> (egui::Key, egui::Modifiers) {
+    let command = command_modifiers();
+    if cfg!(target_os = "macos") {
+        (
+            egui::Key::Z,
+            egui::Modifiers {
+                shift: true,
+                ..command
+            },
+        )
+    } else {
+        (egui::Key::Y, command)
+    }
+}
+
 #[test]
 fn keyboard_note_entry_undo_and_redo_are_recorded_by_real_ui_frames() {
     let ctx = egui::Context::default();
@@ -1244,11 +1268,7 @@ fn keyboard_note_entry_undo_and_redo_are_recorded_by_real_ui_frames() {
     assert!(app.dirty());
     assert_eq!(app.undo.len(), 1);
 
-    let command = egui::Modifiers {
-        ctrl: true,
-        command: true,
-        ..Default::default()
-    };
+    let command = command_modifiers();
     let _ = ctx.run(
         raw_input(
             2,
@@ -1262,14 +1282,15 @@ fn keyboard_note_entry_undo_and_redo_are_recorded_by_real_ui_frames() {
     );
     assert!(app.score.parts[0].measures[0].notes.is_empty());
     assert!(!app.dirty());
+    let (redo_key, redo_modifiers) = redo_shortcut();
     let _ = ctx.run(
         raw_input(
             3,
             vec![
                 key(egui::Key::Z, false, command),
-                key(egui::Key::Y, true, command),
+                key(redo_key, true, redo_modifiers),
             ],
-            command,
+            redo_modifiers,
         ),
         |ctx| app.ui(ctx),
     );
@@ -2282,11 +2303,7 @@ fn engraving_shortcuts_undo_and_layer_selection_follow_real_editor_frames() {
     });
     app.entry_pitch = Pitch::from_midi(61);
     let plain = egui::Modifiers::NONE;
-    let command = egui::Modifiers {
-        ctrl: true,
-        command: true,
-        ..plain
-    };
+    let command = command_modifiers();
     for (frame, events, mods) in [
         (0, vec![], plain),
         (1, vec![key(egui::Key::L, true, plain)], plain),
@@ -2334,7 +2351,9 @@ fn engraving_shortcuts_undo_and_layer_selection_follow_real_editor_frames() {
     assert_eq!(app.score.parts, score.parts);
     let layer_mod = egui::Modifiers {
         alt: true,
-        shift: true,
+        shift: !cfg!(target_os = "macos"),
+        mac_cmd: cfg!(target_os = "macos"),
+        command: cfg!(target_os = "macos"),
         ..plain
     };
     let _ = ctx.run(
@@ -2698,11 +2717,7 @@ fn speedy_voice_shortcut_enters_secondary_with_real_undo_redo_frames() {
         note: 0,
     });
     let plain = egui::Modifiers::NONE;
-    let command = egui::Modifiers {
-        ctrl: true,
-        command: true,
-        ..plain
-    };
+    let command = command_modifiers();
     let _ = ctx.run(raw_input(0, vec![], plain), |ctx| app.ui(ctx));
     let _ = ctx.run(
         raw_input(1, vec![key(egui::Key::Quote, true, plain)], plain),
@@ -2738,14 +2753,15 @@ fn speedy_voice_shortcut_enters_secondary_with_real_undo_redo_frames() {
         |ctx| app.ui(ctx),
     );
     assert_eq!(app.score, original);
+    let (redo_key, redo_modifiers) = redo_shortcut();
     let _ = ctx.run(
         raw_input(
             4,
             vec![
                 key(egui::Key::Z, false, command),
-                key(egui::Key::Y, true, command),
+                key(redo_key, true, redo_modifiers),
             ],
-            command,
+            redo_modifiers,
         ),
         |ctx| app.ui(ctx),
     );
