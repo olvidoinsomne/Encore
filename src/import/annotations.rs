@@ -545,7 +545,7 @@ impl Annotations {
         for raw in self.lyrics {
             let mut lyric = raw.value;
             lyric.anchor = resolve(&raw.at)?;
-            lyric.extend_to = raw.extend.as_ref().map(&resolve).transpose()?;
+            lyric.extend_to = raw.extend.as_ref().map(resolve).transpose()?;
             score.notation.lyrics.push(lyric);
         }
         for raw in self.slurs {
