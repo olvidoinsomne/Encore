@@ -1,45 +1,18 @@
-include:
-  - component: $CI_SERVER_FQDN/pipelines/pipeline-master/build@1.0.0
-    inputs:
-      stage: verify
-      strict: true
-
-stages: [verify, package]
-
-variables:
-  CARGO_HOME: "$CI_PROJECT_DIR/.cargo-ci"
-
-pm:rust:
-  script:
-    - pm_each pm_rust "$(pm_roots_rust)"
-    - pm_finish
-    - sh scripts/package-linux.sh
-  artifacts:
-    paths: [pm-artifacts/, dist/*.tar.gz]
-
-pm:rust:macos:
-  script:
-    - pm_each pm_rust "$(pm_roots_rust)"
-    - pm_finish
-    - sh scripts/package-macos.sh "$CARGO_TARGET_DIR/release/encore"
-  artifacts:
-    paths: [pm-artifacts/, dist/*.zip]
-
-windows:package:
-  stage: package
-  tags:
-    - windows
-    - encore-native
+# Operational branch: scheduled release synchronization only.
+# Normal Encore build CI remains on main. Do not merge this CI file to main.
+workflow:
   rules:
-    - when: manual
-      allow_failure: true
+    - if: '$CI_COMMIT_BRANCH == "codex/github-release-mirror" && $CI_PIPELINE_SOURCE == "schedule"'
+    - if: '$CI_COMMIT_BRANCH == "codex/github-release-mirror" && $CI_PIPELINE_SOURCE == "web"'
+    - when: never
+
+stages: [publish]
+
+github:releases:
+  stage: publish
+  tags: [windows, windows-11]
+  resource_group: github-release-mirror
+  timeout: 30 minutes
   script:
-    - cargo fmt --all -- --check
-    - cargo clippy --locked --all-targets -- -D warnings
-    - cargo test --locked --all-targets
-    - cargo build --release --locked
-    - pwsh -NoProfile -File scripts/package-windows.ps1
-  artifacts:
-    name: "Encore-windows-$CI_COMMIT_SHORT_SHA"
-    paths:
-      - dist/*.zip
+    - python -m unittest discover -s tests -p test_github_mirror.py
+    - python scripts/mirror-github-releases.py
