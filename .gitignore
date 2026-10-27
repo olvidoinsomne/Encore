@@ -6,3 +6,6 @@
 # This checkout's desktop shortcut contains an absolute local installation path.
 /Encore.desktop
 *.tmp
+
+# Python release mirror tests
+__pycache__/
